@@ -53,6 +53,14 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+app.get("/", (req, res) => {
+  res.send("MyCookbook AI backend is running ✅");
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 // ---------------- Simple in-memory AI rate limiting ----------------
 const AI_LIMITS = {
   PER_USER_HOURLY: 50, // 50 AI generations per hour per user/device
