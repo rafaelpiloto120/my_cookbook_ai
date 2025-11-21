@@ -8,11 +8,11 @@ import { useAuth } from "../../context/AuthContext";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
 import { sendPasswordResetEmail, GoogleAuthProvider, signInWithCredential } from "firebase/auth";
-// import * as WebBrowser from "expo-web-browser";
-// import * as Google from "expo-auth-session/providers/google";
+import * as WebBrowser from "expo-web-browser";
+import * as Google from "expo-auth-session/providers/google";
 import { auth } from "../../firebaseConfig";
 
-// WebBrowser.maybeCompleteAuthSession();
+WebBrowser.maybeCompleteAuthSession();
 
 // ---- Input hardening helpers ----
 const INVISIBLE_REGEX = /[\u200B-\u200D\uFEFF\u202E\u202D\u202A\u202B\u202C]/g; // zero-width & bidi controls
@@ -51,7 +51,7 @@ export default function SignInScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ mode?: string }>();
   const initialMode: AuthMode = params?.mode === "signup" ? "signup" : "signin";
-  const { login, signup, loginWithGoogle } = useAuth();
+  const { login, signup } = useAuth();
   const { bg, text, subText, card, border } = useThemeColors();
 
   const [email, setEmail] = useState("");
@@ -60,14 +60,49 @@ export default function SignInScreen() {
   useEffect(() => {
     setIsSignup(initialMode === "signup");
   }, [initialMode]);
+
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  // Google Auth: configure ID token flow for Android
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+  });
+
+  useEffect(() => {
+    const handleGoogleResponse = async () => {
+      if (!response || response.type !== "success") return;
+
+      const idToken = (response.params as any)?.id_token;
+      if (!idToken) {
+        Alert.alert(t("auth.error_title"), t("auth.google_not_configured"));
+        return;
+      }
+
+      try {
+        setGoogleLoading(true);
+        const credential = GoogleAuthProvider.credential(idToken);
+        await signInWithCredential(auth, credential);
+        Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
+        router.replace("/(tabs)/profile");
+      } catch (err: any) {
+        console.error("Google sign in error:", err);
+        const code = err?.code || "";
+        const message = getFriendlyAuthError(code, t);
+        Alert.alert(t("auth.error_title"), message);
+      } finally {
+        setGoogleLoading(false);
+      }
+    };
+
+    handleGoogleResponse();
+  }, [response]);
+
   const [loading, setLoading] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const { t } = useTranslation();
 
-  // Google Auth not configured: removed Google.useIdTokenAuthRequest
-
-  // Removed Google login effect (response?.type === "success")
+  // Google Sign-In not configured yet
 
   const handleForgotPassword = async () => {
     if (!email || !email.trim()) {
@@ -87,8 +122,6 @@ export default function SignInScreen() {
       Alert.alert(t("auth.reset_error_title"), err?.message || t("common.error_generic", { defaultValue: "Something went wrong" }));
     }
   };
-
-  // Google Sign-In not configured yet
 
   const handleAuth = async () => {
     if (!email || !password) {
@@ -121,10 +154,20 @@ export default function SignInScreen() {
   };
 
   const handleGoogleSignIn = async () => {
-    Alert.alert(
-      t("auth.error_title"),
-      t("auth.google_not_configured"),
-    );
+    if (!request) {
+      Alert.alert(
+        t("auth.error_title"),
+        t("auth.google_not_configured"),
+      );
+      return;
+    }
+    try {
+      setGoogleLoading(true);
+      await promptAsync();
+    } catch (err) {
+      console.error("Google prompt error:", err);
+      setGoogleLoading(false);
+    }
   };
 
   return (
@@ -226,12 +269,24 @@ export default function SignInScreen() {
             </View>
           </Modal>
 
-          <TouchableOpacity style={[styles.button, loading && { opacity: 0.6 }]} onPress={handleAuth} disabled={loading}>
+          <TouchableOpacity
+            style={[styles.button, (loading || googleLoading) && { opacity: 0.6 }]}
+            onPress={handleAuth}
+            disabled={loading || googleLoading}
+          >
             {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>{isSignup ? t("auth.signup_button") : t("auth.signin_button")}</Text>}
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.googleButton} onPress={handleGoogleSignIn}>
-            <Text style={styles.googleButtonText}>{t("auth.google_button")}</Text>
+          <TouchableOpacity
+            style={[styles.googleButton, (loading || googleLoading) && { opacity: 0.6 }]}
+            onPress={handleGoogleSignIn}
+            disabled={loading || googleLoading}
+          >
+            {googleLoading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.googleButtonText}>{t("auth.google_button")}</Text>
+            )}
           </TouchableOpacity>
 
           <TouchableOpacity onPress={() => setIsSignup(!isSignup)} disabled={loading}>
