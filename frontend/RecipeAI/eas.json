@@ -14,14 +14,14 @@
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com",
         "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "742340260619-3f1g5onm3n7a2rlg31cfnctv1fv29o1p.apps.googleusercontent.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com",
         "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "742340260619-3f1g5onm3n7a2rlg31cfnctv1fv29o1p.apps.googleusercontent.com"
       }
     }
