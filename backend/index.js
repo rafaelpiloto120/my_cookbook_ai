@@ -45,7 +45,6 @@ import admin from "firebase-admin";
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import nodemailer from "nodemailer";
 
 
 const app = express();
@@ -1510,6 +1509,8 @@ app.post("/exportRecipePdf", (req, res) => {
 });
 
 // Simple contact support endpoint (used by in-app support form)
+const RESEND_API_KEY = process.env.RESEND_API_KEY || process.env.SMTP_PASS;
+
 async function handleContactSupport(req, res) {
   try {
     // Accept both `fromEmail` (preferred) and fallback `email` from the body
@@ -1543,55 +1544,47 @@ async function handleContactSupport(req, res) {
       return res.status(400).json({ error: "Invalid email address" });
     }
 
-    const toAddress = process.env.SUPPORT_EMAIL || "info@rafaelpiloto.com";
-
-    // Lazily create and cache a Nodemailer transporter
-    if (!global._supportTransporter) {
-      const host = process.env.SMTP_HOST;
-      const port = Number(process.env.SMTP_PORT || 587);
-      const secure = String(process.env.SMTP_SECURE || "false") === "true";
-      const user = process.env.SMTP_USER;
-      const pass = process.env.SMTP_PASS;
-
-      if (!host || !user || !pass) {
-        console.error("❌ SMTP is not fully configured. Missing SMTP_HOST / SMTP_USER / SMTP_PASS.");
-        return res.status(500).json({ error: "Email service not configured" });
-      }
-
-      console.log("[contact-support] Creating SMTP transporter", {
-        host,
-        port,
-        secure,
-        user,
-      });
-
-      global._supportTransporter = nodemailer.createTransport({
-        host,
-        port,
-        secure,
-        auth: { user, pass },
-      });
-
-      try {
-        await global._supportTransporter.verify();
-        console.log("[contact-support] SMTP transporter verified successfully");
-      } catch (verifyErr) {
-        console.error("❌ [contact-support] SMTP verification failed:", verifyErr?.message || verifyErr);
-        return res.status(500).json({ error: "Email service not available" });
-      }
+    if (!RESEND_API_KEY) {
+      console.error("❌ RESEND_API_KEY is not configured.");
+      return res.status(500).json({ error: "Email service not configured" });
     }
 
-    const transporter = global._supportTransporter;
+    const toAddress = process.env.SUPPORT_EMAIL || "info@rafaelpiloto.com";
+    const fromAddress = process.env.SMTP_FROM || "MyCookbook AI Support <no-reply@rafaelpiloto.com>";
 
-        await transporter.sendMail({
-      from: process.env.SMTP_FROM || `"RecipeAI Support" <${process.env.SMTP_USER}>`,
+    const payload = {
+      from: fromAddress,
       to: toAddress,
-      replyTo: trimmedEmail,
-      subject: `[RecipeAI Support] ${trimmedSubject}`,
-      text: `Support message from: ${trimmedEmail}\n\nSubject: ${trimmedSubject}\n\nMessage:\n${trimmedMessage}`,
+      subject: `[MyCookbook AI Support] ${trimmedSubject}`,
+      reply_to: trimmedEmail,
+      text: [
+        `Support message from: ${trimmedEmail}`,
+        "",
+        `Subject: ${trimmedSubject}`,
+        "",
+        "Message:",
+        trimmedMessage,
+      ].join("\n"),
+    };
+
+    console.log("[contact-support] Sending email via Resend API to:", toAddress);
+
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     });
 
-    console.log("[contact-support] Email sent successfully");
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "<no body>");
+      console.error("[contact-support] Resend API error:", response.status, errorText);
+      return res.status(500).json({ error: "Failed to send support message" });
+    }
+
+    console.log("[contact-support] Email sent successfully via Resend HTTP API");
 
     // Analytics: contact support message sent
     const ctx = getEventContext(req);
