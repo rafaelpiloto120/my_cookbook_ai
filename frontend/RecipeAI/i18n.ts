@@ -195,6 +195,8 @@ const resources = {
         error_email_in_use: "This email is already in use by another account.",
         error_weak_password: "Your password is too weak. Please use a stronger one.",
         error_missing_password: "Please enter your password.",
+        show_password: "Show",
+        hide_password: "Hide",
       },
       meal: {
         breakfast: "Breakfast",
@@ -574,6 +576,8 @@ const resources = {
         error_email_in_use: "Este correo ya está en uso por otra cuenta.",
         error_weak_password: "Tu contraseña es muy débil. Usa una más segura.",
         error_missing_password: "Introduce tu contraseña.",
+        show_password: "Mostrar",
+        hide_password: "Ocultar",
       },
       meal: {
         breakfast: "Desayuno",
@@ -919,6 +923,8 @@ const resources = {
         error_email_in_use: "Este email já está a ser utilizado por outra conta.",
         error_weak_password: "A sua palavra-passe é fraca. Utilize uma mais forte.",
         error_missing_password: "Introduza a sua palavra-passe.",
+        show_password: "Mostrar",
+        hide_password: "Ocultar",
       },
       meal: {
         breakfast: "Pequeno-almoço",
@@ -1264,6 +1270,8 @@ const resources = {
         error_email_in_use: "Este e-mail já está em uso por outra conta.",
         error_weak_password: "Sua senha é muito fraca. Use uma mais forte.",
         error_missing_password: "Digite sua senha.",
+        show_password: "Mostrar",
+        hide_password: "Ocultar",
       },
       meal: {
         breakfast: "Café da manhã",
@@ -1575,6 +1583,8 @@ const resources = {
         error_email_in_use: "Cet e-mail est déjà utilisé par un autre compte.",
         error_weak_password: "Votre mot de passe est trop faible. Utilisez-en un plus robuste.",
         error_missing_password: "Veuillez saisir votre mot de passe.",
+        show_password: "Afficher",
+        hide_password: "Masquer",
       },
       meal: {
         breakfast: "Petit-déjeuner",
@@ -1886,6 +1896,8 @@ const resources = {
         error_email_in_use: "Diese E-Mail wird bereits von einem anderen Konto verwendet.",
         error_weak_password: "Ihr Passwort ist zu schwach. Bitte verwenden Sie ein stärkeres.",
         error_missing_password: "Bitte geben Sie Ihr Passwort ein.",
+        show_password: "Anzeigen",
+        hide_password: "Ausblenden",
       },
       meal: {
         breakfast: "Frühstück",

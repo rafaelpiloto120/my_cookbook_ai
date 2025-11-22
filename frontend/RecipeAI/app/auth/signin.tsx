@@ -11,7 +11,6 @@ import { sendPasswordResetEmail, GoogleAuthProvider, signInWithCredential } from
 import { auth } from "../../firebaseConfig";
 import * as WebBrowser from "expo-web-browser";
 import * as Google from "expo-auth-session/providers/google";
-import * as AuthSession from "expo-auth-session";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -57,6 +56,7 @@ export default function SignInScreen() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [isSignup, setIsSignup] = useState(initialMode === "signup");
   useEffect(() => {
     setIsSignup(initialMode === "signup");
@@ -68,18 +68,13 @@ export default function SignInScreen() {
   const [resetEmail, setResetEmail] = useState("");
   const { t } = useTranslation();
 
-  // Google Auth: configure ID token flow using Web OAuth client via Expo proxy
-  const [request, response, promptAsync] = Google.useIdTokenAuthRequest(
-    {
-      clientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
-    },
-    {
-      useProxy: true,
-      redirectUri: AuthSession.makeRedirectUri({
-        useProxy: true,
-      }),
-    }
-  );
+  // Google Auth: configure ID token flow using native Android/Web OAuth clients
+  const [request, response, promptAsync] = Google.useAuthRequest({
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    responseType: "id_token",
+    scopes: ["openid", "email", "profile"],
+  });
 
   useEffect(() => {
     const handleGoogleResponse = async () => {
@@ -205,20 +200,31 @@ export default function SignInScreen() {
             onChangeText={(v) => setEmail(sanitizeEmailInput(v))}
             editable={!loading && !googleLoading}
           />
-          <TextInput
-            style={[styles.input, { borderColor: border, color: text, backgroundColor: card }]}
-            placeholder={t("auth.password_placeholder")}
-            placeholderTextColor={subText}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            textContentType="password"
-            autoComplete="password"
-            maxLength={256}
-            value={password}
-            onChangeText={(v) => setPassword(sanitizePasswordInput(v))}
-            editable={!loading && !googleLoading}
-          />
+          <View style={styles.passwordContainer}>
+            <TextInput
+              style={[styles.input, styles.passwordInput, { borderColor: border, color: text, backgroundColor: card }]}
+              placeholder={t("auth.password_placeholder")}
+              placeholderTextColor={subText}
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="password"
+              autoComplete="password"
+              maxLength={256}
+              value={password}
+              onChangeText={(v) => setPassword(sanitizePasswordInput(v))}
+              editable={!loading && !googleLoading}
+            />
+            <TouchableOpacity
+              onPress={() => setShowPassword((prev) => !prev)}
+              style={styles.passwordToggle}
+              disabled={loading || googleLoading}
+            >
+              <Text style={{ color: subText, fontWeight: "600" }}>
+                {showPassword ? t("auth.hide_password") : t("auth.show_password")}
+              </Text>
+            </TouchableOpacity>
+          </View>
           <View style={{ width: "100%", alignItems: "flex-end", marginBottom: 8 }}>
             <TouchableOpacity onPress={handleForgotPassword} disabled={loading || googleLoading}>
               <Text style={{ color: "#E27D60", fontWeight: "600" }}>{t("auth.forgot_password_link")}</Text>
@@ -319,6 +325,21 @@ const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
   title: { fontSize: 24, fontWeight: "bold", marginBottom: 24, color: "#293a53" },
   input: { width: "100%", borderWidth: 1, borderColor: "#ccc", borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 16 },
+  passwordContainer: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  passwordInput: {
+    flex: 1,
+    marginBottom: 0, // override input's marginBottom so the container controls spacing
+  },
+  passwordToggle: {
+    marginLeft: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
   button: {
     width: "100%",
     backgroundColor: "#E27D60",

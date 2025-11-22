@@ -229,7 +229,7 @@ export default function Profile() {
     }
   }
 
-    // Optionally compress large images on the client before uploading
+  // Optionally compress large images on the client before uploading
   async function compressImageIfNeeded(uri: string): Promise<string> {
     try {
       const info = await FileSystem.getInfoAsync(uri);
@@ -1211,10 +1211,10 @@ export default function Profile() {
   const normalizedFaqQuery = faqSearchQuery.trim().toLowerCase();
   const visibleFaqItems = normalizedFaqQuery
     ? faqItems.filter((item) => {
-        const q = item.question.toLowerCase();
-        const a = item.answer.toLowerCase();
-        return q.includes(normalizedFaqQuery) || a.includes(normalizedFaqQuery);
-      })
+      const q = item.question.toLowerCase();
+      const a = item.answer.toLowerCase();
+      return q.includes(normalizedFaqQuery) || a.includes(normalizedFaqQuery);
+    })
     : faqItems;
 
   return (
@@ -2196,10 +2196,11 @@ export default function Profile() {
           >
             <KeyboardAvoidingView
               style={{ flex: 1, justifyContent: "flex-end" }}
-              behavior={Platform.OS === "ios" ? "padding" : undefined}
-              keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 40}
+              behavior={Platform.OS === "ios" ? "padding" : "height"}
+              keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 20}
             >
-              <View
+              <KeyboardAvoidingView
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
                 style={[
                   styles.modalContent,
                   { backgroundColor: card, maxHeight: "80%" },
@@ -2350,7 +2351,7 @@ export default function Profile() {
                     </Text>
                   </Pressable>
                 </View>
-              </View>
+              </KeyboardAvoidingView>
             </KeyboardAvoidingView>
           </Pressable>
         </Modal>
