@@ -8,9 +8,10 @@ import { useAuth } from "../../context/AuthContext";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
 import { sendPasswordResetEmail, GoogleAuthProvider, signInWithCredential } from "firebase/auth";
+import { auth } from "../../firebaseConfig";
 import * as WebBrowser from "expo-web-browser";
 import * as Google from "expo-auth-session/providers/google";
-import { auth } from "../../firebaseConfig";
+import * as AuthSession from "expo-auth-session";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -61,12 +62,24 @@ export default function SignInScreen() {
     setIsSignup(initialMode === "signup");
   }, [initialMode]);
 
+  const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const { t } = useTranslation();
 
-  // Google Auth: configure ID token flow for Android
-  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
-    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
-  });
+  // Google Auth: configure ID token flow using Web OAuth client via Expo proxy
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest(
+    {
+      clientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    },
+    {
+      useProxy: true,
+      redirectUri: AuthSession.makeRedirectUri({
+        useProxy: true,
+      }),
+    }
+  );
 
   useEffect(() => {
     const handleGoogleResponse = async () => {
@@ -85,7 +98,7 @@ export default function SignInScreen() {
         Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
         router.replace("/(tabs)/profile");
       } catch (err: any) {
-        console.error("Google sign in error:", err);
+        console.error("Google sign in error:", err?.code, err?.message || err);
         const code = err?.code || "";
         const message = getFriendlyAuthError(code, t);
         Alert.alert(t("auth.error_title"), message);
@@ -95,14 +108,7 @@ export default function SignInScreen() {
     };
 
     handleGoogleResponse();
-  }, [response]);
-
-  const [loading, setLoading] = useState(false);
-  const [showResetModal, setShowResetModal] = useState(false);
-  const [resetEmail, setResetEmail] = useState("");
-  const { t } = useTranslation();
-
-  // Google Sign-In not configured yet
+  }, [response, router, t]);
 
   const handleForgotPassword = async () => {
     if (!email || !email.trim()) {
@@ -145,6 +151,7 @@ export default function SignInScreen() {
       }
       router.replace("/(tabs)/profile");
     } catch (err: any) {
+      console.log("🔥 Auth error", err?.code, err?.message);
       const code = err?.code || "";
       const message = getFriendlyAuthError(code, t);
       Alert.alert(t("auth.error_title"), message);
@@ -196,7 +203,7 @@ export default function SignInScreen() {
             maxLength={254}
             value={email}
             onChangeText={(v) => setEmail(sanitizeEmailInput(v))}
-            editable={!loading}
+            editable={!loading && !googleLoading}
           />
           <TextInput
             style={[styles.input, { borderColor: border, color: text, backgroundColor: card }]}
@@ -210,10 +217,10 @@ export default function SignInScreen() {
             maxLength={256}
             value={password}
             onChangeText={(v) => setPassword(sanitizePasswordInput(v))}
-            editable={!loading}
+            editable={!loading && !googleLoading}
           />
           <View style={{ width: "100%", alignItems: "flex-end", marginBottom: 8 }}>
-            <TouchableOpacity onPress={handleForgotPassword} disabled={loading}>
+            <TouchableOpacity onPress={handleForgotPassword} disabled={loading || googleLoading}>
               <Text style={{ color: "#E27D60", fontWeight: "600" }}>{t("auth.forgot_password_link")}</Text>
             </TouchableOpacity>
           </View>
@@ -234,13 +241,13 @@ export default function SignInScreen() {
                   maxLength={254}
                   value={resetEmail}
                   onChangeText={(v) => setResetEmail(sanitizeEmailInput(v))}
-                  editable={!loading}
+                  editable={!loading && !googleLoading}
                 />
                 <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
                   <TouchableOpacity
                     onPress={() => setShowResetModal(false)}
                     style={{ paddingVertical: 10, paddingHorizontal: 12, marginRight: 8 }}
-                    disabled={loading}
+                    disabled={loading || googleLoading}
                   >
                     <Text style={{ color: text, fontWeight: "600" }}>{t("common.cancel")}</Text>
                   </TouchableOpacity>
@@ -260,7 +267,7 @@ export default function SignInScreen() {
                       }
                     }}
                     style={{ paddingVertical: 10, paddingHorizontal: 12 }}
-                    disabled={loading}
+                    disabled={loading || googleLoading}
                   >
                     <Text style={{ color: "#E27D60", fontWeight: "700" }}>{t("common.confirm")}</Text>
                   </TouchableOpacity>
@@ -289,7 +296,7 @@ export default function SignInScreen() {
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => setIsSignup(!isSignup)} disabled={loading}>
+          <TouchableOpacity onPress={() => setIsSignup(!isSignup)} disabled={loading || googleLoading}>
             <Text style={[styles.switchText, { color: text }]}>
               {isSignup ? (
                 <>
