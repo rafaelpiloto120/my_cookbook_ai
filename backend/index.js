@@ -206,25 +206,69 @@ function getEventContext(req) {
 
 
 /**
- * Append a JSON line into analytics log file.
- * Example line:
+ * Track analytics events.
+ * In production, events can be stored in Firestore by setting ANALYTICS_USE_FIRESTORE=1.
+ * Otherwise (or if Firestore is unavailable), they are appended to a local log file.
+ *
+ * Example event shape:
  * { "ts": "...", "eventType": "ai_recipe_generated", "userId": "...", "deviceId": "...", "metadata": {...} }
  */
-function trackEvent(eventType, { userId = null, deviceId = null, metadata = null } = {}) {
+function trackEvent(
+  eventType,
+  { userId = null, deviceId = null, metadata = null } = {}
+) {
   try {
-    const line = JSON.stringify({
+    const payload = {
       ts: new Date().toISOString(),
       eventType,
       userId,
       deviceId,
       metadata,
-    }) + "\n";
+    };
 
-    fs.appendFile(ANALYTICS_LOG_PATH, line, (err) => {
-      if (err) {
-        console.error("❌ Failed to write analytics event:", err.message || err);
+    const useFirestore =
+      process.env.ANALYTICS_USE_FIRESTORE === "1" ||
+      process.env.ANALYTICS_USE_FIRESTORE === "true";
+
+    // Prefer Firestore when explicitly enabled and Firebase Admin is initialized
+    if (useFirestore && admin && Array.isArray(admin.apps) && admin.apps.length > 0) {
+      try {
+        const db = admin.firestore();
+        db.collection("analytics_events")
+          .add(payload)
+          .catch((err) => {
+            console.error(
+              "❌ Failed to write analytics event to Firestore:",
+              err?.message || err
+            );
+          });
+      } catch (err) {
+        console.error(
+          "❌ Analytics Firestore error, falling back to file:",
+          err?.message || err
+        );
+        const line = JSON.stringify(payload) + "\n";
+        fs.appendFile(ANALYTICS_LOG_PATH, line, (fileErr) => {
+          if (fileErr) {
+            console.error(
+              "❌ Failed to write analytics event to file:",
+              fileErr.message || fileErr
+            );
+          }
+        });
       }
-    });
+    } else {
+      // Default: local file-based logging (useful for local dev)
+      const line = JSON.stringify(payload) + "\n";
+      fs.appendFile(ANALYTICS_LOG_PATH, line, (err) => {
+        if (err) {
+          console.error(
+            "❌ Failed to write analytics event to file:",
+            err.message || err
+          );
+        }
+      });
+    }
   } catch (err) {
     console.error("❌ Analytics error:", err.message || err);
   }
