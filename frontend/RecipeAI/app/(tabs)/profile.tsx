@@ -1232,7 +1232,7 @@ export default function Profile() {
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
           <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.authentication")}</Text>
 
-          {!user ? (
+          {(!user || isAnon) ? (
             <View>
               <TouchableOpacity
                 style={[styles.row, { borderBottomColor: "transparent" }]}
@@ -1245,84 +1245,6 @@ export default function Profile() {
               <Text style={{ fontSize: 13, color: subText, marginTop: 6 }}>
                 {t("profile.signin_explainer")}
               </Text>
-            </View>
-          ) : isAnon ? (
-            <View>
-              {/* Guest (anonymous) session UI */}
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "flex-start",
-                  paddingVertical: 16,
-                  borderBottomWidth: StyleSheet.hairlineWidth,
-                  borderBottomColor: border,
-                }}
-              >
-                {(auth.currentUser?.photoURL || localPhotoUri) ? (
-                  <View
-                    style={{
-                      width: 56,
-                      height: 56,
-                      borderRadius: 28,
-                      overflow: "hidden",
-                      backgroundColor: "#ddd",
-                      justifyContent: "center",
-                      alignItems: "center",
-                    }}
-                  >
-                    <Image
-                      source={{ uri: (auth.currentUser?.photoURL || localPhotoUri) as string }}
-                      style={{ width: 56, height: 56, borderRadius: 28 }}
-                      resizeMode="cover"
-                    />
-                  </View>
-                ) : (
-                  <MaterialIcons name="account-circle" size={56} color={text} />
-                )}
-                <View style={{ marginLeft: 16 }}>
-                  <Text style={{ color: text, fontWeight: "600", fontSize: 18 }}>
-                    {t("profile.guest_session_title") || "Guest session"}
-                  </Text>
-                  <Text style={{ color: subText, fontSize: 13, marginTop: 2 }}>
-                    {t("profile.guest_session_explainer") || "You're using a temporary guest account. Create an account to keep your uploads and preferences."}
-                  </Text>
-                </View>
-              </View>
-
-              {/* CTAs for upgrading or signing in */}
-              <TouchableOpacity
-                style={[styles.row, { borderBottomColor: border }]}
-                activeOpacity={0.7}
-                onPress={() => router.push("/auth/signup")}
-              >
-                <MaterialIcons name="person-add" size={22} color={text} />
-                <Text style={[styles.rowText, { color: text }]}>
-                  {t("profile.create_account") || "Create account"}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.row, { borderBottomColor: border }]}
-                activeOpacity={0.7}
-                onPress={() => router.push("/auth/signin")}
-              >
-                <MaterialIcons name="login" size={22} color={text} />
-                <Text style={[styles.rowText, { color: text }]}>
-                  {t("profile.sign_in_instead") || "Sign in instead"}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.row, { borderBottomColor: "transparent" }]}
-                activeOpacity={0.7}
-                onPress={logout}
-              >
-                <MaterialIcons name="logout" size={22} color={text} />
-                <Text style={[styles.rowText, { color: text }]}>
-                  {t("profile.end_guest_session") || "End guest session"}
-                </Text>
-              </TouchableOpacity>
             </View>
           ) : (
             <View>
