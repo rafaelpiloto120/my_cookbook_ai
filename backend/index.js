@@ -41,6 +41,7 @@ import he from "he";
 import fs from "fs";
 
 import admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
@@ -231,9 +232,15 @@ function trackEvent(
       process.env.ANALYTICS_USE_FIRESTORE === "true";
 
     // Prefer Firestore when explicitly enabled and Firebase Admin is initialized
-    if (useFirestore && admin && Array.isArray(admin.apps) && admin.apps.length > 0) {
+    if (
+      useFirestore &&
+      _adminInitialized &&
+      admin &&
+      Array.isArray(admin.apps) &&
+      admin.apps.length > 0
+    ) {
       try {
-        const db = admin.firestore();
+        const db = getFirestore(undefined, FIRESTORE_DB_ID);
         db.collection(ANALYTICS_COLLECTION)
           .add(payload)
           .catch((err) => {
@@ -372,6 +379,8 @@ const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "recipeai-frontend";
 const BUCKET_NAME = process.env.FIREBASE_STORAGE_BUCKET || `${PROJECT_ID}.appspot.com`;
 const ANALYTICS_COLLECTION =
   process.env.FIREBASE_ANALYTICS_COLLECTION || "analyticsEvents";
+const FIRESTORE_DB_ID =
+  process.env.FIREBASE_DATABASE_ID || "(default)";
 
 let _adminInitialized = false;
 if (!admin.apps.length) {
@@ -398,6 +407,7 @@ if (!admin.apps.length) {
     console.log("✅ Firebase Admin initialized (Storage)");
     console.log("   Using project:", PROJECT_ID);
     console.log("   Using bucket :", BUCKET_NAME);
+    console.log("   Firestore DB :", FIRESTORE_DB_ID);
   } catch (e) {
     console.error("❌ Failed to initialize Firebase Admin:", e?.message || e);
   }
