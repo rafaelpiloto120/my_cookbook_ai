@@ -40,6 +40,7 @@ interface Recipe {
   tags: string[];
   createdAt: string;
   image?: string;
+  imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
 }
 
@@ -59,8 +60,34 @@ const defaultCookbookImagesById: Record<string, string> = {
 };
 
 // These will be assigned after t is available
+
 let difficultyMap: Record<string, string>;
 let costMap: Record<string, string>;
+
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+
+async function trackAnalyticsEvent(
+  eventType: string,
+  payload: Record<string, any> = {}
+) {
+  if (!API_BASE_URL) return;
+  try {
+    await fetch(`${API_BASE_URL}/analytics/track/simple`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        eventType,
+        ...payload,
+      }),
+    });
+  } catch (err) {
+    if (__DEV__) {
+      console.warn("[Analytics] Failed to send event", eventType, err);
+    }
+  }
+}
 
 export default function History() {
   const params = useLocalSearchParams<{ tab?: string }>();
@@ -144,13 +171,19 @@ export default function History() {
         parsed = parsed.sort(
           (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
-        // Sanitize each recipe's image property
-        parsed = parsed.map((recipe) => {
+        // Normalize each recipe's image property, also supporting legacy keys like imageUrl
+        parsed = parsed.map((recipe: any) => {
+          // Prefer canonical "image", but fall back to "imageUrl" if needed
           let image = recipe.image;
-          // check if image is a non-empty string and looks like a URL
-          if (typeof image !== "string" || !/^https?:\/\/.+/i.test(image)) {
+          if ((!image || typeof image !== "string") && typeof recipe.imageUrl === "string") {
+            image = recipe.imageUrl;
+          }
+
+          // Only keep image if it's a non-empty string; we don't enforce URL shape here
+          if (typeof image !== "string" || !image.trim()) {
             image = null;
           }
+
           return { ...recipe, image };
         });
       }
@@ -240,6 +273,10 @@ export default function History() {
 
     setCookbooks(updated);
     await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+    trackAnalyticsEvent("cookbook_created", {
+      cookbookId: newBook.id,
+      cookbookName: newBook.name,
+    });
 
     setNewCookbookName("");
     setNewCookbookVisible(false);
@@ -263,10 +300,16 @@ export default function History() {
       updated = updated.sort((a,b)=>new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       setRecipes(updated);
       await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+      trackAnalyticsEvent("manual_recipe_deleted", {
+        recipeId: deleteTarget.id,
+      });
     } else {
       const updated = cookbooks.filter(c => c.id !== deleteTarget.id);
       setCookbooks(updated);
       await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+      trackAnalyticsEvent("cookbook_deleted", {
+        cookbookId: deleteTarget.id,
+      });
     }
     setDeleteTarget(null);
   };

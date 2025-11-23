@@ -15,6 +15,8 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useThemeColors } from "../../../context/ThemeContext";
+import { getAuth } from "firebase/auth";
+import { getDeviceId } from "../../../utils/deviceId";
 import AppCard from "../../../components/AppCard";
 import { MaterialIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
@@ -43,6 +45,7 @@ interface Cookbook {
 
 export default function RecipeDetail() {
   const insets = useSafeAreaInsets();
+  const auth = getAuth();
   const { id, recipe, from } = useLocalSearchParams<{ id?: string; recipe?: string; from?: string }>();
   const [currentRecipe, setCurrentRecipe] = useState<Recipe | null>(null);
   const [servings, setServings] = useState<number>(1);
@@ -199,6 +202,53 @@ export default function RecipeDetail() {
           const arr: Recipe[] = stored ? JSON.parse(stored) : [];
           const updated = arr.filter((r) => r.id !== currentRecipe.id);
           await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+
+          // 🔹 Analytics: manual recipe deleted (reuses /analytics-event)
+          try {
+            const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+            if (backendUrl && currentRecipe) {
+              const currentUser = auth.currentUser;
+              const userId = currentUser?.uid ?? null;
+
+              let deviceId: string | null = null;
+              try {
+                deviceId = await getDeviceId();
+              } catch (e) {
+                console.warn("[RecipeDetail] getDeviceId failed for delete analytics", e);
+              }
+
+              const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (deviceId) headers["x-device-id"] = deviceId;
+              if (userId) headers["x-user-id"] = userId;
+
+              fetch(`${backendUrl}/analytics-event`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  eventType: "manual_recipe_deleted",
+                  userId,
+                  deviceId,
+                  metadata: {
+                    source: "recipe_detail",
+                    recipeId: currentRecipe.id,
+                    title: currentRecipe.title,
+                    hasImage: !!currentRecipe.image,
+                    ingredientsCount: currentRecipe.ingredients.length,
+                    stepsCount: currentRecipe.steps.length,
+                    tagsCount: currentRecipe.tags.length,
+                    cookbooksCount: currentRecipe.cookbooks ? currentRecipe.cookbooks.length : 0,
+                  },
+                }),
+              }).catch((err) => {
+                console.warn("[RecipeDetail] analytics-event fetch failed", err);
+              });
+            }
+          } catch (e) {
+            console.warn("[RecipeDetail] analytics logging failed", e);
+          }
+
           router.back();
         },
       },

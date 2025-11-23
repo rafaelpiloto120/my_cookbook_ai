@@ -53,11 +53,23 @@ export default function TabLayout() {
         const auth = getAuth();
         const currentUser = auth.currentUser;
         const userId = currentUser?.uid ?? null;
-        const deviceId = await getDeviceId();
 
-        await fetch(`${backendUrl}/analytics`, {
+        let deviceId: string | null = null;
+        try {
+          deviceId = await getDeviceId();
+        } catch (err) {
+          console.warn("[Analytics] getDeviceId failed for app_open", err);
+        }
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (deviceId) headers["x-device-id"] = deviceId;
+        if (userId) headers["x-user-id"] = userId;
+
+        await fetch(`${backendUrl}/analytics-event`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({
             eventType: "app_open",
             userId,
