@@ -234,7 +234,7 @@ function trackEvent(
     if (useFirestore && admin && Array.isArray(admin.apps) && admin.apps.length > 0) {
       try {
         const db = admin.firestore();
-        db.collection("analytics_events")
+        db.collection(ANALYTICS_COLLECTION)
           .add(payload)
           .catch((err) => {
             console.error(
@@ -370,6 +370,8 @@ function checkUploadRateLimit(key) {
 // - FIREBASE_PROJECT_ID       (e.g. "recipeai-frontend")
 const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "recipeai-frontend";
 const BUCKET_NAME = process.env.FIREBASE_STORAGE_BUCKET || `${PROJECT_ID}.appspot.com`;
+const ANALYTICS_COLLECTION =
+  process.env.FIREBASE_ANALYTICS_COLLECTION || "analyticsEvents";
 
 let _adminInitialized = false;
 if (!admin.apps.length) {
@@ -468,7 +470,7 @@ app.get("/debug/creds", async (req, res) => {
         const svc = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
         saProjectId = svc.project_id || null;
         saClientEmail = svc.client_email || null;
-      } catch {}
+      } catch { }
     } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       try {
         const fs = await import("fs");
@@ -479,7 +481,7 @@ app.get("/debug/creds", async (req, res) => {
           saProjectId = json.project_id || null;
           saClientEmail = json.client_email || null;
         }
-      } catch {}
+      } catch { }
     }
 
     res.json({
@@ -1057,15 +1059,15 @@ function validateRecipe(raw, mealType) {
         : "Untitled Recipe",
     cookingTime:
       typeof raw.cookingTime === "number" &&
-      raw.cookingTime > 0 &&
-      raw.cookingTime <= 180
+        raw.cookingTime > 0 &&
+        raw.cookingTime <= 180
         ? raw.cookingTime
         : 30,
     difficulty,
     servings:
       typeof raw.servings === "number" &&
-      raw.servings > 0 &&
-      raw.servings <= 999
+        raw.servings > 0 &&
+        raw.servings <= 999
         ? raw.servings
         : 2,
     cost: ["Cheap", "Medium", "Expensive"].includes(raw.cost)
@@ -1209,7 +1211,7 @@ IMPORTANT: All text in every field must be written entirely in the target langua
       ensureLanguage(descriptions, language),
       ensureLanguage(ids, language),
     ]);
-        suggestions = suggestions.map((s, idx) => ({
+    suggestions = suggestions.map((s, idx) => ({
       ...s,
       id: translatedIds[idx] || s.id,
       title: translatedTitles[idx] || s.title,
@@ -1465,7 +1467,7 @@ IMPORTANT: All text in every field must be written entirely in the target langua
     if (!Array.isArray(finalTags) || !finalTags.length) {
       finalTags = tags.slice(0, 5);
     }
-        safe.tags = finalTags;
+    safe.tags = finalTags;
 
     // Analytics: full AI recipe generated
     const ctx = getEventContext(req);
@@ -1526,7 +1528,7 @@ app.post("/exportRecipePdf", (req, res) => {
 
     doc.fontSize(16).text("Steps:", { underline: true });
     doc.fontSize(12);
-        if (Array.isArray(recipe.steps) && recipe.steps.length > 0) {
+    if (Array.isArray(recipe.steps) && recipe.steps.length > 0) {
       recipe.steps.forEach((step) => {
         doc.text(step);
         doc.moveDown(0.5);
@@ -1674,7 +1676,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
     return res.status(400).json({ error: "Only http:// or https:// URLs are supported" });
   }
 
-    // Analytics: user attempted to import recipe from URL (only host stored for privacy)
+  // Analytics: user attempted to import recipe from URL (only host stored for privacy)
   const ctx = getEventContext(req);
   trackEvent("import_recipe_from_url", {
     userId: ctx.userId,
