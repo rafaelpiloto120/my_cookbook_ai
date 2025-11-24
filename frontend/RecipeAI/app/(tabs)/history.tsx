@@ -70,9 +70,17 @@ async function trackAnalyticsEvent(
   eventType: string,
   payload: Record<string, any> = {}
 ) {
-  if (!API_BASE_URL) return;
+  if (!API_BASE_URL) {
+    if (__DEV__) {
+      console.warn(
+        "[Analytics] EXPO_PUBLIC_API_URL is not set, cannot send event:",
+        eventType
+      );
+    }
+    return;
+  }
   try {
-    await fetch(`${API_BASE_URL}/analytics/track/simple`, {
+    const res = await fetch(`${API_BASE_URL}/analytics/track/simple`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -80,10 +88,19 @@ async function trackAnalyticsEvent(
       body: JSON.stringify({
         eventType,
         metadata: {
+          sourceScreen: "history",
           ...payload,
         },
       }),
     });
+    if (!res.ok && __DEV__) {
+      console.warn(
+        "[Analytics] Event request failed",
+        eventType,
+        "status:",
+        res.status
+      );
+    }
   } catch (err) {
     if (__DEV__) {
       console.warn("[Analytics] Failed to send event", eventType, err);
@@ -297,22 +314,41 @@ export default function History() {
   // --- Confirm delete
   const confirmDelete = async () => {
     if (!deleteTarget) return;
+
     if (deleteTarget.type === "recipe") {
-      let updated = recipes.filter(r => r.id !== deleteTarget.id);
-      updated = updated.sort((a,b)=>new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      // capture the recipe before removing it, so we can log useful metadata
+      const targetRecipe = recipes.find((r) => r.id === deleteTarget.id) || null;
+
+      let updated = recipes.filter((r) => r.id !== deleteTarget.id);
+      updated = updated.sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
       setRecipes(updated);
       await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+
       trackAnalyticsEvent("manual_recipe_deleted", {
         recipeId: deleteTarget.id,
+        recipeTitle: targetRecipe?.title ?? null,
+        // how many recipes remain after deletion
+        remainingRecipes: updated.length,
       });
     } else {
-      const updated = cookbooks.filter(c => c.id !== deleteTarget.id);
+      // capture the cookbook before removing it, so we can log useful metadata
+      const targetCookbook =
+        cookbooks.find((c) => c.id === deleteTarget.id) || null;
+
+      const updated = cookbooks.filter((c) => c.id !== deleteTarget.id);
       setCookbooks(updated);
       await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+
       trackAnalyticsEvent("cookbook_deleted", {
         cookbookId: deleteTarget.id,
+        cookbookName: targetCookbook?.name ?? null,
+        remainingCookbooks: updated.length,
       });
     }
+
     setDeleteTarget(null);
   };
 
