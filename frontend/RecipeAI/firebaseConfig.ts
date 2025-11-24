@@ -4,7 +4,6 @@ import {
   getReactNativePersistence,
 } from "firebase/auth";
 import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
-// Firestore imports removed
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -26,8 +25,6 @@ const auth = initializeAuth(app, {
   persistence: getReactNativePersistence(ReactNativeAsyncStorage),
 });
 console.log("✅ Auth initialized with React Native persistence");
-
-// Firestore initialization removed
 
 // --- Storage ---
 const storage = getStorage(app);
