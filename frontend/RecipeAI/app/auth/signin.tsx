@@ -15,6 +15,8 @@ import Constants from "expo-constants";
 
 WebBrowser.maybeCompleteAuthSession();
 
+const SHOW_GOOGLE_LOGIN = false;
+
 // ---- Input hardening helpers ----
 const INVISIBLE_REGEX = /[\u200B-\u200D\uFEFF\u202E\u202D\u202A\u202B\u202C]/g; // zero-width & bidi controls
 const CONTROL_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g; // other C0 controls (exclude \t, \n intentionally for inputs)
@@ -309,17 +311,19 @@ export default function SignInScreen() {
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.googleButton, (loading || googleLoading) && { opacity: 0.6 }]}
-            onPress={handleGoogleSignIn}
-            disabled={loading || googleLoading}
-          >
-            {googleLoading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.googleButtonText}>{t("auth.google_button")}</Text>
-            )}
-          </TouchableOpacity>
+          {SHOW_GOOGLE_LOGIN && (
+            <TouchableOpacity
+              style={[styles.googleButton, (loading || googleLoading) && { opacity: 0.6 }]}
+              onPress={handleGoogleSignIn}
+              disabled={loading || googleLoading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.googleButtonText}>{t("auth.google_button")}</Text>
+              )}
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity onPress={() => setIsSignup(!isSignup)} disabled={loading || googleLoading}>
             <Text style={[styles.switchText, { color: text }]}>
