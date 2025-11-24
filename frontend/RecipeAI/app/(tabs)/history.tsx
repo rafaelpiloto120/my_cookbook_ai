@@ -79,7 +79,9 @@ async function trackAnalyticsEvent(
       },
       body: JSON.stringify({
         eventType,
-        ...payload,
+        metadata: {
+          ...payload,
+        },
       }),
     });
   } catch (err) {

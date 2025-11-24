@@ -11,6 +11,7 @@ import { sendPasswordResetEmail, GoogleAuthProvider, signInWithCredential } from
 import { auth } from "../../firebaseConfig";
 import * as WebBrowser from "expo-web-browser";
 import * as Google from "expo-auth-session/providers/google";
+import Constants from "expo-constants";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -68,10 +69,13 @@ export default function SignInScreen() {
   const [resetEmail, setResetEmail] = useState("");
   const { t } = useTranslation();
 
-  // Google Auth: configure ID token flow using native Android/Web OAuth clients
+  // Google Auth: configure ID token flow using native Android / Expo clients
+  const androidClientId = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+  const expoClientId = process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID; // optional for Expo Go
+
   const [request, response, promptAsync] = Google.useAuthRequest({
-    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
-    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    androidClientId: androidClientId || undefined,
+    expoClientId: expoClientId || undefined,
     responseType: "id_token",
     scopes: ["openid", "email", "profile"],
   });
@@ -157,17 +161,19 @@ export default function SignInScreen() {
 
   const handleGoogleSignIn = async () => {
     if (!request) {
-      Alert.alert(
-        t("auth.error_title"),
-        t("auth.google_not_configured"),
-      );
+      Alert.alert(t("auth.error_title"), t("auth.google_not_configured"));
       return;
     }
+
     try {
       setGoogleLoading(true);
-      await promptAsync();
+      const isExpoGo = Constants.appOwnership === "expo";
+      // In Expo Go we use the Expo proxy (web redirect via auth.expo.io),
+      // in standalone/preview builds we use the native scheme
+      await promptAsync({ useProxy: isExpoGo });
     } catch (err) {
       console.error("Google prompt error:", err);
+    } finally {
       setGoogleLoading(false);
     }
   };
@@ -184,7 +190,9 @@ export default function SignInScreen() {
       />
       <KeyboardAwareScrollView contentContainerStyle={{ flexGrow: 1 }} enableOnAndroid keyboardShouldPersistTaps="handled">
         <View style={[styles.container, { backgroundColor: bg }]}>
-          <Text style={[styles.title, { color: text }]}>{isSignup ? t("auth.create_account_title") : t("auth.welcome_back")}</Text>
+          <Text style={[styles.title, { color: text }]}>
+            {isSignup ? t("auth.create_account_title") : t("auth.welcome_back")}
+          </Text>
 
           <TextInput
             style={[styles.input, { borderColor: border, color: text, backgroundColor: card }]}
@@ -233,7 +241,9 @@ export default function SignInScreen() {
           <Modal visible={showResetModal} transparent animationType="fade" onRequestClose={() => setShowResetModal(false)}>
             <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "center", alignItems: "center", padding: 20 }}>
               <View style={{ width: 320, backgroundColor: card, borderRadius: 12, padding: 16 }}>
-                <Text style={{ color: text, fontSize: 18, fontWeight: "700", marginBottom: 8 }}>{t("auth.reset_enter_email_title")}</Text>
+                <Text style={{ color: text, fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
+                  {t("auth.reset_enter_email_title")}
+                </Text>
                 <Text style={{ color: subText, marginBottom: 12 }}>{t("auth.reset_enter_email_body")}</Text>
                 <TextInput
                   style={[styles.input, { borderColor: border, color: text, backgroundColor: card, marginBottom: 12 }]}
@@ -269,7 +279,10 @@ export default function SignInScreen() {
                         setShowResetModal(false);
                         Alert.alert(t("auth.reset_email_sent_title"), t("auth.reset_email_sent_body"));
                       } catch (err: any) {
-                        Alert.alert(t("auth.reset_error_title"), err?.message || t("common.error_generic", { defaultValue: "Something went wrong" }));
+                        Alert.alert(
+                          t("auth.reset_error_title"),
+                          err?.message || t("common.error_generic", { defaultValue: "Something went wrong" })
+                        );
                       }
                     }}
                     style={{ paddingVertical: 10, paddingHorizontal: 12 }}
@@ -287,7 +300,13 @@ export default function SignInScreen() {
             onPress={handleAuth}
             disabled={loading || googleLoading}
           >
-            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>{isSignup ? t("auth.signup_button") : t("auth.signin_button")}</Text>}
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>
+                {isSignup ? t("auth.signup_button") : t("auth.signin_button")}
+              </Text>
+            )}
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -333,7 +352,7 @@ const styles = StyleSheet.create({
   },
   passwordInput: {
     flex: 1,
-    marginBottom: 0, // override input's marginBottom so the container controls spacing
+    marginBottom: 0,
   },
   passwordToggle: {
     marginLeft: 8,
