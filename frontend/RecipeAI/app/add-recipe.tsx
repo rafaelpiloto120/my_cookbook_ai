@@ -503,6 +503,8 @@ export default function AddRecipe() {
               deviceId,
               metadata: {
                 source: "manual_form",
+                recipeId: newRecipe.id,
+                title: newRecipe.title,
                 hasImage: !!finalImageUri,
                 ingredientsCount: newRecipe.ingredients.length,
                 stepsCount: newRecipe.steps.length,
