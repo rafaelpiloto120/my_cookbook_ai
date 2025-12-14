@@ -4,12 +4,11 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ThemeProvider, useThemeColors } from "../context/ThemeContext";
 import i18n from "../i18n";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ActivityIndicator, View, Platform } from "react-native";
+import { ActivityIndicator, View, Platform, AppState, AppStateStatus } from "react-native";
 import { AuthProvider } from "../context/AuthContext";
+import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { getOrCreateDeviceId } from "../utils/deviceId";
 import { auth } from "../firebaseConfig";
-
-const backendUrl = process.env.EXPO_PUBLIC_API_URL;
 
 function RootStack() {
   const { bg, text } = useThemeColors();
@@ -24,10 +23,10 @@ function RootStack() {
     >
       {/* Tabs app */}
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      {/* Auth group */}
-      <Stack.Screen name="auth" options={{ headerShown: false }} />
-      {/* Onboarding flow (header hidden for step 1; inner screens can show their own headers) */}
-      <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+      {/* Auth sign-in screen (matches app/auth/signin.tsx) */}
+      <Stack.Screen name="auth/signin" options={{ headerShown: false }} />
+      {/* Onboarding flow root (matches app/onboarding/index.tsx) */}
+      <Stack.Screen name="onboarding/index" options={{ headerShown: false }} />
     </Stack>
   );
 }
@@ -37,6 +36,7 @@ export default function RootLayout() {
   const router = useRouter();
   const pathname = usePathname();
   const hasLoggedSessionRef = useRef(false);
+  const syncEngine = useSyncEngine();
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +128,28 @@ export default function RootLayout() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!syncEngine) {
+      console.warn("[RootLayout] syncEngine unavailable; skipping AppState foreground sync");
+      return;
+    }
+
+    const subscription = AppState.addEventListener(
+      "change",
+      (nextState: AppStateStatus) => {
+        if (nextState === "active") {
+          console.log("[SyncEngine] App returned to foreground, requesting sync (app-foreground)");
+          // requestSync already handles errors internally
+          syncEngine.requestSync("app-foreground");
+        }
+      }
+    );
+
+    return () => {
+      subscription.remove();
+    };
+  }, [syncEngine]);
 
   if (!isReady) {
     return (

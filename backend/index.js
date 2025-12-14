@@ -41,7 +41,7 @@ import he from "he";
 import fs from "fs";
 
 import admin from "firebase-admin";
-import { getFirestore } from "firebase-admin/firestore";
+import { Firestore } from "@google-cloud/firestore";
 
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
@@ -208,23 +208,42 @@ function getEventContext(req) {
 
 /**
  * Track analytics events.
- * In production, events can be stored in Firestore by setting ANALYTICS_USE_FIRESTORE=1.
- * Otherwise (or if Firestore is unavailable), they are appended to a local log file.
  *
- * Example event shape:
- * { "ts": "...", "eventType": "ai_recipe_generated", "userId": "...", "deviceId": "...", "metadata": {...} }
+ * In production, events are stored in Firestore in a single top-level
+ * collection (e.g. "AnalyticEvents") so that you can compute global
+ * statistics easily.
+ *
+ * Shape of each event doc:
+ * {
+ *   ts: ISO string,
+ *   eventType: string,
+ *   userId: string | null,
+ *   deviceId: string | null,
+ *   metadata: { ...originalMetadata, _env: "<backend env>", appEnv?: "<frontend env>" }
+ * }
+ *
+ * If Firestore is unavailable or ANALYTICS_USE_FIRESTORE is not enabled,
+ * events are appended to a local log file.
  */
 function trackEvent(
   eventType,
   { userId = null, deviceId = null, metadata = null } = {}
 ) {
   try {
+    const envTag = ANALYTICS_ENV;
+
+    // Always store env info inside metadata
+    const mergedMetadata = {
+      ...(metadata && typeof metadata === "object" ? metadata : {}),
+      _env: envTag, // backend environment (local-backend / preview-backend / production-backend)
+    };
+
     const payload = {
       ts: new Date().toISOString(),
       eventType,
       userId,
       deviceId,
-      metadata,
+      metadata: mergedMetadata,
     };
 
     const useFirestore =
@@ -240,20 +259,28 @@ function trackEvent(
       admin.apps.length > 0
     ) {
       try {
-        const db = getFirestore(undefined, FIRESTORE_DB_ID);
-        db.collection(ANALYTICS_COLLECTION)
-          .add(payload)
-          .catch((err) => {
-            console.error(
-              "❌ Failed to write analytics event to Firestore:",
-              err?.message || err
-            );
+        // Use the analytics Firestore client (supports multi-database via FIREBASE_DATABASE_ID)
+        const db = getAnalyticsDb();
+
+        // ✅ All analytics events go to a single top-level collection
+        const collectionRef = db.collection(ANALYTICS_COLLECTION);
+
+        // Fire-and-forget write; internal catch logs any Firestore issues
+        collectionRef.add(payload).catch((err) => {
+          console.error("❌ Failed to write analytics event to Firestore:", {
+            message: err?.message,
+            code: err?.code,
+            details: err?.details,
+            stack: err?.stack,
           });
+        });
       } catch (err) {
-        console.error(
-          "❌ Analytics Firestore error, falling back to file:",
-          err?.message || err
-        );
+        console.error("❌ Analytics Firestore error, falling back to file:", {
+          message: err?.message,
+          code: err?.code,
+          details: err?.details,
+          stack: err?.stack,
+        });
         const line = JSON.stringify(payload) + "\n";
         fs.appendFile(ANALYTICS_LOG_PATH, line, (fileErr) => {
           if (fileErr) {
@@ -265,19 +292,19 @@ function trackEvent(
         });
       }
     } else {
-      // Default: local file-based logging (useful for local dev)
+      // Fallback: append to local analytics log file
       const line = JSON.stringify(payload) + "\n";
-      fs.appendFile(ANALYTICS_LOG_PATH, line, (err) => {
-        if (err) {
+      fs.appendFile(ANALYTICS_LOG_PATH, line, (fileErr) => {
+        if (fileErr) {
           console.error(
             "❌ Failed to write analytics event to file:",
-            err.message || err
+            fileErr.message || fileErr
           );
         }
       });
     }
   } catch (err) {
-    console.error("❌ Analytics error:", err.message || err);
+    console.error("❌ Analytics error:", err?.message || err);
   }
 }
 
@@ -305,6 +332,809 @@ app.post("/analytics-event", async (req, res) => {
   } catch (err) {
     console.error("❌ /analytics-event error:", err?.message || err);
     return res.status(500).json({ error: "Failed to log analytics event" });
+  }
+});
+
+/**
+ * Generic event ingestion endpoint for the mobile app.
+ * The app sends:
+ *   POST /events
+ *   Headers:
+ *     Authorization: Bearer <FIREBASE_ID_TOKEN>
+ *   Body JSON:
+ *     {
+ *       "type": "debug_manual_test",   // required
+ *       "ts": 1731600000000,           // optional client timestamp
+ *       ... any other fields as payload ...
+ *     }
+ *
+ * This endpoint:
+ *   - Verifies the Firebase ID token
+ *   - Derives userId from the token (uid)
+ *   - Uses x-device-id (if present) as deviceId
+ *   - Stores the event via trackEvent (which may write to Firestore if ANALYTICS_USE_FIRESTORE is enabled)
+ */
+app.post("/events", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/events] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    // Verify Firebase ID token from Authorization header
+    let decoded;
+    try {
+      decoded = await verifyIdTokenFromHeader(req);
+    } catch (e) {
+      console.error("[/events] Token verification failed:", e?.message || e);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const body = req.body || {};
+    const type =
+      typeof body.type === "string" && body.type.trim()
+        ? body.type.trim()
+        : "";
+
+    if (!type) {
+      return res.status(400).json({ error: "type is required" });
+    }
+
+    // Extract optional client timestamp and payload
+    const clientTs =
+      typeof body.ts === "number" && Number.isFinite(body.ts)
+        ? body.ts
+        : Date.now();
+
+    const { ts, type: _ignoredType, ...restPayload } = body;
+
+    // Best-effort context from headers (for deviceId)
+    const headerCtx = getEventContext(req);
+    const userId = decoded && decoded.uid ? decoded.uid : headerCtx.userId || null;
+    const deviceId = headerCtx.deviceId || null;
+
+    const metadata = {
+      ...restPayload,
+      clientTs,
+      backendReceivedAt: Date.now(),
+    };
+
+    // Use the existing analytics tracker; if ANALYTICS_USE_FIRESTORE=1,
+    // this will store the event under the configured analytics collection.
+    trackEvent(type, {
+      userId,
+      deviceId,
+      metadata,
+    });
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[/events] Tracked event:", {
+        type,
+        userId,
+        deviceId,
+        metadata,
+      });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /events error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to record event" });
+  }
+});
+
+/**
+ * Debug endpoint: write arbitrary data from the mobile app into Firestore
+ * using the Admin SDK. This bypasses Firestore security rules and uses
+ * the same project/bucket as analytics events.
+ *
+ * Body:
+ *   {
+ *     "userId": "uid-123",
+ *     "path": "users/uid-123/debugMobileWrites/fromBackend",
+ *     "data": { ...any JSON... }
+ *   }
+ *
+ * If "path" is omitted, we default to:
+ *   users/{userId}/debugMobileWrites/fromBackend
+ */
+app.post("/mobile-firestore-debug", async (req, res) => {
+  try {
+    const { userId, path, data } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    if (!_adminInitialized) {
+      console.error("[mobile-firestore-debug] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    // ✅ Use the same Firestore database instance / ID as analytics
+    const db = getAnalyticsDb();
+
+    const docPath =
+      path || `users/${userId}/debugMobileWrites/fromBackend`;
+
+    console.log("[mobile-firestore-debug] incoming", {
+      userId,
+      path: docPath,
+    });
+
+    await db.doc(docPath).set(
+      {
+        ...(data || {}),
+        _debugSource: "mobile-firestore-debug",
+        _serverTs: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    console.log("[mobile-firestore-debug] write SUCCESS", { path: docPath });
+
+    return res.json({ ok: true, path: docPath });
+  } catch (err) {
+    console.error("[mobile-firestore-debug] write FAILED", err);
+    return res.status(500).json({
+      error: "internal",
+      details:
+        err && err.message ? err.message : String(err),
+    });
+  }
+});
+
+// ---------------- Preferences Sync Endpoints ----------------
+// These endpoints are used by the mobile app to synchronize user preferences
+// between AsyncStorage on the device and Firestore under:
+//   users/{uid}/preferences/default
+app.get("/sync/preferences", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/preferences] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    let decoded;
+    try {
+      decoded = await verifyIdTokenFromHeader(req);
+    } catch (e) {
+      console.error("[/sync/preferences] Token verification failed:", e?.message || e);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const uid = decoded && decoded.uid;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing user id" });
+    }
+
+    const db = getAnalyticsDb();
+    const docRef = db.doc(`users/${uid}/preferences/default`);
+    const snap = await docRef.get();
+
+    if (!snap.exists) {
+      return res.json({ doc: null });
+    }
+
+    const data = snap.data() || {};
+
+    // Normalize updatedAt to a number when possible (for comparisons on the client)
+    if (typeof data.updatedAt === "string") {
+      const num = Number(data.updatedAt);
+      if (Number.isFinite(num)) {
+        data.updatedAt = num;
+      }
+    }
+
+    return res.json({ doc: data });
+  } catch (err) {
+    console.error("❌ /sync/preferences (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load preferences" });
+  }
+});
+
+app.post("/sync/preferences", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/preferences] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    let decoded;
+    try {
+      decoded = await verifyIdTokenFromHeader(req);
+    } catch (e) {
+      console.error("[/sync/preferences] Token verification failed:", e?.message || e);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const uid = decoded && decoded.uid;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing user id" });
+    }
+
+    const body = req.body || {};
+    const doc = body.doc;
+
+    if (!doc || typeof doc !== "object") {
+      return res.status(400).json({ error: "doc object is required" });
+    }
+
+    const now = Date.now();
+
+    const payload = {
+      ...doc,
+      updatedAt:
+        typeof doc.updatedAt === "number" && Number.isFinite(doc.updatedAt)
+          ? doc.updatedAt
+          : now,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (!payload.createdAt) {
+      payload.createdAt = now;
+    }
+
+    const db = getAnalyticsDb();
+    const docRef = db.doc(`users/${uid}/preferences/default`);
+    await docRef.set(payload, { merge: true });
+
+    // Optional analytics event (goes into the analyticsEvents collection)
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_preferences_write", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          hasDoc: true,
+        },
+      });
+    } catch (e) {
+      console.warn("[/sync/preferences] analytics log failed:", e?.message || e);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /sync/preferences (POST) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save preferences" });
+  }
+
+});
+
+// ---------------- Cookbooks Sync Endpoints ----------------
+
+// Legacy client compatibility:
+// CookbookSync currently calls POST /sync/cookbooks/pull with { uid }
+// and POST /sync/cookbooks/push with { uid, items }.
+// These endpoints adapt that shape to the newer Firestore layout, using
+// users/{uid}/cookbooks/{cookbookId} as the storage path.
+
+/**
+ * POST /sync/cookbooks/pull
+ * Body: { uid: string }
+ * Returns: { items: CookbookDoc[] }
+ */
+app.post("/sync/cookbooks/pull", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/cookbooks/pull] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const body = req.body || {};
+    const uid =
+      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
+
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    const db = getAnalyticsDb();
+    const collectionRef = db.collection(`users/${uid}/cookbooks`);
+    const snap = await collectionRef.get();
+
+    const items = [];
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+
+      // Normalize updatedAt to a number when possible
+      if (typeof data.updatedAt === "string") {
+        const num = Number(data.updatedAt);
+        if (Number.isFinite(num)) {
+          data.updatedAt = num;
+        }
+      }
+
+      items.push({
+        id: doc.id,
+        ...data,
+      });
+    });
+
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_cookbooks_pull_legacy", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          count: items.length,
+        },
+      });
+    } catch (e) {
+      console.warn(
+        "[/sync/cookbooks/pull] analytics log failed:",
+        e?.message || e
+      );
+    }
+
+    return res.json({ items });
+  } catch (err) {
+    console.error("❌ /sync/cookbooks/pull error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load cookbooks" });
+  }
+});
+
+/**
+ * POST /sync/cookbooks/push
+ * Body: { uid: string, items: CookbookDoc[] }
+ * Writes to: users/{uid}/cookbooks/{id}
+ */
+app.post("/sync/cookbooks/push", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/cookbooks/push] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const body = req.body || {};
+    const uid =
+      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+
+    const db = getAnalyticsDb();
+    const batch = db.batch();
+    const now = Date.now();
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== "object") continue;
+      const anyRaw = raw;
+      const id =
+        typeof anyRaw.id === "string" && anyRaw.id.trim()
+          ? anyRaw.id.trim()
+          : typeof anyRaw.docId === "string" && anyRaw.docId.trim()
+          ? anyRaw.docId.trim()
+          : null;
+
+      if (!id) continue;
+
+      const data = { ...anyRaw };
+
+      // Normalize timestamps
+      data.updatedAt =
+        typeof data.updatedAt === "number" && Number.isFinite(data.updatedAt)
+          ? data.updatedAt
+          : now;
+
+      if (
+        typeof data.createdAt !== "number" ||
+        !Number.isFinite(data.createdAt)
+      ) {
+        data.createdAt =
+          typeof anyRaw.createdAt === "number" &&
+          Number.isFinite(anyRaw.createdAt)
+            ? anyRaw.createdAt
+            : now;
+      }
+
+      data._serverUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+      // Remove id/docId from document body
+      delete data.id;
+      delete data.docId;
+
+      const docRef = db.doc(`users/${uid}/cookbooks/${id}`);
+      batch.set(docRef, data, { merge: true });
+    }
+
+    await batch.commit();
+
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_cookbooks_push_legacy", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          upserted: items.length,
+        },
+      });
+    } catch (e) {
+      console.warn(
+        "[/sync/cookbooks/push] analytics log failed:",
+        e?.message || e
+      );
+    }
+
+    return res.json({ ok: true, upserted: items.length });
+  } catch (err) {
+    console.error("❌ /sync/cookbooks/push error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save cookbooks" });
+  }
+});
+
+// ---------------- Recipes Sync Endpoints ----------------
+// Legacy client compatibility:
+// RecipeSync currently calls POST /sync/recipes/pull with { uid }
+// and POST /sync/recipes/push with { uid, items }.
+// These endpoints adapt that shape to the Firestore layout, using
+// users/{uid}/recipes/{recipeId} as the storage path.
+
+/**
+ * POST /sync/recipes/pull
+ * Body: { uid: string }
+ * Returns: { items: RecipeDoc[] }
+ */
+app.post("/sync/recipes/pull", async (req, res) => {
+  try {
+    console.log("[/sync/recipes/pull] called with body:", req.body);
+    if (!_adminInitialized) {
+      console.error("[/sync/recipes/pull] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const body = req.body || {};
+    const uid =
+      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
+
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    const db = getAnalyticsDb();
+    const collectionRef = db.collection(`users/${uid}/recipes`);
+    const snap = await collectionRef.get();
+
+    const items = [];
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+
+      // Normalize updatedAt to a number when possible
+      if (typeof data.updatedAt === "string") {
+        const num = Number(data.updatedAt);
+        if (Number.isFinite(num)) {
+          data.updatedAt = num;
+        }
+      }
+
+      items.push({
+        id: doc.id,
+        ...data,
+      });
+    });
+    console.log("[/sync/recipes/pull] returning items count:", items.length, "for uid:", uid);
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_recipes_pull_legacy", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          count: items.length,
+        },
+      });
+    } catch (e) {
+      console.warn(
+        "[/sync/recipes/pull] analytics log failed:",
+        e?.message || e
+      );
+    }
+
+    return res.json({ items });
+  } catch (err) {
+    console.error("❌ /sync/recipes/pull error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load recipes" });
+  }
+});
+
+/**
+ * POST /sync/recipes/push
+ * Body: { uid: string, items: RecipeDoc[] }
+ * Writes to: users/{uid}/recipes/{id}
+ * If an item has isDeleted === true, the document is deleted and associated images are removed.
+ */
+app.post("/sync/recipes/push", async (req, res) => {
+  try {
+    console.log("[/sync/recipes/push] called with body:", {
+      uid: req.body && req.body.uid,
+      itemsCount: Array.isArray(req.body && req.body.items) ? req.body.items.length : 0,
+    });
+    if (!_adminInitialized) {
+      console.error("[/sync/recipes/push] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const body = req.body || {};
+    const uid =
+      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing uid" });
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+
+    const db = getAnalyticsDb();
+    const batch = db.batch();
+    const now = Date.now();
+
+    let upsertedCount = 0;
+    let deletedCount = 0;
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== "object") continue;
+      const anyRaw = raw;
+      const id =
+        typeof anyRaw.id === "string" && anyRaw.id.trim()
+          ? anyRaw.id.trim()
+          : typeof anyRaw.docId === "string" && anyRaw.docId.trim()
+          ? anyRaw.docId.trim()
+          : null;
+
+      if (!id) continue;
+
+      const docRef = db.doc(`users/${uid}/recipes/${id}`);
+      // --- Insert debug log for docRef path, isDeleted, and hasImageUrl ---
+      console.log("[/sync/recipes/push] upserting doc", {
+        path: docRef.path,
+        isDeleted: anyRaw.isDeleted === true,
+        hasImageUrl: typeof anyRaw.image === "string" && anyRaw.image.length > 0,
+      });
+
+      // If marked as deleted, delete doc and associated images
+      if (anyRaw.isDeleted === true) {
+        batch.delete(docRef);
+        deletedCount += 1;
+
+        // Best-effort deletion of associated images (ignore errors)
+        try {
+          await deleteRecipeImages(uid, id);
+        } catch (e) {
+          console.warn(
+            "[/sync/recipes/push] deleteRecipeImages failed:",
+            e?.message || e
+          );
+        }
+
+        continue;
+      }
+
+      const data = { ...anyRaw };
+
+      // Normalize timestamps
+      data.updatedAt =
+        typeof data.updatedAt === "number" && Number.isFinite(data.updatedAt)
+          ? data.updatedAt
+          : now;
+
+      if (
+        typeof data.createdAt !== "number" ||
+        !Number.isFinite(data.createdAt)
+      ) {
+        data.createdAt =
+          typeof anyRaw.createdAt === "number" &&
+          Number.isFinite(anyRaw.createdAt)
+            ? anyRaw.createdAt
+            : now;
+      }
+
+      data._serverUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+      // Remove id/docId from document body
+      delete data.id;
+      delete data.docId;
+
+      batch.set(docRef, data, { merge: true });
+      upsertedCount += 1;
+    }
+    console.log("[/sync/recipes/push] processed items. upsertedCount:", upsertedCount, "deletedCount:", deletedCount, "for uid:", uid);
+
+    await batch.commit();
+    console.log("[/sync/recipes/push] batch commit successful for uid:", uid);
+
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_recipes_push_legacy", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          upserted: upsertedCount,
+          deleted: deletedCount,
+        },
+      });
+    } catch (e) {
+      console.warn(
+        "[/sync/recipes/push] analytics log failed:",
+        e?.message || e
+      );
+    }
+
+    return res.json({ ok: true, upserted: upsertedCount, deleted: deletedCount });
+  } catch (err) {
+    console.error("❌ /sync/recipes/push error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save recipes" });
+  }
+});
+
+// These endpoints are used by the mobile app to synchronize user recipes
+// between AsyncStorage on the device and Firestore under:
+//   users/{uid}/recipes/{recipeId}
+app.get("/sync/recipes", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/recipes] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    let decoded;
+    try {
+      decoded = await verifyIdTokenFromHeader(req);
+    } catch (e) {
+      console.error("[/sync/recipes] Token verification failed:", e?.message || e);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const uid = decoded && decoded.uid;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing user id" });
+    }
+
+    const db = getAnalyticsDb();
+    const collectionRef = db.collection(`users/${uid}/recipes`);
+    const snap = await collectionRef.get();
+
+    const docs = [];
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+
+      // Normalize updatedAt to a number when possible
+      if (typeof data.updatedAt === "string") {
+        const num = Number(data.updatedAt);
+        if (Number.isFinite(num)) {
+          data.updatedAt = num;
+        }
+      }
+
+      docs.push({
+        id: doc.id,
+        ...data,
+      });
+    });
+
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_recipes_read", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          count: docs.length,
+        },
+      });
+    } catch (e) {
+      console.warn("[/sync/recipes] analytics log failed:", e?.message || e);
+    }
+
+    return res.json({ docs });
+  } catch (err) {
+    console.error("❌ /sync/recipes (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load recipes" });
+  }
+});
+
+app.post("/sync/recipes", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      console.error("[/sync/recipes] Admin SDK not initialized");
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    let decoded;
+    try {
+      decoded = await verifyIdTokenFromHeader(req);
+    } catch (e) {
+      console.error("[/sync/recipes] Token verification failed:", e?.message || e);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const uid = decoded && decoded.uid;
+    if (!uid) {
+      return res.status(400).json({ error: "Missing user id" });
+    }
+
+    const body = req.body || {};
+    const docs = Array.isArray(body.docs) ? body.docs : [];
+    const deletedIds = Array.isArray(body.deletedIds) ? body.deletedIds : [];
+
+    const db = getAnalyticsDb();
+    const batch = db.batch();
+    const now = Date.now();
+
+    // Upsert recipes
+    for (const raw of docs) {
+      if (!raw || typeof raw !== "object") continue;
+      const id =
+        typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : null;
+      if (!id) continue;
+
+      const data = { ...raw };
+
+      // Normalize timestamps
+      data.updatedAt =
+        typeof data.updatedAt === "number" && Number.isFinite(data.updatedAt)
+          ? data.updatedAt
+          : now;
+
+      if (
+        typeof data.createdAt !== "number" ||
+        !Number.isFinite(data.createdAt)
+      ) {
+        data.createdAt =
+          typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt)
+            ? raw.createdAt
+            : now;
+      }
+
+      data._serverUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+
+      // Do not keep id inside the document body
+      delete data.id;
+
+      const docRef = db.doc(`users/${uid}/recipes/${id}`);
+      batch.set(docRef, data, { merge: true });
+    }
+
+    // Delete recipes (and associated images in Storage)
+    for (const rawId of deletedIds) {
+      const id =
+        typeof rawId === "string" && rawId.trim() ? rawId.trim() : null;
+      if (!id) continue;
+      const docRef = db.doc(`users/${uid}/recipes/${id}`);
+      batch.delete(docRef);
+
+      // Best-effort deletion of associated images (ignore errors)
+      try {
+        await deleteRecipeImages(uid, id);
+      } catch (e) {
+        console.warn("[/sync/recipes] deleteRecipeImages failed:", e?.message || e);
+      }
+    }
+
+    await batch.commit();
+
+    // Optional analytics event
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("sync_recipes_write", {
+        userId: uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          upserted: docs.length,
+          deleted: deletedIds.length,
+        },
+      });
+    } catch (e) {
+      console.warn("[/sync/recipes] analytics log failed:", e?.message || e);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /sync/recipes (POST) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save recipes" });
   }
 });
 
@@ -381,6 +1211,38 @@ const ANALYTICS_COLLECTION =
   process.env.FIREBASE_ANALYTICS_COLLECTION || "analyticsEvents";
 const FIRESTORE_DB_ID =
   process.env.FIREBASE_DATABASE_ID || "(default)";
+
+// Backend environment tag for analytics (_env in metadata)
+// You can override this via BACKEND_ENV (e.g. "local", "preview", "production").
+const RAW_BACKEND_ENV = process.env.BACKEND_ENV || process.env.NODE_ENV || "local";
+
+let ANALYTICS_ENV = "local-backend";
+if (RAW_BACKEND_ENV === "preview") {
+  ANALYTICS_ENV = "preview-backend";
+} else if (RAW_BACKEND_ENV === "production") {
+  ANALYTICS_ENV = "production-backend";
+} else if (RAW_BACKEND_ENV === "development") {
+  ANALYTICS_ENV = "local-backend";
+} else if (RAW_BACKEND_ENV && RAW_BACKEND_ENV !== "local") {
+  // Any custom value, keep it but add "-backend" suffix for consistency
+  ANALYTICS_ENV = `${RAW_BACKEND_ENV}-backend`;
+}
+
+let _firestoreClient = null;
+function getAnalyticsDb() {
+  // Lazily create a Firestore client that points to the desired database ID.
+  // If FIREBASE_DATABASE_ID === "(default)", we use the default database.
+  if (!_firestoreClient) {
+    const options = { projectId: PROJECT_ID };
+
+    if (FIRESTORE_DB_ID && FIRESTORE_DB_ID !== "(default)") {
+      options.databaseId = FIRESTORE_DB_ID;
+    }
+
+    _firestoreClient = new Firestore(options);
+  }
+  return _firestoreClient;
+}
 
 let _adminInitialized = false;
 if (!admin.apps.length) {

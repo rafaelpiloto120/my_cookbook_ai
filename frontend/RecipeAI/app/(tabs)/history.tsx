@@ -26,6 +26,10 @@ import AppCard from "../../components/AppCard";
 
 import { useTranslation } from "react-i18next";
 
+
+import { useAuth } from "../../context/AuthContext";
+import { syncEngine as globalSyncEngine } from "../../lib/sync/SyncEngine";
+
 const defaultImage = require("../../assets/default_recipe.png");
 
 interface Recipe {
@@ -42,6 +46,7 @@ interface Recipe {
   image?: string;
   imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
+  isDeleted?: boolean;
 }
 
 interface Cookbook {
@@ -65,6 +70,7 @@ let difficultyMap: Record<string, string>;
 let costMap: Record<string, string>;
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
 
 async function trackAnalyticsEvent(
   eventType: string,
@@ -89,6 +95,7 @@ async function trackAnalyticsEvent(
         eventType,
         metadata: {
           sourceScreen: "history",
+          env: appEnv,
           ...payload,
         },
       }),
@@ -141,6 +148,9 @@ export default function History() {
   const router = useRouter();
   const { bg, text, subText, card, border } = useThemeColors();
   const { t } = useTranslation();
+  const auth = useAuth();
+  // Prefer the singleton engine (always available). AuthContext may expose one too.
+  const syncEngine = (auth as any)?.syncEngine ?? globalSyncEngine;
   // Use translations for difficulty and cost maps (matching i18n.ts structure)
   difficultyMap = {
     Easy: t("difficulty.easy"),
@@ -191,20 +201,29 @@ export default function History() {
           (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
         // Normalize each recipe's image property, also supporting legacy keys like imageUrl
-        parsed = parsed.map((recipe: any) => {
-          // Prefer canonical "image", but fall back to "imageUrl" if needed
-          let image = recipe.image;
-          if ((!image || typeof image !== "string") && typeof recipe.imageUrl === "string") {
-            image = recipe.imageUrl;
-          }
+        parsed = parsed
+          .map((recipe: any) => {
+            // Prefer canonical "image", but fall back to "imageUrl" if needed
+            let image = recipe.image;
+            if (
+              (!image || typeof image !== "string") &&
+              typeof recipe.imageUrl === "string"
+            ) {
+              image = recipe.imageUrl;
+            }
 
-          // Only keep image if it's a non-empty string; we don't enforce URL shape here
-          if (typeof image !== "string" || !image.trim()) {
-            image = null;
-          }
+            // Only keep image if it's a non-empty string; we don't enforce URL shape here
+            if (typeof image !== "string" || !image.trim()) {
+              image = null;
+            }
 
-          return { ...recipe, image };
-        });
+            // Normalize deletion flag (some legacy entries may omit it)
+            const isDeleted = recipe?.isDeleted === true;
+
+            return { ...recipe, image, isDeleted };
+          })
+          // Never show deleted recipes in UI lists
+          .filter((r: any) => r?.isDeleted !== true);
       }
       setRecipes(parsed);
     } catch (err) {
@@ -241,6 +260,52 @@ export default function History() {
     }
   }, []);
 
+  /**
+   * Persist the current cookbooks list into AsyncStorage ("cookbooks")
+   * AND let SyncEngine handle LocalEntity-style store and syncing.
+   */
+  async function syncCookbooksSnapshot(updated: Cookbook[]) {
+    try {
+      if (!syncEngine) {
+        console.warn("[History] syncEngine is not available (unexpected). Falling back to AsyncStorage only.");
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+        return;
+      }
+
+      if (typeof (syncEngine as any).saveLocalCookbooksSnapshot !== "function") {
+        console.warn(
+          "[History] syncEngine.saveLocalCookbooksSnapshot is not available; falling back to legacy AsyncStorage only"
+        );
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+        return;
+      }
+
+      // IMPORTANT: write cookbooks only through SyncEngine so it can:
+      //  - persist the legacy snapshot key
+      //  - mark cookbooks dirty / deletions
+      //  - keep sync_* stores coherent
+      await (syncEngine as any).saveLocalCookbooksSnapshot(updated);
+
+      console.log("[History] cookbooks snapshot saved via SyncEngine", {
+        count: updated.length,
+        engine: syncEngine === globalSyncEngine ? "singleton" : "auth-context",
+      });
+
+      // Trigger a full sync (manual reason is not throttled in SyncEngine)
+      if (typeof (syncEngine as any).requestSync === "function") {
+        (syncEngine as any).requestSync("manual");
+      }
+    } catch (err) {
+      console.warn("[History] syncCookbooksSnapshot failed", err);
+      // Safety net: do not block UI persistence
+      try {
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
@@ -271,8 +336,9 @@ export default function History() {
     }, [loadRecipes, loadCookbooks])
   );
 
+
   // --- Delete modal state
-  const [deleteTarget, setDeleteTarget] = useState<{id: string, type: "recipe" | "cookbook"} | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string, type: "recipe" | "cookbook" } | null>(null);
 
   // --- Create cookbook
   const createCookbook = async () => {
@@ -281,17 +347,26 @@ export default function History() {
       return;
     }
 
+    const ts = Date.now();
     const newBook: Cookbook = {
-      id: `${Date.now()}`,
+      id: `${ts}`,
       name: newCookbookName.trim(),
       image: undefined,
+      // @ts-expect-error: legacy cookbook shape used by sync layer includes timestamps
+      createdAt: ts,
+      // @ts-expect-error: legacy cookbook shape used by sync layer includes timestamps
+      updatedAt: ts,
     };
 
     const safeCookbooks = Array.isArray(cookbooks) ? cookbooks : [];
     const updated = [...safeCookbooks, newBook];
 
     setCookbooks(updated);
-    await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+    try {
+      await syncCookbooksSnapshot(updated);
+    } catch (syncErr: unknown) {
+      console.warn("[History] sync after create cookbook failed", syncErr);
+    }
     trackAnalyticsEvent("cookbook_created", {
       cookbookId: newBook.id,
       cookbookName: newBook.name,
@@ -303,12 +378,12 @@ export default function History() {
 
   // --- Delete recipe
   const deleteRecipe = (id: string) => {
-    setDeleteTarget({id, type: "recipe"});
+    setDeleteTarget({ id, type: "recipe" });
   };
 
   // --- Delete cookbook
   const deleteCookbook = (id: string) => {
-    setDeleteTarget({id, type: "cookbook"});
+    setDeleteTarget({ id, type: "cookbook" });
   };
 
   // --- Confirm delete
@@ -325,8 +400,49 @@ export default function History() {
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       );
       setRecipes(updated);
-      await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+      try {
+        if (!syncEngine) {
+          console.warn("[History] syncEngine missing; cannot trigger recipe sync");
+        } else {
+          // 1) Persist the legacy snapshot so UI stays consistent
+          if (typeof (syncEngine as any).saveLocalRecipesSnapshot === "function") {
+            await (syncEngine as any).saveLocalRecipesSnapshot(updated);
+          } else {
+            // Fallback (shouldn't happen): keep local storage correct
+            await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+          }
 
+          // 2) Mark the deleted recipe as dirty so RecipeSync can push a deletion
+          // (removing from the legacy snapshot alone is not enough for remote delete)
+          const now = Date.now();
+          const deletedForSync = {
+            ...(targetRecipe ?? {}),
+            id: deleteTarget.id,
+            isDeleted: true,
+            updatedAt: now,
+          };
+
+          if (typeof (syncEngine as any).markRecipeDirty === "function") {
+            await (syncEngine as any).markRecipeDirty(deletedForSync);
+          } else {
+            console.warn(
+              "[History] syncEngine.markRecipeDirty is not available; recipe delete may not sync until next full sync"
+            );
+          }
+
+          // 3) Trigger a full sync (manual is not throttled)
+          if (typeof (syncEngine as any).requestSync === "function") {
+            (syncEngine as any).requestSync("manual");
+          }
+
+          console.log("[History] recipe deleted -> marked dirty + sync requested", {
+            id: deleteTarget.id,
+            remaining: updated.length,
+          });
+        }
+      } catch (syncErr: unknown) {
+        console.warn("[History] sync after delete recipe failed", syncErr);
+      }
       trackAnalyticsEvent("manual_recipe_deleted", {
         recipeId: deleteTarget.id,
         recipeTitle: targetRecipe?.title ?? null,
@@ -340,8 +456,11 @@ export default function History() {
 
       const updated = cookbooks.filter((c) => c.id !== deleteTarget.id);
       setCookbooks(updated);
-      await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
-
+      try {
+        await syncCookbooksSnapshot(updated);
+      } catch (syncErr: unknown) {
+        console.warn("[History] sync after delete cookbook failed", syncErr);
+      }
       trackAnalyticsEvent("cookbook_deleted", {
         cookbookId: deleteTarget.id,
         cookbookName: targetCookbook?.name ?? null,
@@ -366,6 +485,7 @@ export default function History() {
 
   // --- Filtered recipes
   const filteredRecipes = recipes.filter((r) => {
+    if ((r as any)?.isDeleted) return false;
     const matchesSearch = r.title.toLowerCase().includes(search.toLowerCase());
     const matchesDiff =
       selectedDifficulties.length === 0 ||
@@ -542,7 +662,7 @@ export default function History() {
                   style={{ flex: 1 }}
                 >
                   <AppCard style={styles.cookbookCard}>
-                    <Image source={{ uri: img }} style={styles.cookbookImage} resizeMode="cover"/>
+                    <Image source={{ uri: img }} style={styles.cookbookImage} resizeMode="cover" />
                     <View style={styles.cookbookOverlay}>
                       <Text style={styles.cookbookTitle}>{item.name}</Text>
                       <TouchableOpacity onPress={() => deleteCookbook(item.id)}>
@@ -772,8 +892,43 @@ export default function History() {
                   const stored = await AsyncStorage.getItem("recipes");
                   let parsed = stored ? JSON.parse(stored) : [];
                   parsed = [recipe, ...parsed];
-                  await AsyncStorage.setItem("recipes", JSON.stringify(parsed));
                   setRecipes(parsed);
+                  try {
+                    if (syncEngine) {
+                      // Persist legacy snapshot (and let SyncEngine keep its sync_* stores coherent)
+                      await syncEngine.saveLocalRecipesSnapshot(parsed);
+
+                      // IMPORTANT: imported recipes must be marked dirty, otherwise RecipeSync
+                      // has nothing to push (manual recipes do this in add-recipe.tsx).
+                      if (typeof (syncEngine as any).markRecipeDirty === "function") {
+                        // Ensure timestamps exist / are updated so conflict strategies behave predictably
+                        const now = Date.now();
+                        const recipeForSync = {
+                          ...recipe,
+                          id: recipe?.id,
+                          // prefer numeric timestamps if present; otherwise set them
+                          createdAt:
+                            typeof (recipe as any)?.createdAt === "number"
+                              ? (recipe as any).createdAt
+                              : now,
+                          updatedAt: now,
+                          isDeleted: false,
+                        };
+                        await (syncEngine as any).markRecipeDirty(recipeForSync);
+                      } else {
+                        console.warn(
+                          "[History] syncEngine.markRecipeDirty is not available; imported recipe may not sync until next full sync"
+                        );
+                      }
+
+                      // Trigger a full sync (manual reason is not throttled in SyncEngine)
+                      syncEngine.requestSync("manual");
+                    } else {
+                      console.warn("[History] syncEngine missing; cannot sync imported recipe");
+                    }
+                  } catch (syncErr: unknown) {
+                    console.warn("[History] sync after import recipe failed", syncErr);
+                  }
 
                   setImportUrl("");
                   setImportUrlVisible(false);

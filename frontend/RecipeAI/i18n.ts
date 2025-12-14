@@ -157,6 +157,7 @@ const resources = {
         saving: "Saving...",
         add: "Add",
         error_generic: "Something went wrong",
+        validation: "Validation",
         slogan: "Your smart kitchen companion",
       },
       auth: {
@@ -538,6 +539,7 @@ const resources = {
         next: "Siguiente",
         saving: "Guardando...",
         add: "Agregar",
+        validation: "Validación",
         slogan: "Tu compañero inteligente en la cocina",
       },
       auth: {
@@ -885,6 +887,7 @@ const resources = {
         next: "Seguinte",
         saving: "A guardar...",
         add: "Adicionar",
+        validation: "Validação",
         slogan: "O seu companheiro inteligente na cozinha",
       },
       auth: {
@@ -1232,6 +1235,7 @@ const resources = {
         next: "Próximo",
         saving: "Salvando...",
         add: "Adicionar",
+        validation: "Validação",
         slogan: "Seu companheiro inteligente na cozinha",
       },
       auth: {
@@ -1545,6 +1549,7 @@ const resources = {
         next: "Suivant",
         saving: "Enregistrement...",
         add: "Ajouter",
+        validation: "Validation",
         slogan: "Votre compagnon de cuisine intelligent",
       },
       auth: {
@@ -1858,6 +1863,7 @@ const resources = {
         next: "Weiter",
         saving: "Wird gespeichert...",
         add: "Hinzufügen",
+        validation: "Validierung",
         slogan: "Ihr smarter Küchenbegleiter",
       },
       auth: {

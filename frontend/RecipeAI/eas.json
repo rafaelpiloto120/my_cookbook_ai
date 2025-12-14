@@ -8,7 +8,8 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://10.0.2.2:3000"
+        "EXPO_PUBLIC_API_URL": "http://10.0.2.2:3000",
+        "EXPO_PUBLIC_APP_ENV": "local"
       }
     },
     "preview": {
@@ -17,7 +18,8 @@
         "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com",
         "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "742340260619-8c9a37aog78fu9af0nludq580m8hgb7v.apps.googleusercontent.com",
         "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com",
-        "EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com"
+        "EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com",
+        "EXPO_PUBLIC_APP_ENV": "preview"
       }
     },
     "production": {
@@ -26,7 +28,8 @@
         "EXPO_PUBLIC_API_URL": "https://mycookbook-backend.onrender.com",
         "EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID": "742340260619-8c9a37aog78fu9af0nludq580m8hgb7v.apps.googleusercontent.com",
         "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com",
-        "EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com"
+        "EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID": "742340260619-7agcuqm8b3rg0fqd3te4hfhfh3hn2bkj.apps.googleusercontent.com",
+        "EXPO_PUBLIC_APP_ENV": "production"
       }
     }
   },

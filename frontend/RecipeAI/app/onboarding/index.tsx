@@ -28,6 +28,11 @@ const KEYS = {
   THEME: "themeMode",        // "system" | "light" | "dark"
 };
 
+// Sync-layer AsyncStorage keys (keep in sync with lib/sync/*)
+const SYNC_KEYS = {
+  COOKBOOKS: "sync_cookbooks",
+};
+
 const HEADER_BG = "#293a53";
 
 // robust translator: never show raw keys; leverage i18next defaultValue
@@ -84,12 +89,12 @@ function resolveSupportedLanguageFromDevice(): SupportedLanguage {
     const norm = (tag || "").replace("_", "-").toLowerCase();
 
     if (norm.startsWith("pt-br")) return "pt-BR" as SupportedLanguage;
-    if (norm.startsWith("pt"))    return "pt" as SupportedLanguage;
-    if (norm.startsWith("es"))    return "es" as SupportedLanguage;
-    if (norm.startsWith("fr"))    return "fr" as SupportedLanguage;
-    if (norm.startsWith("de"))    return "de" as SupportedLanguage;
-    if (norm.startsWith("it"))    return "it" as SupportedLanguage;
-    if (norm.startsWith("en"))    return "en" as SupportedLanguage;
+    if (norm.startsWith("pt")) return "pt" as SupportedLanguage;
+    if (norm.startsWith("es")) return "es" as SupportedLanguage;
+    if (norm.startsWith("fr")) return "fr" as SupportedLanguage;
+    if (norm.startsWith("de")) return "de" as SupportedLanguage;
+    if (norm.startsWith("it")) return "it" as SupportedLanguage;
+    if (norm.startsWith("en")) return "en" as SupportedLanguage;
 
     return "en" as SupportedLanguage;
   } catch {
@@ -121,12 +126,12 @@ export default function Onboarding() {
       try {
         // Respect previously chosen language (from onboarding/profile)
         const storedUserLang = await AsyncStorage.getItem("userLanguage");
-        const storedLegacy   = await AsyncStorage.getItem(KEYS.LANGUAGE);
+        const storedLegacy = await AsyncStorage.getItem(KEYS.LANGUAGE);
         const chosen = storedUserLang || storedLegacy;
 
         if (chosen && typeof chosen === "string") {
           if (i18n.language !== chosen) {
-            try { await i18n.changeLanguage(chosen as SupportedLanguage); } catch {}
+            try { await i18n.changeLanguage(chosen as SupportedLanguage); } catch { }
           }
           setLanguage(chosen as SupportedLanguage);
           return;
@@ -135,7 +140,7 @@ export default function Onboarding() {
         // Auto-detect if nothing stored
         const detected = resolveSupportedLanguageFromDevice();
         setLanguage(detected);
-        try { await i18n.changeLanguage(detected); } catch {}
+        try { await i18n.changeLanguage(detected); } catch { }
       } catch {
         // ignore, keep current language
       }
@@ -150,7 +155,7 @@ export default function Onboarding() {
         await AsyncStorage.setItem("userLanguage", language as string);
         await AsyncStorage.setItem(KEYS.LANGUAGE, language as string);
         await saveUserPrefs({ userLanguage: language as SupportedLanguage });
-      } catch {}
+      } catch { }
     })();
   }, [language]);
 
@@ -186,14 +191,14 @@ export default function Onboarding() {
   const allAvoid: Record<string, { label: string; icon: string }> =
     rawAvoid && typeof rawAvoid === "object" && !Array.isArray(rawAvoid) ? rawAvoid : {};
   const dietaryOptions = Object.fromEntries(
-  Object.entries(allDietary).filter(([key]) => key !== "dietary.none" && key.toLowerCase() !== "none")
-);
-const avoidOptions = Object.fromEntries(
-  Object.entries(allAvoid).filter(([key]) => key !== "avoid.none" && key.toLowerCase() !== "none")
-);
+    Object.entries(allDietary).filter(([key]) => key !== "dietary.none" && key.toLowerCase() !== "none")
+  );
+  const avoidOptions = Object.fromEntries(
+    Object.entries(allAvoid).filter(([key]) => key !== "avoid.none" && key.toLowerCase() !== "none")
+  );
 
   const [dietary, setDietary] = useState<string[]>([]);
-const [avoid, setAvoid] = useState<string[]>([]);
+  const [avoid, setAvoid] = useState<string[]>([]);
   const [avoidOther, setAvoidOther] = useState("");
 
   // measure & theme
@@ -202,16 +207,20 @@ const [avoid, setAvoid] = useState<string[]>([]);
 
 
   const toggleDietary = (key: string) => {
-  setDietary(prev => (prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]));
-};
+    setDietary(prev => (prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]));
+  };
 
-const toggleAvoid = (key: string) => {
-  setAvoid(prev => {
-    const next = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
-    if (!next.includes("other")) setAvoidOther(""); // Profile uses "other"
-    return next;
-  });
-};
+  const toggleAvoid = (key: string) => {
+    setAvoid((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+
+      // Avoid keys are namespaced like "avoid.gluten", "avoid.other", etc.
+      // Keep the "Other" free-text only if "avoid.other" is selected.
+      if (!next.includes("other")) setAvoidOther("");
+
+      return next;
+    });
+  };
 
   const next = () => setStep((s) => Math.min(3, s + 1));
   const back = () => setStep((s) => Math.max(1, s - 1));
@@ -231,11 +240,19 @@ const toggleAvoid = (key: string) => {
     // expected by the Profile screen and other legacy consumers.
     try {
       await AsyncStorage.multiSet([
+        // Legacy keys used by existing screens
         ["dietary", JSON.stringify(dietary || [])],
         ["avoid", JSON.stringify(avoid || [])],
         ["avoidOther", avoidOther || ""],
         ["measurement", measure],
         ["theme", themeMode],
+
+        // Canonical keys (keep consistent with KEYS above)
+        [KEYS.DIETARY, JSON.stringify(dietary || [])],
+        [KEYS.AVOID, JSON.stringify(avoid || [])],
+        [KEYS.AVOID_OTHER, avoidOther || ""],
+        [KEYS.MEASURE, measure],
+        [KEYS.THEME, themeMode],
       ]);
     } catch (e) {
       // If this fails, we still continue; saveUserPrefs already holds the source of truth
@@ -247,7 +264,7 @@ const toggleAvoid = (key: string) => {
 
     // Ensure i18n reflects language immediately
     if (language && i18n.language !== language) {
-      await i18n.changeLanguage(language).catch(() => {});
+      await i18n.changeLanguage(language).catch(() => { });
     }
 
     // Ensure ThemeContext matches the selected themeMode immediately,
@@ -275,6 +292,16 @@ const toggleAvoid = (key: string) => {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist
       await ensureDefaultCookbooks();
+      // We cannot reliably sync from onboarding because AuthProvider may not be mounted yet.
+      // Instead, set a flag so AuthContext can trigger a sync right after auth is ready.
+      try {
+        await AsyncStorage.setItem("post_onboarding_sync", JSON.stringify({
+          ts: Date.now(),
+          reason: "onboarding-finish",
+        }));
+      } catch {
+        // ignore
+      }
       // Go to tabs home
       router.replace("/(tabs)");
     } catch (e) {
@@ -283,21 +310,37 @@ const toggleAvoid = (key: string) => {
   }
 
   async function handleCreateAccount() {
-  try {
-    await persistOnboardingPrefs();
-    // Create localized default cookbooks if none exist yet
-    await ensureDefaultCookbooks();
-  } catch {
-    // even if this fails, still try to navigate so user can attempt auth
+    try {
+      await persistOnboardingPrefs();
+      // Create localized default cookbooks if none exist yet
+      await ensureDefaultCookbooks();
+      try {
+        await AsyncStorage.setItem("post_onboarding_sync", JSON.stringify({
+          ts: Date.now(),
+          reason: "onboarding-create-account",
+        }));
+      } catch {
+        // ignore
+      }
+    } catch {
+      // even if this fails, still try to navigate so user can attempt auth
+    }
+    router.push("/auth/signin?mode=signup");
   }
-  router.push("/auth/signin?mode=signup");
-}
 
   async function handleSignInInstead() {
     try {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist yet
       await ensureDefaultCookbooks();
+      try {
+        await AsyncStorage.setItem("post_onboarding_sync", JSON.stringify({
+          ts: Date.now(),
+          reason: "onboarding-signin",
+        }));
+      } catch {
+        // ignore
+      }
     } catch {
       // even if this fails, still try to navigate so user can attempt auth
     }
@@ -341,7 +384,33 @@ const toggleAvoid = (key: string) => {
       },
     ];
 
+    // Persist legacy snapshot used by existing UI screens
     await AsyncStorage.setItem("cookbooks", JSON.stringify(defaults));
+
+    // Also persist to the sync-layer store so a first sync can push immediately
+    // (avoid relying on CookbookSync doing a one-time migration at the right time)
+    const now = Date.now();
+    const localEntities = defaults.map((c: any) => ({
+      id: c.id,
+      data: {
+        id: c.id,
+        name: c.name ?? "",
+        imageUrl: c.imageUrl ?? null,
+        createdAt: now,
+        updatedAt: now,
+        isDeleted: false,
+      },
+      sync: {
+        dirty: true,
+        lastSyncedAt: null,
+      },
+    }));
+
+    try {
+      await AsyncStorage.setItem(SYNC_KEYS.COOKBOOKS, JSON.stringify(localEntities));
+    } catch {
+      // best-effort; legacy snapshot is still written
+    }
   }
 
   return (
@@ -453,12 +522,12 @@ const toggleAvoid = (key: string) => {
                       onPress={async () => {
                         const lng = option.code as SupportedLanguage;
                         setLanguage(lng);
-                        try { await i18n.changeLanguage(lng); } catch {}
+                        try { await i18n.changeLanguage(lng); } catch { }
                         try {
                           await AsyncStorage.setItem("userLanguage", lng);
                           await AsyncStorage.setItem(KEYS.LANGUAGE, lng);
                           await saveUserPrefs({ userLanguage: lng });
-                        } catch {}
+                        } catch { }
                         setModalLanguage(false);
                       }}
                     >
@@ -606,7 +675,7 @@ const toggleAvoid = (key: string) => {
             <View style={styles.rowWrap}>
               {[
                 { k: "light", label: tr("onboarding.theme_light", "Light") },
-                { k: "dark",  label: tr("onboarding.theme_dark",  "Dark")  },
+                { k: "dark", label: tr("onboarding.theme_dark", "Dark") },
               ].map(m => (
                 <TouchableOpacity
                   key={m.k}
@@ -629,7 +698,7 @@ const toggleAvoid = (key: string) => {
             </Text>
             <View style={styles.rowWrap}>
               {[
-                { k: "metric",   label: tr("onboarding.measurement_metric", "Metric") },
+                { k: "metric", label: tr("onboarding.measurement_metric", "Metric") },
                 { k: "imperial", label: tr("onboarding.measurement_imperial", "Imperial") },
               ].map(m => (
                 <TouchableOpacity

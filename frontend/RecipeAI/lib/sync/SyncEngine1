@@ -1,0 +1,76 @@
+// lib/sync/SyncEngine.ts
+import { CookbookSync } from "./CookbookSync";
+import { RecipeSync } from "./RecipeSync";
+import { PreferencesSync } from "./PreferencesSync";
+
+export interface SyncEngineOptions {
+  /** Return the current Firebase auth uid (or null if not logged in). */
+  getCurrentUid: () => string | null;
+}
+
+export class SyncEngine {
+  private cookbookSync = new CookbookSync();
+  private recipeSync = new RecipeSync();
+  private prefsSync = new PreferencesSync();
+
+  private getCurrentUid: () => string | null;
+
+  constructor(opts: SyncEngineOptions) {
+    this.getCurrentUid = opts.getCurrentUid;
+  }
+
+  /**
+   * Top-level entry point to sync everything (pull + push).
+   * Call on:
+   * - app start
+   * - app resume
+   * - user logs in / link anonymous account → full account
+   */
+  async syncAll(): Promise<void> {
+    const uid = this.getCurrentUid();
+    if (!uid) {
+      // Anonymous / not logged in → do not sync with Firestore
+      return;
+    }
+
+    // Order matters a bit: prefs can be used by other modules
+    await this.prefsSync.pullFromRemote(uid);
+    await this.cookbookSync.pullFromRemote(uid);
+    await this.recipeSync.pullFromRemote(uid);
+
+    await this.prefsSync.pushToRemote(uid);
+    await this.cookbookSync.pushToRemote(uid);
+    await this.recipeSync.pushToRemote(uid);
+  }
+
+  /**
+   * Call this when the auth state changes.
+   * - Anonymous → logged-in (via linkWithCredential) → just syncAll()
+   * - Logged-in → logged-out → optionally clear local synced data or switch to guest mode
+   */
+  async handleAuthStateChanged(isLoggedIn: boolean): Promise<void> {
+    if (isLoggedIn) {
+      // e.g. anon → account, or user switches accounts
+      await this.syncAll();
+    } else {
+      // Logged out → you may choose to:
+      // - keep local data for guest mode
+      // - or clear local synced data
+      // For now we do nothing here.
+    }
+  }
+
+  // Expose underlying modules if you need fine-grained control:
+
+  getCookbookSync() {
+    return this.cookbookSync;
+  }
+
+  getRecipeSync() {
+    return this.recipeSync;
+  }
+
+  getPreferencesSync() {
+    return this.prefsSync;
+  }
+}

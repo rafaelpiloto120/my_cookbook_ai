@@ -20,6 +20,7 @@ import { getDeviceId } from "../../../utils/deviceId";
 import AppCard from "../../../components/AppCard";
 import { MaterialIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
+import { syncEngine } from "../../../lib/sync/SyncEngine";
 
 const defaultImage = require("../../../assets/default_recipe.png");
 
@@ -54,6 +55,13 @@ export default function RecipeDetail() {
   const router = useRouter();
   const { bg, text, subText } = useThemeColors();
   const { t } = useTranslation();
+  const editRecipe = () => {
+  if (!currentRecipe) return;
+  router.push({
+    pathname: "/add-recipe",
+    params: { edit: JSON.stringify(currentRecipe) },
+  });
+};
 
   // ✅ Persisted animation value
   const fabAnim = useRef(new Animated.Value(0)).current;
@@ -198,10 +206,20 @@ export default function RecipeDetail() {
         text: "Delete",
         style: "destructive",
         onPress: async () => {
-          const stored = await AsyncStorage.getItem("recipes");
-          const arr: Recipe[] = stored ? JSON.parse(stored) : [];
-          const updated = arr.filter((r) => r.id !== currentRecipe.id);
-          await AsyncStorage.setItem("recipes", JSON.stringify(updated));
+          // Mark deleted locally (dirty) + trigger a full sync.
+          // We intentionally run a full sync because cookbook/preferences may have pending dirty state too.
+          if (syncEngine) {
+            try {
+              const recipeSync = (syncEngine as any)?.recipeSync;
+              if (recipeSync && typeof recipeSync.markLocalDeleted === "function") {
+                await recipeSync.markLocalDeleted(currentRecipe.id);
+              }
+              // Trigger a full sync immediately (bypass throttling).
+              await syncEngine.syncAll("manual", { bypassThrottle: true });
+            } catch (e) {
+              console.warn("[RecipeDetail] deleteRecipe sync failed", e);
+            }
+          }
 
           // 🔹 Analytics: manual recipe deleted (reuses /analytics-event)
           try {
@@ -255,321 +273,347 @@ export default function RecipeDetail() {
     ]);
   };
 
-  const editRecipe = async () => {
-    if (!currentRecipe) return;
-    if (!isSaved) {
-      await saveRecipe();
-    }
+
+
+const startCooking = () => {
+  if (!currentRecipe) return;
+
+  // fade out FAB then navigate
+  Animated.timing(fabAnim, {
+    toValue: 0,
+    duration: 200,
+    useNativeDriver: true,
+  }).start(() => {
     router.push({
-      pathname: "/add-recipe",
-      params: { edit: JSON.stringify(currentRecipe) },
+      pathname: "/recipe/start-cooking", // ✅ correct route
+      params: { recipe: JSON.stringify(currentRecipe) },
     });
-  };
+  });
+};
 
-  const startCooking = () => {
-    if (!currentRecipe) return;
-
-    // fade out FAB then navigate
-    Animated.timing(fabAnim, {
-      toValue: 0,
-      duration: 200,
-      useNativeDriver: true,
-    }).start(() => {
-      router.push({
-        pathname: "/recipe/start-cooking", // ✅ correct route
-        params: { recipe: JSON.stringify(currentRecipe) },
-      });
+const shareRecipe = async () => {
+  if (!currentRecipe) return;
+  try {
+    const message = `${currentRecipe.title}\n\nIngredients:\n${currentRecipe.ingredients.join(
+      "\n"
+    )}\n\nSteps:\n${currentRecipe.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
+    await Share.share({
+      message,
+      title: currentRecipe.title,
     });
-  };
+  } catch (error) {
+    Alert.alert("Error", "Failed to share recipe");
+  }
+};
 
-  const shareRecipe = async () => {
-    if (!currentRecipe) return;
-    try {
-      const message = `${currentRecipe.title}\n\nIngredients:\n${currentRecipe.ingredients.join(
-        "\n"
-      )}\n\nSteps:\n${currentRecipe.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
-      await Share.share({
-        message,
-        title: currentRecipe.title,
-      });
-    } catch (error) {
-      Alert.alert("Error", "Failed to share recipe");
-    }
-  };
+const scaleIngredient = (ingredient: string) => {
+  // This helper attempts to find numbers in the ingredient string and scale them
+  // For example: "2 cups flour" with servings 4 and base servings 2 => "4 cups flour"
+  if (!currentRecipe) return ingredient;
+  const baseServings = currentRecipe.servings;
+  if (baseServings === servings) return ingredient;
 
-  const scaleIngredient = (ingredient: string) => {
-    // This helper attempts to find numbers in the ingredient string and scale them
-    // For example: "2 cups flour" with servings 4 and base servings 2 => "4 cups flour"
-    if (!currentRecipe) return ingredient;
-    const baseServings = currentRecipe.servings;
-    if (baseServings === servings) return ingredient;
+  return ingredient.replace(/(\d+(\.\d+)?)/g, (match) => {
+    const num = parseFloat(match);
+    if (isNaN(num)) return match;
+    const scaled = (num * servings) / baseServings;
+    // Format to max 2 decimals, remove trailing zeros
+    return scaled % 1 === 0 ? scaled.toString() : scaled.toFixed(2).replace(/\.?0+$/, "");
+  });
+};
 
-    return ingredient.replace(/(\d+(\.\d+)?)/g, (match) => {
-      const num = parseFloat(match);
-      if (isNaN(num)) return match;
-      const scaled = (num * servings) / baseServings;
-      // Format to max 2 decimals, remove trailing zeros
-      return scaled % 1 === 0 ? scaled.toString() : scaled.toFixed(2).replace(/\.?0+$/, "");
-    });
-  };
+const saveRecipe = async () => {
+  if (!currentRecipe) return;
 
-  const saveRecipe = async () => {
-    if (!currentRecipe) return;
-    try {
+  try {
+    // Ensure we always bump an updatedAt so merges treat this as newest.
+    const withUpdatedAt: any = {
+      ...currentRecipe,
+      updatedAt: (currentRecipe as any).updatedAt ?? Date.now(),
+    };
+
+    // 1) Always persist locally so offline users still keep their changes.
+    // Prefer sync-engine helpers if available, but ALWAYS fall back to AsyncStorage.
+    {
       const stored = await AsyncStorage.getItem("recipes");
       const arr: Recipe[] = stored ? JSON.parse(stored) : [];
-      const exists = arr.find((r) => r.id === currentRecipe.id);
-      if (exists) {
-        Alert.alert("Info", "Recipe already saved");
-        setIsSaved(true);
-        return;
+      const next = arr.some((r) => r.id === withUpdatedAt.id)
+        ? arr.map((r) => (r.id === withUpdatedAt.id ? withUpdatedAt : r))
+        : [...arr, withUpdatedAt];
+
+      const helper = (syncEngine as any)?.saveLocalRecipesSnapshot;
+      if (typeof helper === "function") {
+        try {
+          await helper.call(syncEngine, next);
+        } catch (e) {
+          // If helper fails, persist snapshot directly.
+          await AsyncStorage.setItem("recipes", JSON.stringify(next));
+        }
+      } else {
+        await AsyncStorage.setItem("recipes", JSON.stringify(next));
       }
-      // Save currentRecipe as is (do not modify cookbooks field)
-      arr.push(currentRecipe);
-      await AsyncStorage.setItem("recipes", JSON.stringify(arr));
-      Alert.alert("Success", "Recipe saved successfully");
-      setIsSaved(true);
-    } catch (error) {
-      Alert.alert("Error", "Failed to save recipe");
-      console.error("Failed to save recipe:", error);
     }
-  };
+
+    // 2) Mark as dirty in the sync store (this is what makes it eligible to push)
+    if (syncEngine) {
+      if (typeof (syncEngine as any).markRecipeDirty === "function") {
+        await (syncEngine as any).markRecipeDirty(withUpdatedAt);
+      } else {
+        const recipeSync = (syncEngine as any)?.recipeSync;
+        if (recipeSync && typeof recipeSync.upsertLocalRecipe === "function") {
+          await recipeSync.upsertLocalRecipe(withUpdatedAt);
+        } else if (recipeSync && typeof recipeSync.updateLocalRecipe === "function") {
+          await recipeSync.updateLocalRecipe(withUpdatedAt);
+        }
+      }
+
+      // 3) Trigger a full sync immediately (bypass throttling)
+      await syncEngine.syncAll("manual", { bypassThrottle: true });
+    }
+
+    Alert.alert("Success", "Recipe saved successfully");
+    setIsSaved(true);
+  } catch (error) {
+    Alert.alert("Error", "Failed to save recipe");
+    console.error("Failed to save recipe:", error);
+  }
+};
 
 
-  // Safely resolve recipe image source (supports string or { uri } object)
-  const getRecipeImageSource = () => {
-    if (!currentRecipe || !currentRecipe.image) {
+// Safely resolve recipe image source (supports string or { uri } object)
+const getRecipeImageSource = () => {
+  if (!currentRecipe || !currentRecipe.image) {
+    return defaultImage;
+  }
+
+  const img: any = currentRecipe.image;
+
+  // Case 1: image is a simple string URL/URI
+  if (typeof img === "string") {
+    const trimmed = img.trim();
+    if (!trimmed || trimmed === "null" || trimmed === "undefined") {
       return defaultImage;
     }
+    // Let React Native try to load any non-empty URI string (http, file, content, data:, etc.)
+    return { uri: trimmed };
+  }
 
-    const img: any = currentRecipe.image;
-
-    // Case 1: image is a simple string URL/URI
-    if (typeof img === "string") {
-      const trimmed = img.trim();
-      if (!trimmed || trimmed === "null" || trimmed === "undefined") {
-        return defaultImage;
-      }
-      // Let React Native try to load any non-empty URI string (http, file, content, data:, etc.)
-      return { uri: trimmed };
+  // Case 2: image is an object like { uri: "..." }
+  if (typeof img === "object" && img !== null && typeof img.uri === "string") {
+    const trimmed = img.uri.trim();
+    if (!trimmed || trimmed === "null" || trimmed === "undefined") {
+      return defaultImage;
     }
+    return { uri: trimmed };
+  }
 
-    // Case 2: image is an object like { uri: "..." }
-    if (typeof img === "object" && img !== null && typeof img.uri === "string") {
-      const trimmed = img.uri.trim();
-      if (!trimmed || trimmed === "null" || trimmed === "undefined") {
-        return defaultImage;
-      }
-      return { uri: trimmed };
-    }
+  // Fallback
+  return defaultImage;
+};
 
-    // Fallback
-    return defaultImage;
-  };
-
-  const imageSource = getRecipeImageSource();
+const imageSource = getRecipeImageSource();
 
 
-  // Mappings for difficulty and cost
-  const difficultyMap = {
-    Easy: t("difficulty.easy"),
-    Moderate: t("difficulty.moderate"),
-    Challenging: t("difficulty.challenging"),
-  };
-  const costMap = {
-    Cheap: t("cost.cheap"),
-    Medium: t("cost.medium"),
-    Expensive: t("cost.expensive"),
-  };
+// Mappings for difficulty and cost
+const difficultyMap = {
+  Easy: t("difficulty.easy"),
+  Moderate: t("difficulty.moderate"),
+  Challenging: t("difficulty.challenging"),
+};
+const costMap = {
+  Cheap: t("cost.cheap"),
+  Medium: t("cost.medium"),
+  Expensive: t("cost.expensive"),
+};
 
-  // Use map to always show emoji label
-  const difficultyDisplay = currentRecipe ? (difficultyMap[currentRecipe.difficulty] || currentRecipe.difficulty) : "";
+// Use map to always show emoji label
+const difficultyDisplay = currentRecipe ? (difficultyMap[currentRecipe.difficulty] || currentRecipe.difficulty) : "";
 
-  return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: bg }}>
-      <Stack.Screen
-        options={{
-          headerShown: true,
-          title: t("recipes.open_recipe"),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
-          headerTitleAlign: "center",
-          headerLeft: () => (
-            <TouchableOpacity
-              onPress={handleBack}
-              style={{ padding: 8 }}
-            >
-              <MaterialIcons name="arrow-back" size={26} color="#fff" />
+return (
+  <SafeAreaView style={{ flex: 1, backgroundColor: bg }}>
+    <Stack.Screen
+      options={{
+        headerShown: true,
+        title: t("recipes.open_recipe"),
+        headerStyle: { backgroundColor: "#293a53" },
+        headerTintColor: "#fff",
+        headerTitleAlign: "center",
+        headerLeft: () => (
+          <TouchableOpacity
+            onPress={handleBack}
+            style={{ padding: 8 }}
+          >
+            <MaterialIcons name="arrow-back" size={26} color="#fff" />
+          </TouchableOpacity>
+        ),
+        headerRight: () => (
+          <View style={{ flexDirection: "row" }}>
+            <TouchableOpacity onPress={shareRecipe} style={{ padding: 8 }}>
+              <MaterialIcons name="share" size={26} color="#fff" />
             </TouchableOpacity>
-          ),
-          headerRight: () => (
-            <View style={{ flexDirection: "row" }}>
-              <TouchableOpacity onPress={shareRecipe} style={{ padding: 8 }}>
-                <MaterialIcons name="share" size={26} color="#fff" />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={editRecipe} style={{ padding: 8 }}>
-                <MaterialIcons name="edit" size={26} color="#fff" />
-              </TouchableOpacity>
+            <TouchableOpacity onPress={editRecipe} style={{ padding: 8 }}>
+              <MaterialIcons name="edit" size={26} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        ),
+      }}
+    />
+
+    {!currentRecipe ? (
+      <View style={[styles.center, { flex: 1 }]}>
+        <Text style={{ color: text }}>{t("recipes.not_found", "Recipe not found")}</Text>
+      </View>
+    ) : (
+      <>
+        <ScrollView
+          style={styles.container}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 100 }}
+        >
+          <Image
+            source={imageSource}
+            style={styles.detailImage}
+            resizeMode="cover"
+          />
+
+          <Text style={[styles.title, { color: text }]}>{currentRecipe.title}</Text>
+          <Text style={{ color: subText, marginBottom: 16 }}>
+            {t("recipes.created_on")}{" "}
+            {new Date(currentRecipe.createdAt).toLocaleDateString()}
+          </Text>
+
+          {/* Quick Info */}
+          <AppCard>
+            <View style={styles.quickInfo}>
+              <Text style={[styles.quickInfoText, { color: text }]}>
+                ⏱ {currentRecipe.cookingTime} min
+              </Text>
+              <Text style={[styles.quickInfoText, { color: text }]}>
+                {difficultyDisplay}
+              </Text>
+              <Text style={[styles.quickInfoText, { color: text }]}>
+                {costMap[currentRecipe.cost]}
+              </Text>
             </View>
-          ),
-        }}
-      />
+          </AppCard>
 
-      {!currentRecipe ? (
-        <View style={[styles.center, { flex: 1 }]}>
-          <Text style={{ color: text }}>{t("recipes.not_found", "Recipe not found")}</Text>
-        </View>
-      ) : (
-        <>
-          <ScrollView
-            style={styles.container}
-            contentContainerStyle={{ paddingBottom: insets.bottom + 100 }}
-          >
-            <Image
-              source={imageSource}
-              style={styles.detailImage}
-              resizeMode="cover"
-            />
-
-            <Text style={[styles.title, { color: text }]}>{currentRecipe.title}</Text>
-            <Text style={{ color: subText, marginBottom: 16 }}>
-              {t("recipes.created_on")}{" "}
-              {new Date(currentRecipe.createdAt).toLocaleDateString()}
-            </Text>
-
-            {/* Quick Info */}
-            <AppCard>
-              <View style={styles.quickInfo}>
-                <Text style={[styles.quickInfoText, { color: text }]}>
-                  ⏱ {currentRecipe.cookingTime} min
-                </Text>
-                <Text style={[styles.quickInfoText, { color: text }]}>
-                  {difficultyDisplay}
-                </Text>
-                <Text style={[styles.quickInfoText, { color: text }]}>
-                  {costMap[currentRecipe.cost]}
-                </Text>
+          {/* Ingredients */}
+          <Text style={[styles.sectionTitle, { color: text }]}>
+            {t("recipes.ingredients")}
+          </Text>
+          <AppCard>
+            <View style={styles.servingsRow}>
+              <Text style={[styles.servingsLabel, { color: text }]}>
+                {t("recipes.servings", { count: servings })}
+              </Text>
+              <View style={{ flexDirection: "row" }}>
+                <TouchableOpacity
+                  style={styles.stepperBtn}
+                  onPress={() =>
+                    setServings((prev) => (prev > 1 ? prev - 1 : 1))
+                  }
+                >
+                  <Text style={styles.stepper}>−</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.stepperBtn}
+                  onPress={() => setServings((prev) => prev + 1)}
+                >
+                  <Text style={styles.stepper}>+</Text>
+                </TouchableOpacity>
               </View>
-            </AppCard>
+            </View>
+            {currentRecipe.ingredients.map((ing, i) => (
+              <Text key={i} style={[styles.text, { color: text }]}>
+                • {scaleIngredient(ing)}
+              </Text>
+            ))}
+          </AppCard>
 
-            {/* Ingredients */}
-            <Text style={[styles.sectionTitle, { color: text }]}>
-              {t("recipes.ingredients")}
-            </Text>
-            <AppCard>
-              <View style={styles.servingsRow}>
-                <Text style={[styles.servingsLabel, { color: text }]}>
-                  {t("recipes.servings", { count: servings })}
-                </Text>
-                <View style={{ flexDirection: "row" }}>
-                  <TouchableOpacity
-                    style={styles.stepperBtn}
-                    onPress={() =>
-                      setServings((prev) => (prev > 1 ? prev - 1 : 1))
-                    }
+          {/* Preparation */}
+          <Text style={[styles.sectionTitle, { color: text }]}>
+            {t("recipes.preparation")}
+          </Text>
+          <AppCard>
+            {currentRecipe.steps.map((step, i) => (
+              <Text key={i} style={[styles.text, { color: text }]}>
+                {step}
+              </Text>
+            ))}
+          </AppCard>
+
+          {/* Cookbook */}
+          <Text style={[styles.sectionTitle, { color: text }]}>
+            {t("recipes.cookbooks")}
+          </Text>
+          <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
+            {cookbookNames.length > 0 ? (
+              cookbookNames.map((name, index) => (
+                <View key={index} style={styles.cookbookChip}>
+                  <Text
+                    style={[
+                      styles.cookbookChipText,
+                      { color: bg === "#fff" ? text : "#000" },
+                    ]}
                   >
-                    <Text style={styles.stepper}>−</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.stepperBtn}
-                    onPress={() => setServings((prev) => prev + 1)}
-                  >
-                    <Text style={styles.stepper}>+</Text>
-                  </TouchableOpacity>
+                    {name}
+                  </Text>
                 </View>
-              </View>
-              {currentRecipe.ingredients.map((ing, i) => (
-                <Text key={i} style={[styles.text, { color: text }]}>
-                  • {scaleIngredient(ing)}
-                </Text>
-              ))}
-            </AppCard>
-
-            {/* Preparation */}
-            <Text style={[styles.sectionTitle, { color: text }]}>
-              {t("recipes.preparation")}
-            </Text>
-            <AppCard>
-              {currentRecipe.steps.map((step, i) => (
-                <Text key={i} style={[styles.text, { color: text }]}>
-                  {step}
-                </Text>
-              ))}
-            </AppCard>
-
-            {/* Cookbook */}
-            <Text style={[styles.sectionTitle, { color: text }]}>
-              {t("recipes.cookbooks")}
-            </Text>
-            <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
-              {cookbookNames.length > 0 ? (
-                cookbookNames.map((name, index) => (
-                  <View key={index} style={styles.cookbookChip}>
-                    <Text
-                      style={[
-                        styles.cookbookChipText,
-                        { color: bg === "#fff" ? text : "#000" },
-                      ]}
-                    >
-                      {name}
-                    </Text>
-                  </View>
-                ))
-              ) : (
-                <Text style={{ color: subText }}>
-                  {t("recipes.not_in_cookbook")}
-                </Text>
-              )}
-            </AppCard>
-
-            {/* Tags */}
-            {currentRecipe.tags.length > 0 && (
-              <>
-                <Text style={[styles.sectionTitle, { color: text }]}>
-                  {t("recipes.tags")}
-                </Text>
-                <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
-                  {currentRecipe.tags.map((tag, i) => (
-                    <Text key={i} style={styles.tag}>
-                      {tag}
-                    </Text>
-                  ))}
-                </AppCard>
-              </>
+              ))
+            ) : (
+              <Text style={{ color: subText }}>
+                {t("recipes.not_in_cookbook")}
+              </Text>
             )}
-          </ScrollView>
+          </AppCard>
 
-          {/* FAB with animation */}
-          <Animated.View
-            style={[
-              styles.fabContainer,
-              {
-                bottom: insets.bottom + 20,
-                opacity: fabAnim,
-                flexDirection: "row",
-                justifyContent: "flex-end",
-                alignItems: "center",
-              },
-            ]}
-          >
-            <TouchableOpacity style={styles.fab} onPress={startCooking}>
-              <MaterialIcons name="restaurant-menu" size={22} color="#fff" />
-              <Text style={styles.fabText}>{t("recipes.start_cooking")}</Text>
+          {/* Tags */}
+          {currentRecipe.tags.length > 0 && (
+            <>
+              <Text style={[styles.sectionTitle, { color: text }]}>
+                {t("recipes.tags")}
+              </Text>
+              <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
+                {currentRecipe.tags.map((tag, i) => (
+                  <Text key={i} style={styles.tag}>
+                    {tag}
+                  </Text>
+                ))}
+              </AppCard>
+            </>
+          )}
+        </ScrollView>
+
+        {/* FAB with animation */}
+        <Animated.View
+          style={[
+            styles.fabContainer,
+            {
+              bottom: insets.bottom + 20,
+              opacity: fabAnim,
+              flexDirection: "row",
+              justifyContent: "flex-end",
+              alignItems: "center",
+            },
+          ]}
+        >
+          <TouchableOpacity style={styles.fab} onPress={startCooking}>
+            <MaterialIcons name="restaurant-menu" size={22} color="#fff" />
+            <Text style={styles.fabText}>{t("recipes.start_cooking")}</Text>
+          </TouchableOpacity>
+          {!isSaved && (
+            <TouchableOpacity
+              style={[styles.fab, { marginLeft: 12 }]}
+              onPress={saveRecipe}
+            >
+              <MaterialIcons name="save" size={22} color="#fff" />
+              <Text style={styles.fabText}>{t("recipes.save_recipe")}</Text>
             </TouchableOpacity>
-            {!isSaved && (
-              <TouchableOpacity
-                style={[styles.fab, { marginLeft: 12 }]}
-                onPress={saveRecipe}
-              >
-                <MaterialIcons name="save" size={22} color="#fff" />
-                <Text style={styles.fabText}>{t("recipes.save_recipe")}</Text>
-              </TouchableOpacity>
-            )}
-          </Animated.View>
-        </>
-      )}
-    </SafeAreaView>
-  );
+          )}
+        </Animated.View>
+      </>
+    )}
+  </SafeAreaView>
+);
 }
 
 const styles = StyleSheet.create({

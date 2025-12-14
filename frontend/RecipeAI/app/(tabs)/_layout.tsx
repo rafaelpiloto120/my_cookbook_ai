@@ -1,5 +1,5 @@
 import { Tabs, Stack, useRouter, usePathname } from "expo-router";
-import { useTheme, useThemeColors } from "../../context/ThemeContext";
+import { useThemeColors } from "../../context/ThemeContext";
 import { MaterialIcons } from "@expo/vector-icons";
 import { TouchableOpacity, View, Text, Platform } from "react-native";
 import React, { useEffect, useState, useRef } from "react";
@@ -7,9 +7,10 @@ import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
 import { useTranslation } from "react-i18next";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useSyncEngine } from "../../lib/sync/SyncEngine";
+import { useFocusEffect } from "@react-navigation/native";
 
 export default function TabLayout() {
-  const { toggleTheme } = useTheme();
   const { isDark, bg, text, subText } = useThemeColors();
 
   const { t } = useTranslation();
@@ -18,6 +19,7 @@ export default function TabLayout() {
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
   const appOpenLoggedRef = useRef(false);
+  const syncEngine = useSyncEngine();
 
   useEffect(() => {
     let isMounted = true;
@@ -45,6 +47,8 @@ export default function TabLayout() {
     (async () => {
       try {
         const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+        const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+        console.log("[Analytics] app_open env", { backendUrl, appEnv });
         if (!backendUrl) {
           console.warn("[Analytics] EXPO_PUBLIC_API_URL not set; skipping app_open log.");
           return;
@@ -78,6 +82,7 @@ export default function TabLayout() {
               route: pathname,
               isDark,
               platform: Platform.OS ?? "unknown",
+              appEnv, // 👈 local / preview / production
             },
           }),
         });
@@ -86,6 +91,16 @@ export default function TabLayout() {
       }
     })();
   }, [ready, pathname, isDark]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      if (syncEngine) {
+        syncEngine.syncAll("tab-focus").catch(err => {
+          console.warn("[SyncEngine] tab-focus sync error", err);
+        });
+      }
+    }, [syncEngine])
+  );
 
   if (!ready) return null;
 

@@ -33,4 +33,8 @@ export async function getDeviceId(): Promise<string> {
   }
 }
 
+export async function getOrCreateDeviceId(): Promise<string> {
+  return getDeviceId();
+}
+
 export default getDeviceId;

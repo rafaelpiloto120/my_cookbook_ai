@@ -1,5 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+const SYNC_PREFS_KEY = "sync_prefs";
+
 export const PREFS_UPDATED = "prefs:updated";
 
 // Minimal event emitter compatible with React Native (no Node 'events' dependency)
@@ -44,14 +46,53 @@ export async function saveUserPrefs(prefs: {
   userMeasurement?: "metric" | "imperial";
   themeMode?: "light" | "dark" | "system";
 }) {
+  // 1) Preserve existing per-field keys for backward compatibility
   const entries: [string, string][] = [];
-  if (prefs.userLanguage !== undefined) entries.push(["userLanguage", prefs.userLanguage]);
-  if (prefs.userDietary !== undefined)  entries.push(["userDietary", JSON.stringify(prefs.userDietary)]);
-  if (prefs.userAvoid !== undefined)    entries.push(["userAvoid", JSON.stringify(prefs.userAvoid)]);
-  if (prefs.userAvoidOther !== undefined) entries.push(["userAvoidOther", prefs.userAvoidOther]);
-  if (prefs.userMeasurement !== undefined) entries.push(["userMeasurement", prefs.userMeasurement]);
-  if (prefs.themeMode !== undefined)    entries.push(["themeMode", prefs.themeMode]);
+  if (prefs.userLanguage !== undefined)
+    entries.push(["userLanguage", prefs.userLanguage]);
+  if (prefs.userDietary !== undefined)
+    entries.push(["userDietary", JSON.stringify(prefs.userDietary)]);
+  if (prefs.userAvoid !== undefined)
+    entries.push(["userAvoid", JSON.stringify(prefs.userAvoid)]);
+  if (prefs.userAvoidOther !== undefined)
+    entries.push(["userAvoidOther", prefs.userAvoidOther]);
+  if (prefs.userMeasurement !== undefined)
+    entries.push(["userMeasurement", prefs.userMeasurement]);
+  if (prefs.themeMode !== undefined)
+    entries.push(["themeMode", prefs.themeMode]);
 
-  if (entries.length) await AsyncStorage.multiSet(entries);
+  if (entries.length) {
+    await AsyncStorage.multiSet(entries);
+  }
+
+  // 2) Maintain a consolidated, sync-friendly prefs document
+  try {
+    const raw = await AsyncStorage.getItem(SYNC_PREFS_KEY);
+    let existing: any = null;
+    if (raw) {
+      try {
+        existing = JSON.parse(raw);
+      } catch {
+        existing = null;
+      }
+    }
+
+    const now = Date.now();
+    const merged = {
+      ...(existing || {}),
+      ...prefs,
+      updatedAt: now,
+      createdAt:
+        existing && typeof existing.createdAt === "number"
+          ? existing.createdAt
+          : now,
+    };
+
+    await AsyncStorage.setItem(SYNC_PREFS_KEY, JSON.stringify(merged));
+  } catch {
+    // Ignore sync_prefs failures; per-field keys are still persisted
+  }
+
+  // 3) Notify listeners
   prefsEvents.emit(PREFS_UPDATED, prefs);
 }

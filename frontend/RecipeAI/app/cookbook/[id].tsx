@@ -25,6 +25,8 @@ import { auth } from "../../firebaseConfig";
 import { signInAnonymously } from "firebase/auth";
 import { storage } from "../../firebaseConfig";
 import { ref, deleteObject } from "firebase/storage";
+import { useAuth } from "../../context/AuthContext";
+import { syncEngine as syncEngineSingleton } from "../../lib/sync/SyncEngine";
 
 
 const difficultyMap = (t: any) => ({
@@ -45,11 +47,20 @@ export default function CookbookDetail() {
   const { bg, text, subText, card, border } = useThemeColors();
   const { t } = useTranslation();
 
+  const { syncEngine: authSyncEngine } = useAuth();
+  // Some screens can render before AuthContext has finished wiring the engine.
+  // Fallback to the named singleton so we can always persist + sync.
+  const syncEngine = (authSyncEngine ?? syncEngineSingleton) as any;
+
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  console.log("Using backend URL:", backendUrl, "env:", appEnv);
+
   const [cookbookName, setCookbookName] = useState("");
   const [recipes, setRecipes] = useState<any[]>([]);
 
   // Delete confirmation state
-  const [deleteTarget, setDeleteTarget] = useState<{id: string, type: "recipe"} | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string, type: "recipe" } | null>(null);
 
   // edit modal
   const [editVisible, setEditVisible] = useState(false);
@@ -87,9 +98,11 @@ export default function CookbookDetail() {
 
         const thisCookbook = parsedCookbooks.find((c: any) => c.id === id);
         setCookbookName(thisCookbook?.name || "Cookbook");
-        setCookbookImage(thisCookbook?.image || null);
+        // Support both legacy `image` and newer `imageUrl` fields
+        setCookbookImage(thisCookbook?.imageUrl ?? thisCookbook?.image ?? null);
 
         const filtered = parsedRecipes.filter((r: any) => {
+          if (r?.isDeleted) return false;
           if (!Array.isArray(r.cookbooks)) return false;
           return r.cookbooks.some(
             (cb: any) =>
@@ -127,7 +140,7 @@ export default function CookbookDetail() {
       const authInfo = await ensureAuthUid();
       if (!authInfo) return null;
 
-      const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/uploadRecipeImage`;
+      const apiUrl = `${backendUrl}/uploadRecipeImage`;
       const filename = `cover.jpg`;
       const storagePath = `users/${authInfo.uid}/cookbooks/${cookbookId}/${filename}`;
 
@@ -138,7 +151,10 @@ export default function CookbookDetail() {
 
       const res = await fetch(apiUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${authInfo.token}` },
+        headers: {
+          Authorization: `Bearer ${authInfo.token}`,
+          "x-app-env": appEnv,
+        },
         body: form,
       });
 
@@ -173,9 +189,34 @@ export default function CookbookDetail() {
       const storedCookbooks = await AsyncStorage.getItem("cookbooks");
       const parsedCookbooks = storedCookbooks ? JSON.parse(storedCookbooks) : [];
       const updated = parsedCookbooks.map((c: any) =>
-        c.id === id ? { ...c, image: null } : c
+        c.id === id ? { ...c, image: null, imageUrl: null } : c
       );
+
+      // Persist legacy snapshot used by UI screens
       await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+
+      // Save via sync engine + trigger remote sync
+      const anyEngine = syncEngine as any;
+      try {
+        if (typeof anyEngine.saveLocalCookbooksSnapshot === "function") {
+          await anyEngine.saveLocalCookbooksSnapshot(updated);
+        }
+        console.log("[CookbookDetail] requesting sync after cover removal");
+        // Trigger a full sync NOW.
+        if (typeof anyEngine.forceSyncNow === "function") {
+          await anyEngine.forceSyncNow("manual");
+        } else if (typeof anyEngine.syncAll === "function") {
+          try {
+            await anyEngine.syncAll("manual", { bypassThrottle: true });
+          } catch {
+            await anyEngine.syncAll("manual");
+          }
+        } else if (typeof anyEngine.requestSync === "function") {
+          anyEngine.requestSync("manual");
+        }
+      } catch (syncErr) {
+        console.warn("[Cookbook] sync after cover removal failed", syncErr);
+      }
 
       // Update UI state
       setCookbookImage(null);
@@ -207,10 +248,45 @@ export default function CookbookDetail() {
       const parsedCookbooks = storedCookbooks ? JSON.parse(storedCookbooks) : [];
 
       const updated = parsedCookbooks.map((c: any) =>
-        c.id === id ? { ...c, name: newName.trim(), image: finalCookbookImage } : c
+        c.id === id
+          ? {
+              ...c,
+              name: newName.trim(),
+              // Keep legacy `image` for existing UI, but also persist `imageUrl` for sync.
+              image: finalCookbookImage,
+              imageUrl: finalCookbookImage,
+              updatedAt: Date.now(),
+            }
+          : c
       );
 
+      // Persist legacy snapshot used by UI screens
       await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+      // NOTE: `saveLocalCookbooksSnapshot` mirrors this legacy snapshot into the sync-store.
+
+      // Save via sync engine + trigger remote sync
+      const anyEngine = syncEngine as any;
+      try {
+        if (typeof anyEngine.saveLocalCookbooksSnapshot === "function") {
+          await anyEngine.saveLocalCookbooksSnapshot(updated);
+        }
+        console.log("[CookbookDetail] requesting sync after cookbook edit");
+        // Trigger a full sync NOW.
+        if (typeof anyEngine.forceSyncNow === "function") {
+          await anyEngine.forceSyncNow("manual");
+        } else if (typeof anyEngine.syncAll === "function") {
+          try {
+            await anyEngine.syncAll("manual", { bypassThrottle: true });
+          } catch {
+            await anyEngine.syncAll("manual");
+          }
+        } else if (typeof anyEngine.requestSync === "function") {
+          anyEngine.requestSync("manual");
+        }
+      } catch (syncErr) {
+        console.warn("[Cookbook] sync after cookbook rename failed", syncErr);
+      }
+
       setCookbookName(newName.trim());
       setCookbookImage(finalCookbookImage);
       setEditVisible(false);
@@ -280,15 +356,64 @@ export default function CookbookDetail() {
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
+    const recipeId = deleteTarget.id;
+
     try {
       const stored = await AsyncStorage.getItem("recipes");
       const all = stored ? JSON.parse(stored) : [];
-      const updatedAll = Array.isArray(all) ? all.filter((r: any) => r.id !== deleteTarget.id) : [];
+
+      const now = Date.now();
+      let deletedRecipe: any | null = null;
+
+      const updatedAll = Array.isArray(all)
+        ? all.map((r: any) => {
+            if (!r || r.id !== recipeId) return r;
+            deletedRecipe = {
+              ...r,
+              isDeleted: true,
+              updatedAt: now,
+            };
+            return deletedRecipe;
+          })
+        : [];
+
+      // Persist legacy snapshot used by UI screens
       await AsyncStorage.setItem("recipes", JSON.stringify(updatedAll));
-      setRecipes((prev) => prev.filter((r) => r.id !== deleteTarget.id));
+
+      // Save via sync engine + mark dirty + trigger remote sync
+      const anyEngine = syncEngine as any;
+      try {
+        if (typeof anyEngine.saveLocalRecipesSnapshot === "function") {
+          await anyEngine.saveLocalRecipesSnapshot(updatedAll);
+        }
+
+        // Ensure the deletion becomes a dirty item in the sync store
+        if (deletedRecipe && typeof anyEngine.markRecipeDirty === "function") {
+          await anyEngine.markRecipeDirty(deletedRecipe);
+        }
+
+        // Trigger a full sync NOW.
+        if (typeof anyEngine.forceSyncNow === "function") {
+          await anyEngine.forceSyncNow("manual");
+        } else if (typeof anyEngine.syncAll === "function") {
+          try {
+            await anyEngine.syncAll("manual", { bypassThrottle: true });
+          } catch {
+            await anyEngine.syncAll("manual");
+          }
+        } else if (typeof anyEngine.requestSync === "function") {
+          anyEngine.requestSync("manual");
+        }
+      } catch (syncErr) {
+        console.warn("[Cookbook] sync after recipe delete failed", syncErr);
+      }
+
+      // Update UI state (remove from this cookbook list immediately)
+      setRecipes((prev) => prev.filter((r) => r.id !== recipeId));
     } catch (err) {
       console.error("Error deleting recipe:", err);
     }
+
     setDeleteTarget(null);
   };
 
@@ -373,8 +498,18 @@ export default function CookbookDetail() {
                   />
                   <View style={{ flex: 1 }}>
                     <View style={styles.cardHeader}>
-                      <Text style={[styles.cardTitle, { color: text }]}>{item.title}</Text>
-                      <TouchableOpacity onPress={() => deleteRecipe(item.id)}>
+                      <Text
+                        style={[styles.cardTitle, { color: text }]}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
+                        {item.title}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => deleteRecipe(item.id)}
+                        style={styles.deleteButton}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
                         <MaterialIcons name="delete-outline" size={22} color={subText} />
                       </TouchableOpacity>
                     </View>
@@ -661,7 +796,7 @@ export default function CookbookDetail() {
               {/* Import from Image */}
               <TouchableOpacity
                 style={styles.addOptionRow}
-                
+
                 onPress={() => {
                   setAddVisible(false);
                   setTimeout(() => {
@@ -770,11 +905,12 @@ export default function CookbookDetail() {
                 }
                 setImportLoading(true);
                 try {
-                  const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/importRecipeFromUrl`;
+                  const apiUrl = `${backendUrl}/importRecipeFromUrl`;
                   const res = await fetch(apiUrl, {
                     method: "POST",
                     headers: {
                       "Content-Type": "application/json",
+                      "x-app-env": appEnv,
                     },
                     body: JSON.stringify({ url: importUrl.trim() }),
                   });
@@ -823,21 +959,53 @@ export default function CookbookDetail() {
                   const storedRecipes = await AsyncStorage.getItem("recipes");
                   const recipesArr = storedRecipes ? JSON.parse(storedRecipes) : [];
                   // Add cookbook id to cookbooks array
+                  const now = Date.now();
                   const newRecipe = {
                     ...r,
                     id:
                       r.id ||
                       "r-" +
-                      Math.random()
-                        .toString(36)
-                        .slice(2) +
-                      Date.now().toString(36),
+                        Math.random().toString(36).slice(2) +
+                        Date.now().toString(36),
                     cookbooks: [id],
-                    createdAt: Date.now(),
+                    createdAt: now,
+                    updatedAt: now,
+                    isDeleted: false,
                   };
                   recipesArr.unshift(newRecipe);
+
+                  // Persist legacy snapshot for UI screens
                   await AsyncStorage.setItem("recipes", JSON.stringify(recipesArr));
-                  setRecipes([newRecipe, ...recipes]);
+
+                  // Save via sync engine + mark dirty + trigger remote sync
+                  const anyEngine = syncEngine as any;
+                  try {
+                    if (typeof anyEngine.saveLocalRecipesSnapshot === "function") {
+                      await anyEngine.saveLocalRecipesSnapshot(recipesArr);
+                    }
+                    if (typeof anyEngine.markRecipeDirty === "function") {
+                      await anyEngine.markRecipeDirty(newRecipe);
+                    }
+                    // Trigger a full sync NOW.
+                    if (typeof anyEngine.forceSyncNow === "function") {
+                      await anyEngine.forceSyncNow("manual");
+                    } else if (typeof anyEngine.syncAll === "function") {
+                      try {
+                        await anyEngine.syncAll("manual", { bypassThrottle: true });
+                      } catch {
+                        await anyEngine.syncAll("manual");
+                      }
+                    } else if (typeof anyEngine.requestSync === "function") {
+                      anyEngine.requestSync("manual");
+                    }
+                  } catch (syncErr) {
+                    console.warn(
+                      "[Cookbook] sync after import-from-URL create failed",
+                      syncErr
+                    );
+                  }
+
+                  setRecipes((prev) => [newRecipe, ...prev]);
                   setImportLoading(false);
                   setImportUrlVisible(false);
                   setImportUrl("");
@@ -912,14 +1080,25 @@ export default function CookbookDetail() {
         >
           <View style={[styles.modalContent, { backgroundColor: card, width: 320 }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: bg === "#fff" ? "#293a53" : "#fff" }]}>
+              <Text
+                style={[
+                  styles.modalTitle,
+                  {
+                    color: text,
+                    flex: 1,
+                    paddingRight: 12,
+                  },
+                ]}
+                numberOfLines={2}
+                ellipsizeMode="tail"
+              >
                 {t("recipes.delete_recipe_confirm")}
               </Text>
               <TouchableOpacity onPress={() => setDeleteTarget(null)}>
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg === "#fff" ? "#293a53" : "#fff"}
+                  color={text}
                 />
               </TouchableOpacity>
             </View>
@@ -951,11 +1130,22 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   recipeCard: { flexDirection: "row", padding: 10 },
   recipeImage: { width: 80, height: 80, borderRadius: 12, marginRight: 12 },
-  cardTitle: { fontSize: 16, fontWeight: "600", marginBottom: 4 },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginBottom: 4,
+    flex: 1,
+    flexShrink: 1,
+    paddingRight: 10,
+  },
   cardHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  deleteButton: {
+    paddingLeft: 6,
+    paddingTop: 2,
   },
   fab: {
     flexDirection: "row",

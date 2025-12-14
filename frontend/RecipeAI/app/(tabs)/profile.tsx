@@ -1,5 +1,5 @@
 // app/(tabs)/profile.tsx
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { useTranslation } from "react-i18next";
 import {
@@ -32,6 +32,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
 import Constants from "expo-constants";
 import { useAuth } from "../../context/AuthContext";
+import { useSyncEngine as useSyncEngineHook } from "../../lib/sync/SyncEngine";
 import { getAuth, updateProfile, updatePassword } from "firebase/auth";
 import { ref as storageRef, uploadString, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -74,6 +75,7 @@ export default function Profile() {
   const { bg, text, card, subText, border } = useThemeColors();
   const { theme, toggleTheme } = useTheme();
   const { t } = useTranslation();
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
 
   // Dietary and avoid options from i18n (filter out "None" option immediately)
   const rawDietaryOptions = t("dietary", { returnObjects: true }) as any;
@@ -102,6 +104,7 @@ export default function Profile() {
   const [dietary, setDietary] = useState<string[]>([]);
   const [avoid, setAvoid] = useState<string[]>([]);
   const [avoidOther, setAvoidOther] = useState<string>("");
+  const [isEditingAvoidOther, setIsEditingAvoidOther] = useState(false);
   const [modalDietary, setModalDietary] = useState(false);
   const [modalAvoid, setModalAvoid] = useState(false);
   const [language, setLanguage] = useState<SupportedLanguage>("en");
@@ -110,6 +113,7 @@ export default function Profile() {
   // Router and real authentication context
   const router = useRouter();
   const { user, logout } = useAuth();
+  const syncEngine = useSyncEngineHook();
   const auth = getAuth();
   const isAnon = !!auth.currentUser?.isAnonymous;
   // Scroll ref to ensure focused inputs are always visible
@@ -130,6 +134,81 @@ export default function Profile() {
 
   // Track when we've loaded prefs from storage so we don't overwrite them immediately
   const [prefsHydrated, setPrefsHydrated] = useState(false);
+
+  // Debounced sync trigger for preferences changes.
+  // We mark preferences as dirty in the sync engine and then request a full sync.
+  // This mirrors the snapshot->sync approach used in History.tsx for cookbooks.
+  const prefsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const buildPreferencesPayload = useCallback(() => {
+    return {
+      userDietary: dietary,
+      dietary, // legacy compatibility
+      userAvoid: avoid,
+      avoid, // legacy compatibility
+      userAvoidOther: avoidOther,
+      userMeasurement: measurement === "US" ? "imperial" : "metric",
+      themeMode: darkMode ? "dark" : "light",
+      userLanguage: language,
+    };
+  }, [dietary, avoid, avoidOther, measurement, darkMode, language]);
+
+  const requestPreferencesSync = useCallback(
+    (opts: { reason?: string; debounceMs?: number } = {}) => {
+      const { reason = "prefs-change", debounceMs = 0 } = opts;
+      if (!syncEngine) {
+        console.warn("[Profile] syncEngine is not available; cannot sync preferences");
+        return;
+      }
+
+      const run = async () => {
+        try {
+          const payload = buildPreferencesPayload();
+
+          // 1) Mark dirty so PreferencesSync has something to push.
+          if (typeof (syncEngine as any).markPreferencesDirty === "function") {
+            await (syncEngine as any).markPreferencesDirty(payload);
+          }
+
+          // 2) Trigger sync. Prefer requestSync (non-blocking) to avoid UI stalls.
+          if (typeof (syncEngine as any).requestSync === "function") {
+            (syncEngine as any).requestSync("manual");
+          } else if (typeof (syncEngine as any).syncAll === "function") {
+            (syncEngine as any).syncAll("manual", { bypassThrottle: true });
+          }
+
+          if (__DEV__) console.log("[Profile] preferences sync requested", { reason });
+        } catch (err) {
+          console.warn("[Profile] requestPreferencesSync failed", err);
+        }
+      };
+
+      if (prefsSyncTimerRef.current) {
+        clearTimeout(prefsSyncTimerRef.current);
+        prefsSyncTimerRef.current = null;
+      }
+
+      if (debounceMs > 0) {
+        prefsSyncTimerRef.current = setTimeout(() => {
+          prefsSyncTimerRef.current = null;
+          run();
+        }, debounceMs);
+      } else {
+        run();
+      }
+    },
+    [syncEngine, buildPreferencesPayload]
+  );
+
+  // Cleanup any pending timer on unmount
+  useEffect(() => {
+    return () => {
+      if (prefsSyncTimerRef.current) {
+        clearTimeout(prefsSyncTimerRef.current);
+        prefsSyncTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Contact Support modal state
   const [contactModalVisible, setContactModalVisible] = useState(false);
@@ -707,14 +786,17 @@ export default function Profile() {
     // Send both userDietary and dietary so we stay compatible with
     // any code still listening to the legacy "dietary" key.
     saveUserPrefs({ userDietary: dietary, dietary });
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [dietary, prefsHydrated]);
   useEffect(() => {
     if (!prefsHydrated) return;
     saveUserPrefs({ userAvoid: avoid });
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [avoid, prefsHydrated]);
   useEffect(() => {
     if (!prefsHydrated) return;
     saveUserPrefs({ userMeasurement: measurement === "US" ? "imperial" : "metric" });
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [measurement, prefsHydrated]);
   useEffect(() => {
     if (!prefsHydrated) return;
@@ -724,6 +806,7 @@ export default function Profile() {
     try {
       AsyncStorage.setItem("avoidOther", avoidOther || "");
     } catch { }
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 900 });
   }, [avoidOther, prefsHydrated]);
 
   // Theme toggle integration
@@ -732,6 +815,7 @@ export default function Profile() {
     const mode = darkMode ? "dark" : "light";
     AsyncStorage.setItem("theme", mode);
     saveUserPrefs({ themeMode: mode });
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
     // Only call toggleTheme if darkMode and theme are out of sync
     if ((darkMode && theme !== "dark") || (!darkMode && theme !== "light")) {
       toggleTheme();
@@ -744,6 +828,7 @@ export default function Profile() {
     if (!prefsHydrated) return;
     AsyncStorage.setItem("userLanguage", language as SupportedLanguage);
     saveUserPrefs({ userLanguage: language });
+    requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [language, prefsHydrated]);
 
   // Reflect changes coming from onboarding (or anywhere else) instantly
@@ -768,9 +853,6 @@ export default function Profile() {
       if (dietaryFromPrefs !== undefined) {
         const raw = dietaryFromPrefs || [];
 
-        // Only filter against known keys once the dietary options are loaded.
-        // If dietaryOptions is still empty (i18n not ready), keep the raw array
-        // so we don't lose the user's selections.
         let filtered = raw;
         const dietaryKeys = Object.keys(dietaryOptions);
         if (dietaryKeys.length > 0) {
@@ -778,12 +860,12 @@ export default function Profile() {
           filtered = raw.filter((d) => validDietaryKeys.has(d));
         }
 
-        setDietary(filtered);
-
-        // Persist cleaned values back to AsyncStorage so future loads are in sync
-        try {
-          AsyncStorage.setItem("dietary", JSON.stringify(filtered));
-        } catch { }
+        if (!arraysEqual(filtered, dietary)) {
+          setDietary(filtered);
+          try {
+            AsyncStorage.setItem("dietary", JSON.stringify(filtered));
+          } catch { }
+        }
       }
 
       // Accept both "userAvoid" (new) and "avoid" (legacy) from prefs
@@ -797,7 +879,6 @@ export default function Profile() {
       if (avoidFromPrefs !== undefined) {
         const raw = avoidFromPrefs || [];
 
-        // Same approach as dietary: only filter once avoidOptions is loaded.
         let filtered = raw;
         const avoidKeys = Object.keys(avoidOptions);
         if (avoidKeys.length > 0) {
@@ -805,35 +886,50 @@ export default function Profile() {
           filtered = raw.filter((a) => validAvoidKeys.has(a));
         }
 
-        setAvoid(filtered);
-
-        // Persist cleaned values back to AsyncStorage so future loads are in sync
-        try {
-          AsyncStorage.setItem("avoid", JSON.stringify(filtered));
-        } catch { }
+        if (!arraysEqual(filtered, avoid)) {
+          setAvoid(filtered);
+          try {
+            AsyncStorage.setItem("avoid", JSON.stringify(filtered));
+          } catch { }
+        }
       }
       if (changed.userAvoidOther !== undefined) {
         const nextOther = changed.userAvoidOther || "";
-        setAvoidOther(nextOther);
-        // Keep AsyncStorage in sync when prefs are updated from elsewhere (e.g. onboarding)
-        try {
-          AsyncStorage.setItem("avoidOther", nextOther);
-        } catch { }
+        // Avoid overriding local typing while the user is actively editing.
+        // Also skip if the value is already the same to prevent unnecessary re-renders.
+        if (!isEditingAvoidOther && nextOther !== avoidOther) {
+          setAvoidOther(nextOther);
+          // Keep AsyncStorage in sync when prefs are updated from elsewhere (e.g. onboarding)
+          try {
+            AsyncStorage.setItem("avoidOther", nextOther);
+          } catch { }
+        }
       }
       if (changed.userMeasurement !== undefined) {
-        const val = changed.userMeasurement === "imperial" ? "US" : changed.userMeasurement === "metric" ? "Metric" : changed.userMeasurement;
-        if (val === "US" || val === "Metric") setMeasurement(val as MeasurementSystem);
+        const val =
+          changed.userMeasurement === "imperial"
+            ? "US"
+            : changed.userMeasurement === "metric"
+              ? "Metric"
+              : changed.userMeasurement;
+        if ((val === "US" || val === "Metric") && val !== measurement) {
+          setMeasurement(val as MeasurementSystem);
+        }
       }
       if (changed.themeMode !== undefined) {
-        const wantDark = changed.themeMode === "dark" || (changed.themeMode === "system" ? darkMode : false);
-        setDarkMode(wantDark);
+        const wantDark =
+          changed.themeMode === "dark" ||
+          (changed.themeMode === "system" ? darkMode : false);
+        if (wantDark !== darkMode) {
+          setDarkMode(wantDark);
+        }
       }
     };
     prefsEvents.on(PREFS_UPDATED, onPrefs);
     return () => {
       prefsEvents.off(PREFS_UPDATED, onPrefs as any);
     };
-  }, [language, dietaryOptions, avoidOptions, darkMode]);
+  }, [language, dietaryOptions, avoidOptions, dietary, avoid, measurement, darkMode, avoidOther, isEditingAvoidOther]);
 
   // Toggle helpers: just add/remove, leave empty if none selected
   const toggleDietary = (optionKey: string) => {
@@ -952,6 +1048,7 @@ export default function Profile() {
       appVersion,
       language,
       theme,
+      env: appEnv,
     };
 
     try {
@@ -1053,11 +1150,102 @@ export default function Profile() {
     }).join(", ");
   }
 
+  function arraysEqual(a: string[], b: string[]) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  // Generic helper to send dev/analytics events to the backend
+  const sendBackendEvent = async (eventType: string, payload: any = {}) => {
+    try {
+      const authInstance = getAuth();
+      const idToken = await authInstance.currentUser?.getIdToken?.();
+
+      if (!idToken) {
+        console.warn("[Profile] No ID token, user not logged in?");
+        return;
+      }
+
+      const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/events`;
+
+      const body = {
+        type: eventType,
+        ts: Date.now(),
+        env: appEnv,
+        ...payload,
+      };
+
+      if (__DEV__) {
+        console.log("[Profile] Sending backend event:", body);
+      }
+
+      const res = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        console.warn("[Profile] Backend event FAILED", res.status, text);
+      } else if (__DEV__) {
+        console.log("[Profile] Backend event SUCCESS");
+      }
+    } catch (err) {
+      console.warn("[Profile] sendBackendEvent ERROR:", err);
+    }
+  };
+
+  // Helper to trigger a preferences sync via SyncEngine.
+  // NOTE: SyncEngine.syncAll expects (reason: SyncTriggerReason, options?), not an object.
+  function triggerPrefsSync(engine: any, reason: string = "prefs-change") {
+    if (!engine) return;
+    try {
+      if (typeof engine.markPreferencesDirty === "function") {
+        engine.markPreferencesDirty(buildPreferencesPayload());
+      }
+
+      // Use `manual` so we bypass throttling and run immediately.
+      if (typeof engine.syncAll === "function") {
+        engine.syncAll("manual", { bypassThrottle: true });
+      } else if (typeof engine.requestSync === "function") {
+        engine.requestSync("manual");
+      }
+
+      if (__DEV__) console.log("[Profile] triggerPrefsSync", { reason });
+    } catch (err) {
+      console.warn("[Profile] triggerPrefsSync failed", err);
+    }
+  }
+
+  // DEV-only: test sending an event to the backend (which will write to Firestore via Admin SDK)
+  const handleTestBackendEvent = async () => {
+    if (!user?.uid) {
+      console.log("[Profile] No user, cannot send backend event");
+      return;
+    }
+
+    await sendBackendEvent("debug_manual_test", {
+      source: "profile_button",
+      screen: "profile",
+      note: "Manual debug event triggered from Profile dev button",
+    });
+  };
+
   // Section title color: brighten in dark mode for visibility
   const sectionTitleColor =
     theme === "dark" ? "#f0f0f0" : subText;
   const selectedLabelColor = theme === "dark" ? "#ddd" : "#888";
   const selectedTextColor = theme === "dark" ? "#ddd" : "#888";
+
 
   // Reset onboarding state, clear related prefs in AsyncStorage and open onboarding once (no force flag)
   const resetOnboardingNow = async () => {
@@ -1083,6 +1271,7 @@ export default function Profile() {
         themeMode: "light",
         userLanguage: "en",
       });
+      requestPreferencesSync({ reason: "reset-onboarding", debounceMs: 0 });
 
       alert("✅ Onboarding and preferences reset. Opening onboarding now.");
 
@@ -1726,6 +1915,8 @@ export default function Profile() {
                       placeholderTextColor="#888"
                       multiline
                       autoFocus
+                      onFocus={() => setIsEditingAvoidOther(true)}
+                      onBlur={() => setIsEditingAvoidOther(false)}
                     />
                   </View>
                 </View>
@@ -1786,7 +1977,7 @@ export default function Profile() {
             </View>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.row, { borderBottomColor: border }]}
+            style={[styles.row, { borderBottomColor: "transparent" }]}
             activeOpacity={0.7}
             onPress={() => setModalLanguage(true)}
           >
@@ -1824,6 +2015,28 @@ export default function Profile() {
               {t("profile.contact_support") || "Contact Support"}
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.row, { borderBottomColor: border }]}
+            activeOpacity={0.7}
+            onPress={resetOnboardingNow}
+          >
+            <MaterialIcons name="restart-alt" size={22} color={text} />
+            <Text style={[styles.rowText, { color: text }]}>
+              {t("profile.reset_onboarding") || "Reset onboarding"}
+            </Text>
+          </TouchableOpacity>
+          {__DEV__ && (
+            <TouchableOpacity
+              style={[styles.row, { borderBottomColor: border }]}
+              activeOpacity={0.7}
+              onPress={handleTestBackendEvent}
+            >
+              <MaterialIcons name="bug-report" size={22} color={text} />
+              <Text style={[styles.rowText, { color: text }]}>
+                Test Backend Event (dev)
+              </Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={[styles.row, { borderBottomColor: "transparent" }]}
             activeOpacity={0.7}

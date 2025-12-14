@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTranslation } from "react-i18next";
 import {
@@ -16,7 +16,7 @@ import {
   Easing,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, Stack } from "expo-router";
+import { useRouter, Stack, useFocusEffect } from "expo-router";
 import { MaterialIcons } from "@expo/vector-icons";
 import { useThemeColors } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
@@ -37,6 +37,7 @@ interface Recipe {
   steps: string[];
   tags: string[];
   createdAt: string;
+  updatedAt: string;
 }
 
 function validateRecipe(raw: any): Recipe {
@@ -51,6 +52,7 @@ function validateRecipe(raw: any): Recipe {
     steps: raw.steps || [],
     tags: raw.tags || [],
     createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
   };
 }
 
@@ -129,81 +131,94 @@ export default function Index() {
   const [measurementSystem, setMeasurementSystem] = useState<"Metric" | "US">("Metric");
 
 
-  // Load profile preferences from AsyncStorage on mount (read-only; Profile is the source of truth)
-  useEffect(() => {
-    (async () => {
+  // Load profile preferences from AsyncStorage.
+  // IMPORTANT: Profile is the source of truth; AI Kitchen should refresh these
+  // when the tab becomes active so changes made in Profile are reflected here.
+  const loadProfilePrefsFromStorage = useCallback(async () => {
+    try {
+      const [
+        storedDietary,
+        storedAvoid,
+        storedAvoidOther,
+        storedMeasurement,
+        storedMeasureSystem,
+      ] = await Promise.all([
+        AsyncStorage.getItem("dietary"),
+        AsyncStorage.getItem("avoid"),
+        AsyncStorage.getItem("avoidOther"),
+        AsyncStorage.getItem("measurement"),
+        AsyncStorage.getItem("measureSystem"),
+      ]);
+
+      let parsedDietary: string[] = [];
+      let parsedAvoid: string[] = [];
+
       try {
-        const [
-          storedDietary,
-          storedAvoid,
-          storedAvoidOther,
-          storedMeasurement,
-          storedMeasureSystem,
-        ] = await Promise.all([
-          AsyncStorage.getItem("dietary"),
-          AsyncStorage.getItem("avoid"),
-          AsyncStorage.getItem("avoidOther"),
-          AsyncStorage.getItem("measurement"),
-          AsyncStorage.getItem("measureSystem"),
-        ]);
-
-        let parsedDietary: string[] = [];
-        let parsedAvoid: string[] = [];
-
-        try {
-          if (storedDietary) {
-            const val = JSON.parse(storedDietary);
-            if (Array.isArray(val)) parsedDietary = val;
-          }
-        } catch {
-          parsedDietary = [];
+        if (storedDietary) {
+          const val = JSON.parse(storedDietary);
+          if (Array.isArray(val)) parsedDietary = val;
         }
-
-        try {
-          if (storedAvoid) {
-            const val = JSON.parse(storedAvoid);
-            if (Array.isArray(val)) parsedAvoid = val;
-          }
-        } catch {
-          parsedAvoid = [];
-        }
-
-        // Drop legacy prefixes like "dietary.vegan" -> "vegan", and ignore "none"/"dietary.none"
-        parsedDietary = parsedDietary
-          .map((d) => (typeof d === "string" ? d : ""))
-          .filter(Boolean)
-          .map((d) => (d.startsWith("dietary.") ? d.substring("dietary.".length) : d))
-          .filter((d) => d !== "dietary.none" && d.toLowerCase() !== "none");
-
-        // Drop legacy prefixes like "avoid.gluten" -> "gluten", and ignore "none"/"avoid.none"
-        parsedAvoid = parsedAvoid
-          .map((a) => (typeof a === "string" ? a : ""))
-          .filter(Boolean)
-          .map((a) => (a.startsWith("avoid.") ? a.substring("avoid.".length) : a))
-          .filter((a) => a !== "avoid.none" && a.toLowerCase() !== "none");
-
-        setDietary(parsedDietary);
-        setAvoid(parsedAvoid);
-        if (storedAvoidOther) setAvoidOther(storedAvoidOther);
-
-        // Measurement system: accept both Profile-style ("US"/"Metric") and onboarding-style ("imperial"/"metric")
-        let ms: "Metric" | "US" = "Metric";
-        const measurementSource = storedMeasurement || storedMeasureSystem;
-        if (measurementSource) {
-          const lower = measurementSource.toLowerCase();
-          if (lower === "us" || lower === "imperial") {
-            ms = "US";
-          } else {
-            // "metric" or anything else defaults to Metric
-            ms = "Metric";
-          }
-        }
-        setMeasurementSystem(ms);
-      } catch (err) {
-        console.error("Error loading profile prefs for AI Kitchen:", err);
+      } catch {
+        parsedDietary = [];
       }
-    })();
+
+      try {
+        if (storedAvoid) {
+          const val = JSON.parse(storedAvoid);
+          if (Array.isArray(val)) parsedAvoid = val;
+        }
+      } catch {
+        parsedAvoid = [];
+      }
+
+      // Drop legacy prefixes like "dietary.vegan" -> "vegan", and ignore "none"/"dietary.none"
+      parsedDietary = parsedDietary
+        .map((d) => (typeof d === "string" ? d : ""))
+        .filter(Boolean)
+        .map((d) => (d.startsWith("dietary.") ? d.substring("dietary.".length) : d))
+        .filter((d) => d !== "dietary.none" && d.toLowerCase() !== "none");
+
+      // Drop legacy prefixes like "avoid.gluten" -> "gluten", and ignore "none"/"avoid.none"
+      parsedAvoid = parsedAvoid
+        .map((a) => (typeof a === "string" ? a : ""))
+        .filter(Boolean)
+        .map((a) => (a.startsWith("avoid.") ? a.substring("avoid.".length) : a))
+        .filter((a) => a !== "avoid.none" && a.toLowerCase() !== "none");
+
+      setDietary(parsedDietary);
+      setAvoid(parsedAvoid);
+      setAvoidOther(storedAvoidOther ?? "");
+
+      // Measurement system: accept both Profile-style ("US"/"Metric") and onboarding-style ("imperial"/"metric")
+      let ms: "Metric" | "US" = "Metric";
+      const measurementSource = storedMeasurement || storedMeasureSystem;
+      if (measurementSource) {
+        const lower = measurementSource.toLowerCase();
+        if (lower === "us" || lower === "imperial") {
+          ms = "US";
+        } else {
+          // "metric" or anything else defaults to Metric
+          ms = "Metric";
+        }
+      }
+      setMeasurementSystem(ms);
+    } catch (err) {
+      console.error("Error loading profile prefs for AI Kitchen:", err);
+    }
   }, []);
+
+  // Initial load on mount
+  useEffect(() => {
+    loadProfilePrefsFromStorage();
+  }, [loadProfilePrefsFromStorage]);
+
+  // Refresh whenever this tab/screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      loadProfilePrefsFromStorage();
+      return undefined;
+    }, [loadProfilePrefsFromStorage])
+  );
 
   // Sanitizer for avoidOther input
   const sanitizeAvoidOther = (raw: string) => {
@@ -220,7 +235,8 @@ export default function Index() {
   const [suggestions, setSuggestions] = useState<any[]>([]);
 
   const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
-  console.log("Using backend URL:", backendUrl);
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  console.log("Using backend URL:", backendUrl, "env:", appEnv);
 
   // --- Animation refs ---
   const contentAnim = useRef(new Animated.Value(0)).current;
@@ -363,6 +379,7 @@ export default function Index() {
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        "x-app-env": appEnv,
       };
 
       if (idToken) {
@@ -411,6 +428,7 @@ export default function Index() {
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        "x-app-env": appEnv,
       };
 
       if (idToken) {

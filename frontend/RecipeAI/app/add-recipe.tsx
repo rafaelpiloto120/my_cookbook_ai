@@ -38,6 +38,7 @@ import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import getDeviceId from "../utils/deviceId";
+import { useSyncEngine } from "../lib/sync/SyncEngine";
 
 const defaultImage = require("../assets/default_recipe.png");
 
@@ -87,6 +88,10 @@ export default function AddRecipe() {
 
   const router = useRouter();
   const { bg, text, border, card } = useThemeColors();
+  const syncEngine = useSyncEngine();
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  console.log("Using backend URL:", backendUrl, "env:", appEnv);
 
   // Helper to normalize and apply a recipe object to state for editing
   function normalizeAndApplyRecipe(raw: Recipe) {
@@ -260,7 +265,23 @@ export default function AddRecipe() {
     setSelectedCookbooks((prev) => [...prev, newCookbook.id]);
     setNewCookbookName("");
     try {
-      await AsyncStorage.setItem("cookbooks", JSON.stringify(updatedCookbooks));
+      if (syncEngine) {
+        await syncEngine.saveLocalCookbooksSnapshot(updatedCookbooks);
+
+        // Also mark this cookbook as dirty for Firestore sync
+        try {
+          await syncEngine.markCookbookDirty({
+            id: newCookbook.id,
+            name: newCookbook.name,
+          });
+        } catch (err) {
+          console.warn("[AddRecipe] failed to mark cookbook dirty for sync", err);
+        }
+
+        syncEngine.requestSync("manual");
+      } else {
+        console.warn("[AddRecipe] syncEngine not available; cookbook changes not persisted to local snapshot");
+      }
     } catch (err) {
       console.error("Error saving new cookbook:", err);
     }
@@ -320,7 +341,12 @@ export default function AddRecipe() {
       const useUid = uid || authInfo.uid;
       const useRecipeId = recipeId || `${Date.now()}`;
 
-      const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/uploadRecipeImage`;
+      if (!backendUrl) {
+        console.warn("[AddRecipe] No backend URL configured for uploadRecipePhoto");
+        return null;
+      }
+
+      const apiUrl = `${backendUrl}/uploadRecipeImage`;
       const filename = `image.jpg`;
       const storagePath = `users/${useUid}/recipes/${useRecipeId}/${filename}`;
 
@@ -331,7 +357,10 @@ export default function AddRecipe() {
 
       const res = await fetch(apiUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${authInfo.token}` },
+        headers: {
+          Authorization: `Bearer ${authInfo.token}`,
+          "x-app-env": appEnv,
+        },
         body: form,
       });
 
@@ -470,12 +499,73 @@ export default function AddRecipe() {
         arr.unshift(newRecipe);
       }
 
-      await AsyncStorage.setItem("recipes", JSON.stringify(arr));
+      // Always persist updated recipes list locally for UI and legacy readers
+      try {
+        await AsyncStorage.setItem("recipes", JSON.stringify(arr));
+      } catch (err) {
+        console.warn("[AddRecipe] Failed to persist 'recipes' to AsyncStorage", err);
+      }
+
+      if (syncEngine) {
+        try {
+          await syncEngine.saveLocalRecipesSnapshot(arr);
+
+          // Map UI difficulty/cost to Firestore-friendly values
+          const difficultyForSync =
+            difficulty === "Easy"
+              ? "easy"
+              : difficulty === "Moderate"
+              ? "medium"
+              : "hard";
+
+          const costForSync =
+            cost === "Cheap"
+              ? "low"
+              : cost === "Medium"
+              ? "medium"
+              : cost === "Expensive"
+              ? "high"
+              : null;
+
+          const nowTs = Date.now();
+
+          // Mark this recipe as dirty so RecipeSync can push to Firestore
+          try {
+            await syncEngine.markRecipeDirty({
+              id: newRecipe.id,
+              title: newRecipe.title,
+              imageUrl: finalImageUri ?? null,
+              cookingTimeMinutes: newRecipe.cookingTime || 30,
+              servings: newRecipe.servings || 2,
+              difficulty: difficultyForSync,
+              ...(costForSync !== null ? { cost: costForSync } : {}),
+              ingredients: [...newRecipe.ingredients],
+              steps: [...newRecipe.steps],
+              cookbookIds: newRecipe.cookbooks.map((cb) => cb.id),
+              tags: [...newRecipe.tags],
+              createdAt: nowTs,
+              updatedAt: nowTs,
+              isDeleted: false,
+            });
+          } catch (err) {
+            console.warn("[AddRecipe] failed to mark recipe dirty for sync", err);
+          }
+
+          console.log("[AddRecipe] triggering manual sync after recipe save");
+          // Request a full sync so Firestore is updated (queue-aware)
+          syncEngine.requestSync("manual");
+        } catch (syncErr: unknown) {
+          console.warn("[AddRecipe] sync after saveRecipe failed", syncErr);
+        }
+      } else {
+        console.warn(
+          "[AddRecipe] syncEngine not available; recipe changes not persisted to local snapshot"
+        );
+      }
       // no-op: RecipeDetail now refetches on focus via useFocusEffect
 
       // 🔹 Fire analytics event for manual recipe creation/update
       try {
-        const backendUrl = process.env.EXPO_PUBLIC_API_URL;
         if (backendUrl) {
           const currentUser = auth.currentUser;
           const userId = currentUser?.uid ?? null;
@@ -490,6 +580,7 @@ export default function AddRecipe() {
 
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
+            "x-app-env": appEnv,
           };
           if (deviceId) headers["x-device-id"] = deviceId;
           if (userId) headers["x-user-id"] = userId;
@@ -510,6 +601,7 @@ export default function AddRecipe() {
                 stepsCount: newRecipe.steps.length,
                 tagsCount: newRecipe.tags.length,
                 cookbooksCount: newRecipe.cookbooks.length,
+                appEnv,
               },
             }),
           }).catch((err) => {
