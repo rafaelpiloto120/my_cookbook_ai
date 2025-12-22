@@ -68,6 +68,958 @@ const AI_LIMITS = {
   PER_IP_DAILY: 100,   // 100 per day per IP
 };
 
+// ---------------- Economy (Cookies) – MVP server-side enforcement ----------------
+// NOTE: For MVP, pricing/limits are hardcoded in the backend as requested.
+// We enforce cookies only when Firestore is available; otherwise we fail open to avoid breaking the app.
+const ECONOMY_ENABLED =
+  process.env.ECONOMY_ENABLED !== "0" &&
+  process.env.ECONOMY_ENABLED !== "false";
+
+// MVP cookie economics
+const ECONOMY_LIMITS = {
+  // How many cookies a brand-new user/device starts with
+  STARTING_COOKIES: 10,
+  // Extra cookies granted once, on the user's first non-anonymous login
+  SIGNUP_BONUS_COOKIES: 10,
+
+  // Cookie costs (Import from URL is FREE for now)
+  COST_AI_RECIPE_SUGGESTIONS: 1,
+  COST_AI_RECIPE_FULL: 1,
+
+  // Cookbooks: (enforced later on sync endpoints)
+  // Default cookbooks are free; user can create 1 custom cookbook for free.
+  FREE_CUSTOM_COOKBOOKS: 1,
+  COST_EXTRA_COOKBOOK: 1,
+};
+
+// ---- Economy contract helpers (keep responses consistent + backward compatible) ----
+const ECONOMY_ERROR_CODES = {
+  NOT_ENOUGH_COOKIES: "ECON_NOT_ENOUGH_COOKIES",
+};
+
+const ECONOMY_OFFERS = [
+  {
+    id: "cookies_5",
+    sku: "cookies_5",
+    productId: "cookies_5",
+    title: "5 Cookies",
+    subtitle: null,
+    price: 0.99,
+    currency: "USD",
+    cookies: 5,
+    bonusCookies: 0,
+    badges: [],
+    isPromo: false,
+    sortOrder: 10,
+    mostPurchased: false,
+  },
+  {
+    id: "cookies_15",
+    sku: "cookies_15",
+    productId: "cookies_15",
+    title: "15 Cookies",
+    subtitle: "",
+    price: 2.99,
+    currency: "USD",
+    cookies: 15,
+    bonusCookies: 3, // 20%
+    badges: ["🎁 +20% bonus"],
+    isPromo: true,
+    sortOrder: 20,
+    mostPurchased: false,
+  },
+  {
+    id: "cookies_50",
+    sku: "cookies_50",
+    productId: "cookies_50",
+    title: "50 Cookies",
+    subtitle: "",
+    price: 6.99,
+    currency: "USD",
+    cookies: 50,
+    bonusCookies: 12, // 24% (close) — use 13 for 26%
+    badges: ["⭐ Bestseller", "🎁 +25% bonus"],
+    isPromo: true,
+    sortOrder: 30,
+    mostPurchased: false,
+  },
+  {
+    id: "cookies_120",
+    sku: "cookies_120",
+    productId: "cookies_120",
+    title: "120 Cookies",
+    subtitle: "",
+    price: 14.99,
+    currency: "USD",
+    cookies: 120,
+    bonusCookies: 30, // 25%
+    badges: ["🔥 Biggest pack", "🎁 +25% bonus"],
+    isPromo: true,
+    sortOrder: 40,
+    mostPurchased: false,
+  },
+];
+// Billing (Google Play) switch.
+// You can ship the UI + backend contract first, and only enable billing later.
+// - ECONOMY_BILLING_ENABLED=1 (or true) enables /economy/purchases/verify logic.
+// - Otherwise the endpoint returns a stable "disabled" response.
+const ECONOMY_BILLING_ENABLED =
+  process.env.ECONOMY_BILLING_ENABLED === "1" ||
+  process.env.ECONOMY_BILLING_ENABLED === "true";
+
+// Optional: allow a dev-only cookie grant endpoint in non-production.
+const ECONOMY_DEV_GRANT_ENABLED =
+  (process.env.ECONOMY_DEV_GRANT_ENABLED === "1" ||
+    process.env.ECONOMY_DEV_GRANT_ENABLED === "true") &&
+  process.env.NODE_ENV !== "production";
+
+function respondNotEnoughCookies(res, {
+  action,
+  requiredCookies,
+  balance,
+  message,
+  offerId,
+} = {}) {
+  const required =
+    typeof requiredCookies === "number" && Number.isFinite(requiredCookies)
+      ? requiredCookies
+      : 1;
+
+  const remaining =
+    typeof balance === "number" && Number.isFinite(balance)
+      ? balance
+      : 0;
+
+  // Backward compatible:
+  // - `error` and `remaining` are already used by your client in some places.
+  return res.status(402).json({
+    ok: false,
+    error: "insufficient_cookies",
+    code: ECONOMY_ERROR_CODES.NOT_ENOUGH_COOKIES,
+    action: typeof action === "string" ? action : "unknown",
+    requiredCookies: required,
+    remaining,
+    balance: remaining,
+    offerId: typeof offerId === "string" ? offerId : ECONOMY_OFFERS[0]?.id,
+    message:
+      typeof message === "string" && message.trim()
+        ? message
+        : "You do not have enough cookies.",
+  });
+}
+
+function getOfferBySku(sku) {
+  if (!sku) return null;
+  const s = String(sku).trim();
+  return (
+    ECONOMY_OFFERS.find(
+      (o) => o && (o.sku === s || o.id === s || o.productId === s)
+    ) || null
+  );
+}
+
+function getTotalCookiesFromOffer(offer) {
+  if (!offer) return 0;
+  const base = typeof offer.cookies === "number" && Number.isFinite(offer.cookies) ? offer.cookies : 0;
+  const bonus = typeof offer.bonusCookies === "number" && Number.isFinite(offer.bonusCookies) ? offer.bonusCookies : 0;
+  return Math.max(0, base + bonus);
+}
+
+function purchaseDocRef(db, uid, purchaseToken) {
+  const safeToken = String(purchaseToken || "").trim();
+  // Store purchase record under users/{uid}/purchases/{purchaseToken}
+  return db.doc(`users/${uid}/purchases/${safeToken}`);
+}
+
+// Best-effort auth: require a VERIFIED Firebase token for purchases.
+async function requireVerifiedUid(req, res) {
+  if (!_adminInitialized) {
+    res.status(500).json({ error: "Admin SDK not initialized" });
+    return null;
+  }
+  try {
+    const decoded = await verifyIdTokenFromHeader(req);
+    const uid = decoded && decoded.uid ? String(decoded.uid) : null;
+    if (!uid) {
+      res.status(401).json({ error: "Unauthorized" });
+      return null;
+    }
+    return { uid, decoded };
+  } catch (e) {
+    res.status(401).json({ error: "Unauthorized" });
+    return null;
+  }
+}
+
+// --- Economy identity: always per-uid (no deviceId fallback) ---
+// Returns Firebase Auth uid (from ID token or x-user-id header), or null if not available.
+
+// Verify token at most once per request (best-effort). Returns null if missing/invalid.
+async function getVerifiedIdTokenCached(req) {
+  try {
+    if (req && req._verifiedIdTokenDecoded !== undefined) {
+      return req._verifiedIdTokenDecoded; // may be null
+    }
+    if (!_adminInitialized) {
+      req._verifiedIdTokenDecoded = null;
+      return null;
+    }
+    const decoded = await verifyIdTokenFromHeader(req);
+    req._verifiedIdTokenDecoded = decoded || null;
+    return req._verifiedIdTokenDecoded;
+  } catch {
+    if (req) req._verifiedIdTokenDecoded = null;
+    return null;
+  }
+}
+
+// Returns { uid, decoded, hasVerifiedToken }
+async function getEconomyAuthContext(req) {
+  // 1) Best source: verified Firebase ID token (works for anonymous + logged-in)
+  const decoded = await getVerifiedIdTokenCached(req);
+  if (decoded && decoded.uid) {
+    return { uid: String(decoded.uid), decoded, hasVerifiedToken: true };
+  }
+
+  // 2) Fallback for legacy/internal calls
+  const headers = req.headers || {};
+  const userIdHeader =
+    (req.user && req.user.uid) ||
+    headers["x-user-id"] ||
+    headers["X-User-Id"] ||
+    headers["x-userid"] ||
+    null;
+
+  return {
+    uid: userIdHeader ? String(userIdHeader) : null,
+    decoded: null,
+    hasVerifiedToken: false,
+  };
+}
+
+async function getEconomyUidFromRequest(req) {
+  const ctx = await getEconomyAuthContext(req);
+  return ctx.uid;
+}
+
+function getEconomyDocRef(db, uid) {
+  // Economy is always stored under users/{uid}/economy/default (per-uid only)
+  return db.doc(`users/${uid}/economy/default`);
+}
+
+async function getOrInitEconomyDocTx(tx, db, uid) {
+  const ref = getEconomyDocRef(db, uid);
+  const snap = await tx.get(ref);
+  if (snap.exists) {
+    const data = snap.data() || {};
+    const cookies =
+      typeof data.cookies === "number" && Number.isFinite(data.cookies)
+        ? data.cookies
+        : 0;
+
+    // Backfill economy contract markers for older docs (do NOT re-grant cookies).
+    // This helps future-proof the economy without changing current balances.
+    if (!data.grantVersion) {
+      tx.set(
+        ref,
+        {
+          grantVersion: "v1",
+          // Preserve any existing grants object if it exists; otherwise initialize empty.
+          grants: (data.grants && typeof data.grants === "object") ? data.grants : {},
+          updatedAt: Date.now(),
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    return { ref, data: { ...data, cookies } };
+  }
+
+  const now = Date.now();
+  const initial = {
+    cookies: ECONOMY_LIMITS.STARTING_COOKIES,
+    createdAt: now,
+    updatedAt: now,
+
+    // Economy contract markers (explicit grant record for first-time users)
+    grantVersion: "v1",
+    grants: {
+      starting_v1: {
+        amount: ECONOMY_LIMITS.STARTING_COOKIES,
+        at: now,
+      },
+    },
+
+    _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  tx.set(ref, initial, { merge: true });
+  return { ref, data: initial };
+}
+
+// Grant signup bonus once, only when we have a VERIFIED token and the user is NOT anonymous.
+// IMPORTANT: This must be called inside a Firestore transaction.
+
+function isAnonymousProviderFromDecoded(decoded) {
+  try {
+    const p = decoded && decoded.firebase && decoded.firebase.sign_in_provider;
+    return typeof p === "string" && p.toLowerCase() === "anonymous";
+  } catch {
+    return false;
+  }
+}
+
+// Helper: Determine signup bonus status for catalog
+function getSignupBonusStatus(economyData, authCtx) {
+  const grants =
+    economyData && economyData.grants && typeof economyData.grants === "object"
+      ? economyData.grants
+      : {};
+
+  if (grants.signup_bonus_v1) {
+    return { status: "redeemed", reason: "already_redeemed" };
+  }
+
+  // If we don't have a verified token, we cannot reliably know whether the session is anonymous.
+  // Treat it as locked (login required) so the UI can prompt the user to sign in.
+  if (!authCtx || !authCtx.hasVerifiedToken || !authCtx.decoded) {
+    return { status: "locked", reason: "login_required" };
+  }
+
+  // Anonymous users can still see the offer as available (they just need to create an account).
+  if (isAnonymousProviderFromDecoded(authCtx.decoded)) {
+    return { status: "available", reason: "create_account_required" };
+  }
+
+  // Non-anonymous + verified token but no grant marker:
+  // In normal flows, the bonus is auto-granted on first authenticated action/balance read.
+  return { status: "available", reason: "eligible" };
+}
+
+function maybeGrantSignupBonusTx(tx, economyRef, economyData, decoded) {
+  // Only grant when this request is authenticated (decoded token present)
+  if (!decoded || !decoded.uid) return { changed: false, cookies: economyData.cookies };
+
+  // Do not grant for anonymous sessions
+  if (isAnonymousProviderFromDecoded(decoded)) return { changed: false, cookies: economyData.cookies };
+
+  const grants = (economyData.grants && typeof economyData.grants === "object") ? economyData.grants : {};
+
+  // Marker key for the one-time signup/login bonus
+  if (grants.signup_bonus_v1) {
+    return { changed: false, cookies: economyData.cookies };
+  }
+
+  const now = Date.now();
+  const bonus = ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES;
+  const nextCookies = (typeof economyData.cookies === "number" && Number.isFinite(economyData.cookies) ? economyData.cookies : 0) + bonus;
+
+  tx.set(
+    economyRef,
+    {
+      cookies: nextCookies,
+      updatedAt: now,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      grants: {
+        ...grants,
+        signup_bonus_v1: {
+          amount: bonus,
+          at: now,
+        },
+      },
+      lastGrant: {
+        amount: bonus,
+        reason: "signup_bonus",
+        at: now,
+      },
+    },
+    { merge: true }
+  );
+
+  return { changed: true, cookies: nextCookies };
+}
+
+async function spendCookies({ req, amount, reason }) {
+  // Fail open if economy disabled or Firestore/Admin unavailable.
+  if (!ECONOMY_ENABLED) {
+    return { ok: true, skipped: true, remaining: null };
+  }
+  if (!_adminInitialized) {
+    console.warn("[Economy] Admin SDK not initialized; skipping cookie enforcement");
+    return { ok: true, skipped: true, remaining: null };
+  }
+
+  const authCtx = await getEconomyAuthContext(req);
+  const uid = authCtx.uid;
+  if (!uid) {
+    // Option A requires uid. If missing, fail open (MVP) to avoid breaking flows.
+    console.warn("[Economy] Missing uid (Authorization Bearer token or x-user-id); skipping cookie enforcement");
+    return { ok: true, skipped: true, remaining: null };
+  }
+
+  const amt = typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
+  if (amt <= 0) return { ok: true, skipped: true, remaining: null };
+
+  const db = getAnalyticsDb();
+
+  try {
+    const result = await db.runTransaction(async (tx) => {
+      const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
+      // One-time signup bonus: only when we have a VERIFIED non-anonymous token.
+      // This runs before spend checks so the first post-signup action can benefit from the bonus.
+      const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+
+      // Use the possibly-updated cookie balance for spend validation.
+      const effectiveCookies =
+        typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
+          ? grantRes.cookies
+          : (typeof data.cookies === "number" && Number.isFinite(data.cookies) ? data.cookies : 0);
+
+      const current = effectiveCookies;
+
+      if (current < amt) {
+        return {
+          ok: false,
+          code: ECONOMY_ERROR_CODES.NOT_ENOUGH_COOKIES,
+          action: reason || "unknown",
+          requiredCookies: amt,
+          remaining: current,
+          uid,
+        };
+      }
+
+      const now = Date.now();
+      const next = current - amt;
+
+      tx.set(
+        ref,
+        {
+          cookies: next,
+          updatedAt: now,
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          // Minimal audit trail (MVP). No ledger yet.
+          lastSpend: {
+            amount: amt,
+            reason: reason || "unknown",
+            at: now,
+          },
+        },
+        { merge: true }
+      );
+
+      return {
+        ok: true,
+        remaining: next,
+        uid,
+      };
+    });
+
+    return result;
+  } catch (err) {
+    // Fail open to avoid breaking recipe generation due to transient DB issues.
+    console.error("[Economy] spendCookies transaction failed; skipping enforcement", {
+      message: err?.message,
+      code: err?.code,
+    });
+    return { ok: true, skipped: true, remaining: null };
+  }
+}
+
+// Read (and lazily initialize) the user's economy doc.
+// This is used by the Profile "Cookies" UI so that a brand-new user
+// immediately sees the free starting cookies without needing to spend first.
+async function getOrInitCookiesBalance(req) {
+  // If economy is disabled, still return the starting cookies so the UI works.
+  if (!ECONOMY_ENABLED) {
+    return { ok: true, skipped: true, cookies: ECONOMY_LIMITS.STARTING_COOKIES };
+  }
+
+  if (!_adminInitialized) {
+    console.warn("[Economy] Admin SDK not initialized; returning default starting cookies");
+    return { ok: true, skipped: true, cookies: ECONOMY_LIMITS.STARTING_COOKIES };
+  }
+
+  const authCtx = await getEconomyAuthContext(req);
+  const uid = authCtx.uid;
+  if (!uid) {
+    console.warn("[Economy] Missing uid (Authorization Bearer token or x-user-id); returning default starting cookies");
+    return { ok: true, skipped: true, cookies: ECONOMY_LIMITS.STARTING_COOKIES };
+  }
+
+  const db = getAnalyticsDb();
+
+  try {
+    const result = await db.runTransaction(async (tx) => {
+      const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
+      // One-time signup bonus: only when we have a VERIFIED non-anonymous token.
+      const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+
+      const effectiveCookies =
+        typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
+          ? grantRes.cookies
+          : (typeof data.cookies === "number" && Number.isFinite(data.cookies) ? data.cookies : 0);
+
+      const current = effectiveCookies;
+
+      // Defensive: if doc exists but cookies is missing, persist a normalized value.
+      if (typeof data.cookies !== "number" || !Number.isFinite(data.cookies)) {
+        tx.set(
+          ref,
+          {
+            cookies: current,
+            updatedAt: Date.now(),
+            _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
+      return { ok: true, cookies: current, uid };
+    });
+
+    return result;
+  } catch (err) {
+    // Fail open: do not break the Profile screen if Firestore is temporarily unavailable.
+    console.error("[Economy] getOrInitCookiesBalance failed; returning default starting cookies", {
+      message: err?.message,
+      code: err?.code,
+    });
+    return { ok: true, skipped: true, cookies: ECONOMY_LIMITS.STARTING_COOKIES };
+  }
+}
+
+// --- Economy endpoints (Cookies balance) ---
+// The app calls this to render the Cookies area in Profile.
+// It returns BOTH `cookies` and `balance` for compatibility.
+app.get("/economy/balance", async (req, res) => {
+  try {
+    const result = await getOrInitCookiesBalance(req);
+    const cookies =
+      typeof result.cookies === "number" && Number.isFinite(result.cookies)
+        ? result.cookies
+        : ECONOMY_LIMITS.STARTING_COOKIES;
+
+    return res.json({
+      ok: true,
+      cookies,
+      balance: cookies,
+      skipped: !!result.skipped,
+    });
+  } catch (err) {
+    console.error("❌ /economy/balance (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load cookies balance" });
+  }
+});
+
+app.post("/economy/balance", async (req, res) => {
+  try {
+    // Support legacy clients that pass uid or userId in body by mapping to x-user-id.
+    // This does NOT replace proper auth; it's just a compatibility fallback.
+    const body = req.body || {};
+    const bodyUid =
+      (body && typeof body.uid === "string" && body.uid.trim())
+        ? body.uid.trim()
+        : (body && typeof body.userId === "string" && body.userId.trim())
+        ? body.userId.trim()
+        : null;
+
+    if (bodyUid) {
+      req.headers["x-user-id"] = bodyUid;
+    }
+
+    const result = await getOrInitCookiesBalance(req);
+    const cookies =
+      typeof result.cookies === "number" && Number.isFinite(result.cookies)
+        ? result.cookies
+        : ECONOMY_LIMITS.STARTING_COOKIES;
+
+    return res.json({
+      ok: true,
+      cookies,
+      balance: cookies,
+      skipped: !!result.skipped,
+    });
+  } catch (err) {
+    console.error("❌ /economy/balance (POST) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load cookies balance" });
+  }
+});
+// Backend-first economy contract/config endpoint.
+// The mobile app can call this to fetch current pricing, limits and any active offers.
+app.get("/economy/config", async (req, res) => {
+  try {
+    return res.json({
+      ok: true,
+      version: "v1",
+      startingCookies: ECONOMY_LIMITS.STARTING_COOKIES,
+      signupBonusCookies: ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES,
+      costs: {
+        aiSuggestions: ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
+        aiFullRecipe: ECONOMY_LIMITS.COST_AI_RECIPE_FULL,
+        createCookbook: ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
+      },
+      freeRules: {
+        freeCustomCookbooks: ECONOMY_LIMITS.FREE_CUSTOM_COOKBOOKS,
+        defaultCookbooksFree: true,
+      },
+      offers: ECONOMY_OFFERS,
+    });
+  } catch (err) {
+    console.error("❌ /economy/config (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load economy config" });
+  }
+});
+
+// Backend-first economy catalog for the in-app store UI.
+// The mobile app should render offers and only allow purchase if billingEnabled is true.
+app.get("/economy/catalog", async (req, res) => {
+  try {
+    // Balance is computed the same way as /economy/balance (including lazy init)
+    const bal = await getOrInitCookiesBalance(req);
+    const cookies =
+      typeof bal.cookies === "number" && Number.isFinite(bal.cookies)
+        ? bal.cookies
+        : ECONOMY_LIMITS.STARTING_COOKIES;
+
+    // --- Signup bonus status and bonuses card logic ---
+    const authCtx = await getEconomyAuthContext(req);
+
+    // Best-effort load of economy doc to determine whether signup bonus has already been granted.
+    let economyDataForStatus = null;
+    if (ECONOMY_ENABLED && _adminInitialized) {
+      try {
+        const uidForStatus = authCtx && authCtx.uid ? String(authCtx.uid) : null;
+        if (uidForStatus) {
+          const db2 = getAnalyticsDb();
+          const ref2 = getEconomyDocRef(db2, uidForStatus);
+          const snap2 = await ref2.get();
+          economyDataForStatus = snap2.exists ? (snap2.data() || null) : null;
+        }
+      } catch {
+        economyDataForStatus = null;
+      }
+    }
+
+    const signupBonus = getSignupBonusStatus(economyDataForStatus, authCtx);
+
+    // "Free offer" shown in the catalog (no redeem button). It becomes redeemed automatically once granted.
+    const bonuses = [
+      {
+        id: "signup_bonus_v1",
+        kind: "signup_bonus",
+        title: `Create an account bonus`,
+        description: `Create an account and log in to get ${ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES} free cookies.`,
+        price: 0,
+        currency: "USD",
+        cookies: ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES,
+        status: signupBonus.status, // available | redeemed | locked
+        reason: signupBonus.reason, // create_account_required | already_redeemed | login_required | eligible
+        // Helps the UI decide what CTA to show (e.g., "Create account")
+        action: signupBonus.status === "available" && signupBonus.reason === "create_account_required"
+          ? "create_account"
+          : null,
+      },
+    ];
+
+    // Offer rendering should be deterministic
+    const offers = [...ECONOMY_OFFERS]
+      .map((o) => {
+        const sku = o.sku || o.id;
+        const productId = o.productId || sku;
+        const bonusCookies =
+          typeof o.bonusCookies === "number" && Number.isFinite(o.bonusCookies)
+            ? o.bonusCookies
+            : 0;
+        const baseCookies =
+          typeof o.cookies === "number" && Number.isFinite(o.cookies)
+            ? o.cookies
+            : 0;
+        const totalCookies = Math.max(0, baseCookies + bonusCookies);
+
+        return {
+          id: o.id,
+          productId,
+          sku,
+          title: o.title,
+          subtitle: o.subtitle || null,
+          cookies: totalCookies,
+          // Keep base/bonus so the UI can show “+10 bonus” later if you want
+          baseCookies,
+          bonusCookies,
+          price: o.price,
+          currency: o.currency,
+          badges: Array.isArray(o.badges) ? o.badges : [],
+          isPromo: !!o.isPromo,
+          sortOrder:
+            typeof o.sortOrder === "number" && Number.isFinite(o.sortOrder)
+              ? o.sortOrder
+              : 0,
+          mostPurchased: !!o.mostPurchased,
+        };
+      })
+      .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+
+    // Choose a single currency for the catalog (fallback to first offer)
+    const catalogCurrency =
+      (offers[0] && offers[0].currency) ||
+      (ECONOMY_OFFERS[0] && ECONOMY_OFFERS[0].currency) ||
+      "USD";
+
+    return res.json({
+      ok: true,
+      version: "v1",
+      platform: "android",
+      billingEnabled: !!ECONOMY_BILLING_ENABLED,
+
+      // New, stable shape (preferred by the app)
+      balance: { cookies },
+      catalog: {
+        currency: catalogCurrency,
+        offers,
+        bonuses,
+      },
+
+      // Keep backend-controlled messaging
+      promo: {
+        message: ECONOMY_BILLING_ENABLED ? null : "Purchases coming soon.",
+      },
+
+      // Backward-compat fields (so older clients don’t break)
+      cookies,
+      offersLegacy: offers,
+      bonuses,
+    });
+  } catch (err) {
+    console.error("❌ /economy/catalog (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load economy catalog" });
+  }
+});
+
+// Verify a Google Play purchase and grant cookies.
+// IMPORTANT: This endpoint is designed to be enabled later.
+// For now, it returns a stable error when billing is disabled.
+//
+// Body:
+//  {
+//    "sku": "cookies_50",
+//    "purchaseToken": "...",
+//    "orderId": "..." (optional),
+//    "packageName": "..." (optional)
+//  }
+//
+// NOTE: The mobile client may call either:
+//  - POST /economy/purchases/verify   (canonical)
+//  - POST /economy/verify-play        (legacy/alias)
+// Both routes share the same implementation.
+async function handleEconomyPurchaseVerify(req, res) {
+  try {
+    if (!ECONOMY_BILLING_ENABLED) {
+      return res.status(409).json({
+        ok: false,
+        code: "BILLING_DISABLED",
+        message: "In-app purchases are not enabled yet.",
+      });
+    }
+
+    const auth = await requireVerifiedUid(req, res);
+    if (!auth) return;
+
+    const body = req.body || {};
+
+    // Accept a couple of common field aliases just in case different clients send different names.
+    const sku =
+      (typeof body.sku === "string" && body.sku.trim())
+        ? body.sku.trim()
+        : (typeof body.productId === "string" && body.productId.trim())
+        ? body.productId.trim()
+        : (typeof body.offerId === "string" && body.offerId.trim())
+        ? body.offerId.trim()
+        : "";
+
+    const purchaseToken =
+      (typeof body.purchaseToken === "string" && body.purchaseToken.trim())
+        ? body.purchaseToken.trim()
+        : (typeof body.token === "string" && body.token.trim())
+        ? body.token.trim()
+        : "";
+
+    const orderId = typeof body.orderId === "string" ? body.orderId.trim() : null;
+    const packageName = typeof body.packageName === "string" ? body.packageName.trim() : null;
+
+    if (!sku || !purchaseToken) {
+      return res.status(400).json({ ok: false, error: "sku and purchaseToken are required" });
+    }
+
+    const offer = getOfferBySku(sku);
+    if (!offer) {
+      return res.status(400).json({ ok: false, error: "Unknown sku" });
+    }
+
+    // TODO: Real verification with Google Play Developer API.
+    // When you are ready:
+    // - Add a service account with access to your Play Console
+    // - Verify the purchaseToken against Google APIs
+    // For now, we fail with a clear status so clients can handle it.
+    if (!process.env.GOOGLE_PLAY_VERIFIER_READY) {
+      return res.status(501).json({
+        ok: false,
+        code: "VERIFIER_NOT_CONFIGURED",
+        message: "Purchase verification is not configured yet.",
+      });
+    }
+
+    const db = getAnalyticsDb();
+
+    // Idempotency: use purchaseToken as the document id.
+    // If we already processed this purchaseToken, return success without re-granting.
+    const pRef = purchaseDocRef(db, auth.uid, purchaseToken);
+
+    const grantedCookies = getTotalCookiesFromOffer(offer);
+    if (grantedCookies <= 0) {
+      return res.status(400).json({ ok: false, error: "Offer grants 0 cookies" });
+    }
+
+    let newBalance = null;
+
+    await db.runTransaction(async (tx) => {
+      const existingPurchase = await tx.get(pRef);
+      if (existingPurchase.exists) {
+        const prev = existingPurchase.data() || {};
+        newBalance = typeof prev.newBalance === "number" ? prev.newBalance : null;
+        return;
+      }
+
+      // Load/init economy doc and grant cookies.
+      const { ref: econRef, data: econData } = await getOrInitEconomyDocTx(tx, db, auth.uid);
+      const currentCookies =
+        typeof econData.cookies === "number" && Number.isFinite(econData.cookies)
+          ? econData.cookies
+          : 0;
+
+      const now = Date.now();
+      const nextCookies = currentCookies + grantedCookies;
+      newBalance = nextCookies;
+
+      // Update economy balance (no ledger yet; just minimal audit)
+      tx.set(
+        econRef,
+        {
+          cookies: nextCookies,
+          updatedAt: now,
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastGrant: {
+            amount: grantedCookies,
+            reason: "purchase",
+            at: now,
+            sku: offer.sku || offer.id,
+          },
+        },
+        { merge: true }
+      );
+
+      // Store purchase record
+      tx.set(
+        pRef,
+        {
+          uid: auth.uid,
+          sku: offer.sku || offer.id,
+          offerId: offer.id,
+          grantedCookies,
+          orderId,
+          packageName,
+          purchaseToken,
+          status: "granted",
+          createdAt: now,
+          _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          newBalance: nextCookies,
+        },
+        { merge: true }
+      );
+    });
+
+    // Analytics
+    try {
+      const ctx = getEventContext(req);
+      trackEvent("economy_purchase_granted", {
+        userId: auth.uid,
+        deviceId: ctx.deviceId,
+        metadata: {
+          sku: offer.sku || offer.id,
+          grantedCookies,
+          newBalance,
+        },
+      });
+    } catch {}
+
+    return res.json({
+      ok: true,
+      sku: offer.sku || offer.id,
+      grantedCookies,
+      balance: newBalance,
+      cookies: newBalance,
+    });
+  } catch (err) {
+    console.error("❌ /economy/purchases/verify error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to verify purchase" });
+  }
+}
+
+// Canonical endpoint
+app.post("/economy/purchases/verify", handleEconomyPurchaseVerify);
+
+// Alias endpoint used by some clients (keep for compatibility)
+app.post("/economy/verify-play", handleEconomyPurchaseVerify);
+
+// DEV ONLY: grant cookies for testing without Play Billing.
+// Enabled only if ECONOMY_DEV_GRANT_ENABLED is true and NODE_ENV != production.
+app.post("/economy/dev/grant", async (req, res) => {
+  try {
+    if (!ECONOMY_DEV_GRANT_ENABLED) {
+      return res.status(404).json({ ok: false, error: "Not found" });
+    }
+
+    const auth = await requireVerifiedUid(req, res);
+    if (!auth) return;
+
+    const body = req.body || {};
+    const amount = typeof body.amount === "number" && Number.isFinite(body.amount) ? Math.floor(body.amount) : 0;
+    if (amount <= 0) {
+      return res.status(400).json({ ok: false, error: "amount must be a positive number" });
+    }
+
+    const db = getAnalyticsDb();
+    let newBalance = null;
+
+    await db.runTransaction(async (tx) => {
+      const { ref: econRef, data: econData } = await getOrInitEconomyDocTx(tx, db, auth.uid);
+      const currentCookies =
+        typeof econData.cookies === "number" && Number.isFinite(econData.cookies)
+          ? econData.cookies
+          : 0;
+      const now = Date.now();
+      const nextCookies = currentCookies + amount;
+      newBalance = nextCookies;
+
+      tx.set(
+        econRef,
+        {
+          cookies: nextCookies,
+          updatedAt: now,
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastGrant: { amount, reason: "dev_grant", at: now },
+        },
+        { merge: true }
+      );
+    });
+
+    return res.json({ ok: true, granted: amount, cookies: newBalance, balance: newBalance });
+  } catch (err) {
+    console.error("❌ /economy/dev/grant error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to grant cookies" });
+  }
+});
+
 // Maps: key -> { count, windowStartMs }
 const aiUserHourly = new Map(); // key = userId || deviceId
 const aiUserDaily = new Map();  // key = userId || deviceId
@@ -423,6 +1375,31 @@ app.post("/events", async (req, res) => {
   }
 });
 
+app.get("/debug/sync-state", async (req, res) => {
+  try {
+    const uid = typeof req.query.uid === "string" && req.query.uid.trim() ? req.query.uid.trim() : null;
+    if (!uid) return res.status(400).json({ ok: false, error: "uid query param is required" });
+
+    const db = getAnalyticsDb();
+
+    const cookbooksSnap = await db.collection(`users/${uid}/cookbooks`).get();
+    const cookbookIds = [];
+    cookbooksSnap.forEach(d => cookbookIds.push(d.id));
+
+    const prefsSnap = await db.doc(`users/${uid}/preferences/default`).get();
+
+    return res.json({
+      ok: true,
+      uid,
+      cookbooks: { count: cookbooksSnap.size, idsSample: cookbookIds.slice(0, 20) },
+      preferences: { exists: prefsSnap.exists, keys: prefsSnap.exists ? Object.keys(prefsSnap.data() || {}).slice(0, 30) : [] },
+    });
+  } catch (err) {
+    console.error("❌ /debug/sync-state error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "debug_failed", details: err?.message || String(err) });
+  }
+});
+
 /**
  * Debug endpoint: write arbitrary data from the mobile app into Firestore
  * using the Admin SDK. This bypasses Firestore security rules and uses
@@ -490,6 +1467,9 @@ app.post("/mobile-firestore-debug", async (req, res) => {
 //   users/{uid}/preferences/default
 app.get("/sync/preferences", async (req, res) => {
   try {
+    console.log("[/sync/preferences GET] called", {
+      hasAuthHeader: !!(req.headers["authorization"] || req.headers["Authorization"]),
+    });
     if (!_adminInitialized) {
       console.error("[/sync/preferences] Admin SDK not initialized");
       return res.status(500).json({ error: "Admin SDK not initialized" });
@@ -507,12 +1487,14 @@ app.get("/sync/preferences", async (req, res) => {
     if (!uid) {
       return res.status(400).json({ error: "Missing user id" });
     }
+    console.log("[/sync/preferences GET] uid", uid);
 
     const db = getAnalyticsDb();
     const docRef = db.doc(`users/${uid}/preferences/default`);
     const snap = await docRef.get();
 
     if (!snap.exists) {
+      console.log("[/sync/preferences GET] returning", { uid, hasDoc: false });
       return res.json({ doc: null });
     }
 
@@ -526,6 +1508,7 @@ app.get("/sync/preferences", async (req, res) => {
       }
     }
 
+    console.log("[/sync/preferences GET] returning", { uid, hasDoc: true, keys: Object.keys(data || {}).slice(0, 20) });
     return res.json({ doc: data });
   } catch (err) {
     console.error("❌ /sync/preferences (GET) error:", err?.message || err);
@@ -535,6 +1518,10 @@ app.get("/sync/preferences", async (req, res) => {
 
 app.post("/sync/preferences", async (req, res) => {
   try {
+    console.log("[/sync/preferences POST] called", {
+      hasAuthHeader: !!(req.headers["authorization"] || req.headers["Authorization"]),
+      bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body) : null,
+    });
     if (!_adminInitialized) {
       console.error("[/sync/preferences] Admin SDK not initialized");
       return res.status(500).json({ error: "Admin SDK not initialized" });
@@ -552,9 +1539,15 @@ app.post("/sync/preferences", async (req, res) => {
     if (!uid) {
       return res.status(400).json({ error: "Missing user id" });
     }
+    console.log("[/sync/preferences POST] uid", uid);
 
     const body = req.body || {};
     const doc = body.doc;
+    console.log("[/sync/preferences POST] doc summary", {
+      uid,
+      hasDoc: !!doc,
+      docKeys: doc && typeof doc === "object" ? Object.keys(doc).slice(0, 30) : null,
+    });
 
     if (!doc || typeof doc !== "object") {
       return res.status(400).json({ error: "doc object is required" });
@@ -593,12 +1586,12 @@ app.post("/sync/preferences", async (req, res) => {
       console.warn("[/sync/preferences] analytics log failed:", e?.message || e);
     }
 
+    console.log("[/sync/preferences POST] write OK", { uid });
     return res.json({ ok: true });
   } catch (err) {
     console.error("❌ /sync/preferences (POST) error:", err?.message || err);
     return res.status(500).json({ error: "Failed to save preferences" });
   }
-
 });
 
 // ---------------- Cookbooks Sync Endpoints ----------------
@@ -616,6 +1609,7 @@ app.post("/sync/preferences", async (req, res) => {
  */
 app.post("/sync/cookbooks/pull", async (req, res) => {
   try {
+    console.log("[/sync/cookbooks/pull] called with body:", req.body);
     if (!_adminInitialized) {
       console.error("[/sync/cookbooks/pull] Admin SDK not initialized");
       return res.status(500).json({ error: "Admin SDK not initialized" });
@@ -668,6 +1662,7 @@ app.post("/sync/cookbooks/pull", async (req, res) => {
       );
     }
 
+    console.log("[/sync/cookbooks/pull] returning items count:", items.length, "for uid:", uid);
     return res.json({ items });
   } catch (err) {
     console.error("❌ /sync/cookbooks/pull error:", err?.message || err);
@@ -682,6 +1677,10 @@ app.post("/sync/cookbooks/pull", async (req, res) => {
  */
 app.post("/sync/cookbooks/push", async (req, res) => {
   try {
+    console.log("[/sync/cookbooks/push] called", {
+      uid: req.body && req.body.uid,
+      itemsCount: Array.isArray(req.body && req.body.items) ? req.body.items.length : 0,
+    });
     if (!_adminInitialized) {
       console.error("[/sync/cookbooks/push] Admin SDK not initialized");
       return res.status(500).json({ error: "Admin SDK not initialized" });
@@ -696,9 +1695,46 @@ app.post("/sync/cookbooks/push", async (req, res) => {
 
     const items = Array.isArray(body.items) ? body.items : [];
 
-    const db = getAnalyticsDb();
-    const batch = db.batch();
+    // Helper: best-effort detection of default/system cookbooks.
+    // We MUST avoid charging cookies for default/built-in cookbooks.
+    // This is intentionally conservative: if a cookbook looks like default/system, it is treated as free.
+    function isDefaultOrSystemCookbook(raw, id) {
+      try {
+        if (!raw || typeof raw !== "object") return false;
+        const r = raw;
+
+        // Explicit flags (preferred)
+        if (r.isDefault === true) return true;
+        if (r.isSystem === true) return true;
+        if (r.isBuiltin === true) return true;
+        if (r.builtIn === true) return true;
+        if (r.system === true) return true;
+
+        // Source markers
+        if (typeof r.source === "string") {
+          const s = r.source.toLowerCase();
+          if (s === "default" || s === "builtin" || s === "built-in" || s === "system") return true;
+        }
+
+        // Owner markers
+        if (typeof r.owner === "string") {
+          const o = r.owner.toLowerCase();
+          if (o === "system" || o === "default") return true;
+        }
+
+        // ID heuristics (very conservative)
+        const sid = String(id || "").toLowerCase();
+        if (sid.startsWith("default_") || sid.startsWith("builtin_") || sid.startsWith("system_")) return true;
+
+        return false;
+      } catch {
+        return false;
+      }
+    }
+
+    // Normalize incoming items first (so we don't duplicate normalization logic inside the transaction)
     const now = Date.now();
+    const normalized = [];
 
     for (const raw of items) {
       if (!raw || typeof raw !== "object") continue;
@@ -720,13 +1756,9 @@ app.post("/sync/cookbooks/push", async (req, res) => {
           ? data.updatedAt
           : now;
 
-      if (
-        typeof data.createdAt !== "number" ||
-        !Number.isFinite(data.createdAt)
-      ) {
+      if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) {
         data.createdAt =
-          typeof anyRaw.createdAt === "number" &&
-          Number.isFinite(anyRaw.createdAt)
+          typeof anyRaw.createdAt === "number" && Number.isFinite(anyRaw.createdAt)
             ? anyRaw.createdAt
             : now;
       }
@@ -737,20 +1769,165 @@ app.post("/sync/cookbooks/push", async (req, res) => {
       delete data.id;
       delete data.docId;
 
-      const docRef = db.doc(`users/${uid}/cookbooks/${id}`);
-      batch.set(docRef, data, { merge: true });
+      normalized.push({ id, raw: anyRaw, data });
     }
 
-    await batch.commit();
+    const db = getAnalyticsDb();
 
-    // Optional analytics event
+    // If there are no valid items, keep existing behavior and return ok.
+    if (normalized.length === 0) {
+      console.log("[/sync/cookbooks/push] no valid items; returning ok", { uid });
+      return res.json({ ok: true, upserted: 0, charged: 0 });
+    }
+
+    // Economy enforcement should be per-uid.
+    // Legacy clients send uid in body; set x-user-id so spend logic (and future code) remains consistent.
+    // (This does not replace proper auth; it's a compatibility fallback.)
+    req.headers["x-user-id"] = uid;
+
+    // Perform writes (and cookie charging) in a single Firestore transaction to:
+    // - avoid double-charging on retries
+    // - ensure atomicity between charging and creating a new cookbook
+    let txResult = {
+      upserted: 0,
+      charged: 0,
+      skippedEconomy: true,
+      remaining: null,
+    };
+
+    await db.runTransaction(async (tx) => {
+      // IMPORTANT (Firestore): all reads must happen before any writes.
+      // We therefore:
+      // 1) read existing cookbooks (for custom count)
+      // 2) read existing docs for each incoming item (to know which are new)
+      // 3) read economy doc (optional)
+      // 4) compute charges
+      // 5) perform writes
+
+      // 1) Determine current number of CUSTOM cookbooks on server.
+      // We treat default/system cookbooks as free and do not count them against the free limit.
+      let existingCustomCount = 0;
+      let existingCookbooksSnap = null;
+      try {
+        const colRef = db.collection(`users/${uid}/cookbooks`);
+        existingCookbooksSnap = await tx.get(colRef);
+        existingCookbooksSnap.forEach((d) => {
+          const v = d.data() || {};
+          const looksDefault = isDefaultOrSystemCookbook(v, d.id);
+          if (!looksDefault) existingCustomCount += 1;
+        });
+      } catch (e) {
+        // If anything goes wrong counting, fail open for economy (but still proceed with writes)
+        existingCustomCount = 0;
+      }
+
+      // 2) Read existing docs for each incoming item so we can decide which are NEW.
+      // (All reads up-front. No writes yet.)
+      const readStates = [];
+      for (const item of normalized) {
+        const docRef = db.doc(`users/${uid}/cookbooks/${item.id}`);
+        const existingSnap = await tx.get(docRef);
+        const isNew = !existingSnap.exists;
+        const looksDefault = isDefaultOrSystemCookbook(item.raw, item.id);
+        readStates.push({ item, docRef, isNew, looksDefault });
+      }
+
+      // 3) Optionally read economy doc (fail open by design)
+      let economy = null;
+      if (ECONOMY_ENABLED && _adminInitialized) {
+        try {
+          const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
+          economy = {
+            ref,
+            cookies:
+              typeof data.cookies === "number" && Number.isFinite(data.cookies)
+                ? data.cookies
+                : 0,
+          };
+        } catch {
+          economy = null;
+        }
+      }
+
+      // 4) Compute charges for NEW custom cookbooks (no writes yet)
+      // We must also handle the case where multiple new cookbooks are created in a single push.
+      const freeQuota = ECONOMY_LIMITS.FREE_CUSTOM_COOKBOOKS;
+      const cost = ECONOMY_LIMITS.COST_EXTRA_COOKBOOK;
+
+      // We'll charge based on the "server existing custom count" and increment as we virtually add new custom cookbooks.
+      let virtualCustomCount = existingCustomCount;
+      let toChargeCount = 0;
+
+      for (const st of readStates) {
+        const isNewCustom = st.isNew && !st.looksDefault;
+        if (!isNewCustom) continue;
+
+        // If user already has >= freeQuota custom cookbooks, this new one costs cookies.
+        if (virtualCustomCount >= freeQuota) {
+          toChargeCount += 1;
+        }
+
+        // In any case, this new custom cookbook increases the count.
+        virtualCustomCount += 1;
+      }
+
+      // 5) Enforce cookies (if economy available) and then perform writes.
+      if (economy && toChargeCount > 0) {
+        const amtPer = typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
+        const totalAmt = amtPer > 0 ? toChargeCount * amtPer : 0;
+
+        if (totalAmt > 0) {
+          if (economy.cookies < totalAmt) {
+            const err = new Error("insufficient_cookies");
+            err.code = "INSUFFICIENT_COOKIES";
+            err.remaining = economy.cookies;
+            throw err;
+          }
+
+          economy.cookies -= totalAmt;
+          txResult.charged = toChargeCount;
+          txResult.skippedEconomy = false;
+          txResult.remaining = economy.cookies;
+        }
+      }
+
+      // Perform cookbook writes
+      for (const st of readStates) {
+        tx.set(st.docRef, st.item.data, { merge: true });
+        txResult.upserted += 1;
+      }
+
+      // Persist updated economy balance (minimal audit) if we charged anything
+      if (economy && txResult.charged > 0) {
+        const now2 = Date.now();
+        tx.set(
+          economy.ref,
+          {
+            cookies: economy.cookies,
+            updatedAt: now2,
+            _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastSpend: {
+              amount: txResult.charged * ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
+              reason: "create_cookbook",
+              at: now2,
+            },
+          },
+          { merge: true }
+        );
+      }
+    });
+
+    // Optional analytics event (kept, but extended)
     try {
       const ctx = getEventContext(req);
       trackEvent("sync_cookbooks_push_legacy", {
         userId: uid,
         deviceId: ctx.deviceId,
         metadata: {
-          upserted: items.length,
+          upserted: txResult.upserted,
+          charged: txResult.charged,
+          skippedEconomy: !!txResult.skippedEconomy,
+          remainingCookies: txResult.remaining,
         },
       });
     } catch (e) {
@@ -760,8 +1937,35 @@ app.post("/sync/cookbooks/push", async (req, res) => {
       );
     }
 
-    return res.json({ ok: true, upserted: items.length });
+    console.log("[/sync/cookbooks/push] write OK", {
+      uid,
+      upserted: txResult.upserted,
+      charged: txResult.charged,
+      remaining: txResult.remaining,
+      skippedEconomy: !!txResult.skippedEconomy,
+    });
+    return res.json({
+      ok: true,
+      upserted: txResult.upserted,
+      charged: txResult.charged,
+      remaining: txResult.remaining,
+      skippedEconomy: !!txResult.skippedEconomy,
+    });
   } catch (err) {
+    // Translate our transaction error to a stable HTTP status for the client.
+    if (err && (err.code === "INSUFFICIENT_COOKIES" || err.message === "insufficient_cookies")) {
+      const remaining =
+        typeof err.remaining === "number" && Number.isFinite(err.remaining)
+          ? err.remaining
+          : 0;
+      return respondNotEnoughCookies(res, {
+        action: "create_cookbook",
+        requiredCookies: ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
+        balance: remaining,
+        message: "You do not have enough cookies to create more cookbooks.",
+      });
+    }
+
     console.error("❌ /sync/cookbooks/push error:", err?.message || err);
     return res.status(500).json({ error: "Failed to save cookbooks" });
   }
@@ -1980,6 +3184,24 @@ app.post("/getRecipeSuggestions", async (req, res) => {
         "You have reached the limit of AI recipe suggestions for now. Please try again later.",
     });
   }
+
+  // Economy (cookies): charge for AI suggestions (MVP)
+  const economySpend = await spendCookies({
+    req,
+    amount: ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
+    reason: "ai_suggestions",
+  });
+
+  if (economySpend && economySpend.ok === false) {
+  return respondNotEnoughCookies(res, {
+    action: economySpend.action || "ai_suggestions",
+    requiredCookies:
+      economySpend.requiredCookies || ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
+    balance: economySpend.remaining,
+    message: "You do not have enough cookies to generate more AI suggestions.",
+  });
+}
+
   // Sanitize all relevant inputs
   note = sanitizeInput(note);
   time = sanitizeInput(time);
@@ -2127,6 +3349,23 @@ app.post("/getRecipe", async (req, res) => {
         "You have reached the limit of AI recipe generations for now. Please try again later.",
     });
   }
+
+  // Economy (cookies): charge for full AI recipe generation (MVP)
+  const economySpend = await spendCookies({
+    req,
+    amount: ECONOMY_LIMITS.COST_AI_RECIPE_FULL,
+    reason: "ai_recipe",
+  });
+
+  if (economySpend && economySpend.ok === false) {
+    return res.status(402).json({
+      error: "insufficient_cookies",
+      remaining: economySpend.remaining,
+      message:
+        "You do not have enough cookies to generate more AI recipes.",
+    });
+  }
+
   // Sanitize all relevant inputs
   note = sanitizeInput(note);
   time = sanitizeInput(time);

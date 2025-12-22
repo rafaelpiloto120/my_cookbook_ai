@@ -529,10 +529,11 @@ export default function EconomyStoreScreen() {
       return;
     }
 
+    // Google Play Billing is not ready yet. Make sure you uploaded an AAB with Play Billing enabled and try again.
     if (!iapReady) {
       Alert.alert(
         "Billing not ready",
-        "Google Play Billing is not ready yet. Make sure you uploaded an AAB with Play Billing enabled and try again."
+        "Please try again later."
       );
       return;
     }

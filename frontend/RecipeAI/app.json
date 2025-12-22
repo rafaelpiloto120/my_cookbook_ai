@@ -2,7 +2,7 @@
   "expo": {
     "name": "MyCookbook",
     "slug": "mycookbook-ai",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "recipeai",
@@ -21,7 +21,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "ai.mycookbook.app",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 1
+      "versionCode": 2
     },
     "web": {
       "output": "static",
