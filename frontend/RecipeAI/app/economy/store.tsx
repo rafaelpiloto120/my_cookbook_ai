@@ -71,6 +71,12 @@ export default function EconomyStoreScreen() {
 
   const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+
+  // ✅ auth.currentUser isn't reactive; track uid in state so balance refreshes on login/logout.
+  const auth = getAuth();
+  const [economyUid, setEconomyUid] = useState<string | null>(auth.currentUser?.uid ?? null);
+  const isAnon = !!auth.currentUser?.isAnonymous;
+
   const [loading, setLoading] = useState(true);
   const [balance, setBalance] = useState<number | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -174,6 +180,9 @@ export default function EconomyStoreScreen() {
     [backendUrl, auth, appEnv]
   );
 
+
+  // --- IAP useEffects moved below loadBalance for TDZ safety ---
+  // --- IAP Android: Init connection and listeners ---
   useEffect(() => {
     if (Platform.OS !== "android") return;
 
@@ -238,7 +247,7 @@ export default function EconomyStoreScreen() {
     };
   }, [verifyPurchaseWithBackend, loadBalance]);
 
-  // Refresh the Play product cache when offers change (so we can rely on native price strings if desired).
+  // --- IAP Android: Refresh Play product cache when offers change ---
   useEffect(() => {
     if (Platform.OS !== "android") return;
     if (!iapReady) return;
@@ -258,11 +267,6 @@ export default function EconomyStoreScreen() {
       }
     })();
   }, [iapReady, offerSkus]);
-
-  // ✅ auth.currentUser isn't reactive; track uid in state so balance refreshes on login/logout.
-  const auth = getAuth();
-  const [economyUid, setEconomyUid] = useState<string | null>(auth.currentUser?.uid ?? null);
-  const isAnon = !!auth.currentUser?.isAnonymous;
 
   useEffect(() => {
     const unsub = auth.onAuthStateChanged((u) => {
@@ -547,7 +551,18 @@ export default function EconomyStoreScreen() {
     try {
       // Launch Play purchase flow.
       // For one-time consumables (cookies), requestPurchase is correct.
-      await RNIap.requestPurchase({ sku });
+      const req: any = (RNIap as any).requestPurchase;
+      try {
+        // Newer versions often accept `{ sku }`
+        await req({ sku });
+      } catch (e1: any) {
+        try {
+          // Older versions may require `{ skus: [sku] }`
+          await req({ skus: [sku] });
+        } catch (e2) {
+          throw e2;
+        }
+      }
       // The rest continues in purchaseUpdatedListener:
       // - backend verifies & grants
       // - finishTransaction after success
