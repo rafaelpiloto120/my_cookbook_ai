@@ -3,7 +3,8 @@ type AuthMode = "signin" | "signup";
 import { Stack, useRouter, useLocalSearchParams } from "expo-router";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import React, { useState, useEffect } from "react";
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Modal } from "react-native";
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Modal, StatusBar } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../context/AuthContext";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
@@ -182,16 +183,21 @@ export default function SignInScreen() {
 
   return (
     <>
+      <StatusBar translucent={false} backgroundColor="#293a53" barStyle="light-content" />
       <Stack.Screen
         options={{
+          headerShown: true,
           title: isSignup ? t("auth.signup_title") : t("auth.signin_title"),
           headerStyle: { backgroundColor: "#293a53" },
           headerTintColor: "#fff",
           headerTitleAlign: "center",
+          headerBackVisible: true,
+          headerRight: () => null,
+          headerTopInsetEnabled: true,
         }}
       />
       <KeyboardAwareScrollView contentContainerStyle={{ flexGrow: 1 }} enableOnAndroid keyboardShouldPersistTaps="handled">
-        <View style={[styles.container, { backgroundColor: bg }]}>
+        <SafeAreaView style={[styles.container, { backgroundColor: bg }]} edges={["top","left","right","bottom"]}>
           <Text style={[styles.title, { color: text }]}>
             {isSignup ? t("auth.create_account_title") : t("auth.welcome_back")}
           </Text>
@@ -338,7 +344,7 @@ export default function SignInScreen() {
               )}
             </Text>
           </TouchableOpacity>
-        </View>
+        </SafeAreaView>
       </KeyboardAwareScrollView>
     </>
   );
@@ -362,6 +368,19 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     paddingHorizontal: 8,
     paddingVertical: 4,
+  },
+  fallbackClose: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    zIndex: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  fallbackCloseText: {
+    fontSize: 18,
+    fontWeight: "700",
   },
   button: {
     width: "100%",

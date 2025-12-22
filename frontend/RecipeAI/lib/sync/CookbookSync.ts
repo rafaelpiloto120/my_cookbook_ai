@@ -18,6 +18,8 @@ function normalizeCookbookDoc(raw: any, fallbackNow: number): CookbookDoc {
   const id = String(raw?.id ?? "");
   const createdAt = typeof raw?.createdAt === "number" ? raw.createdAt : fallbackNow;
   const updatedAt = typeof raw?.updatedAt === "number" ? raw.updatedAt : createdAt;
+  const isDefault = raw?.isDefault === true;
+  const source = typeof raw?.source === "string" ? raw.source : isDefault ? "default" : undefined;
 
   return {
     ...(raw as Partial<CookbookDoc>),
@@ -27,8 +29,11 @@ function normalizeCookbookDoc(raw: any, fallbackNow: number): CookbookDoc {
     createdAt,
     updatedAt,
     isDeleted: raw?.isDeleted ?? false,
+    isDefault,
+    source,
   };
 }
+
 
 function stableComparableFields(doc: CookbookDoc) {
   return {
@@ -38,7 +43,26 @@ function stableComparableFields(doc: CookbookDoc) {
     isDeleted: doc.isDeleted ?? false,
     createdAt: typeof doc.createdAt === "number" ? doc.createdAt : null,
     updatedAt: typeof doc.updatedAt === "number" ? doc.updatedAt : null,
+    isDefault: (doc as any).isDefault === true,
+    source: (doc as any).source ?? null,
   };
+}
+
+async function getCookbookSyncAuthHeaders(): Promise<Record<string, string>> {
+  // Best-effort auth header for backend economy enforcement.
+  // Must NOT break sync if token is unavailable (e.g., transient auth state).
+  try {
+    const user = auth.currentUser;
+    if (!user) return {};
+
+    // Avoid forcing refresh here; we want sync to remain resilient/offline-friendly.
+    const token = await user.getIdToken();
+    if (!token) return {};
+
+    return { Authorization: `Bearer ${token}` };
+  } catch {
+    return {};
+  }
 }
 
 export class CookbookSync {
@@ -333,10 +357,13 @@ export class CookbookSync {
     let remoteItems: any[] = [];
 
     try {
+      const authHeaders = await getCookbookSyncAuthHeaders();
+
       const resp = await fetch(`${API_BASE_URL}/sync/cookbooks/pull`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders,
         },
         body: JSON.stringify({ uid }),
       });
@@ -408,6 +435,13 @@ export class CookbookSync {
         createdAt,
         updatedAt,
         isDeleted: anyRaw.isDeleted ?? false,
+        isDefault: anyRaw.isDefault === true,
+        source:
+          typeof anyRaw.source === "string"
+            ? anyRaw.source
+            : anyRaw.isDefault === true
+              ? "default"
+              : undefined,
       };
 
       remoteMap.set(id, cooked);
@@ -522,10 +556,13 @@ export class CookbookSync {
       });
 
       try {
+        const authHeaders = await getCookbookSyncAuthHeaders();
+
         const resp = await fetch(`${API_BASE_URL}/sync/cookbooks/push`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...authHeaders,
           },
           body: JSON.stringify({
             uid,
@@ -587,13 +624,23 @@ export class CookbookSync {
     const idx = local.findIndex((c) => c.id === cookbook.id);
     const now = Date.now();
 
+    const incomingAny: any = cookbook as any;
+    const incomingIsDefault: boolean | undefined =
+      typeof incomingAny?.isDefault === "boolean" ? incomingAny.isDefault : undefined;
+    const incomingSource: string | undefined =
+      typeof incomingAny?.source === "string" ? incomingAny.source : undefined;
+
     // Normalize incoming doc so sync always relies on `imageUrl`.
+    // Default metadata (do NOT assume defaults unless explicitly provided)
     const normalized: CookbookDoc = {
       ...(cookbook as any),
       imageUrl: normalizeImageUrl(cookbook),
       updatedAt: typeof cookbook.updatedAt === "number" ? cookbook.updatedAt : now,
       createdAt: typeof cookbook.createdAt === "number" ? cookbook.createdAt : now,
       isDeleted: (cookbook as any)?.isDeleted ?? false,
+      // Default metadata (do NOT assume defaults unless explicitly provided)
+      isDefault: incomingIsDefault ?? false,
+      source: incomingSource ?? (incomingIsDefault === true ? "default" : undefined),
     };
 
     if (idx >= 0) {
@@ -606,6 +653,20 @@ export class CookbookSync {
         return;
       }
 
+      const existingAny: any = existing.data as any;
+
+      // Preserve default markers unless the caller explicitly sets them.
+      const preservedIsDefault =
+        typeof incomingIsDefault === "boolean" ? incomingIsDefault : existingAny?.isDefault === true;
+      const preservedSource =
+        typeof incomingSource === "string"
+          ? incomingSource
+          : typeof existingAny?.source === "string"
+            ? existingAny.source
+            : preservedIsDefault
+              ? "default"
+              : undefined;
+
       local[idx] = {
         id: normalized.id,
         data: {
@@ -616,6 +677,8 @@ export class CookbookSync {
             typeof existing.data.createdAt === "number"
               ? existing.data.createdAt
               : normalized.createdAt,
+          isDefault: preservedIsDefault,
+          source: preservedSource,
         },
         sync: {
           // preserve lastSyncedAt so we can reason about freshness

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MyCookbook AI",
+    "name": "MyCookbook",
     "slug": "mycookbook-ai",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -43,7 +43,8 @@
       ],
       "expo-mail-composer",
       "expo-localization",
-      "expo-web-browser"
+      "expo-web-browser",
+      "react-native-iap"
     ],
     "experiments": {
       "typedRoutes": true,

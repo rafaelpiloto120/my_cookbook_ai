@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   TextInput,
   Modal,
+  Pressable,
   Image,
   Alert,
   NativeSyntheticEvent,
@@ -14,6 +15,8 @@ import {
   ScrollView,
   TouchableWithoutFeedback,
 } from "react-native";
+import { getAuth } from "firebase/auth";
+import { getDeviceId } from "../../utils/deviceId";
 import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
@@ -23,10 +26,7 @@ import { useThemeColors } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
 import { Ionicons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
-
 import { useTranslation } from "react-i18next";
-
-
 import { useAuth } from "../../context/AuthContext";
 import { syncEngine as globalSyncEngine } from "../../lib/sync/SyncEngine";
 
@@ -69,7 +69,13 @@ const defaultCookbookImagesById: Record<string, string> = {
 let difficultyMap: Record<string, string>;
 let costMap: Record<string, string>;
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+function getApiBaseUrl(): string | null {
+  const v = process.env.EXPO_PUBLIC_API_URL;
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return null;
+}
+
+const API_BASE_URL = getApiBaseUrl();
 const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
 
 async function trackAnalyticsEvent(
@@ -134,6 +140,7 @@ export default function History() {
   const [newCookbookVisible, setNewCookbookVisible] = useState(false);
   const [newCookbookName, setNewCookbookName] = useState("");
 
+
   // new recipe modal (FAB)
   const [newRecipeVisible, setNewRecipeVisible] = useState(false);
 
@@ -146,11 +153,149 @@ export default function History() {
   const [importError, setImportError] = useState<string | null>(null);
 
   const router = useRouter();
-  const { bg, text, subText, card, border } = useThemeColors();
+  const { bg, text, subText, card, border, isDark } = useThemeColors();
   const { t } = useTranslation();
   const auth = useAuth();
   // Prefer the singleton engine (always available). AuthContext may expose one too.
   const syncEngine = (auth as any)?.syncEngine ?? globalSyncEngine;
+  // --- Insufficient cookies modal (reuse from AI Kitchen) ---
+  const [insufficientModal, setInsufficientModal] = useState<{
+    visible: boolean;
+    context: "cookbook";
+    remaining: number;
+  }>({ visible: false, context: "cookbook", remaining: 0 });
+
+  const [offerCookies5, setOfferCookies5] = useState<
+    | null
+    | {
+        id: string;
+        title: string;
+        subtitle?: string | null;
+        price: number;
+        currency: string;
+        cookies: number;
+        badges?: string[];
+        isPromo?: boolean;
+        bonusCookies?: number;
+        mostPurchased?: boolean;
+      }
+  >(null);
+
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  const firebaseAuth = getAuth();
+
+  const getErrorMessageFromResponse = (data: any): string | null => {
+    if (!data) return null;
+    if (typeof data === "string") return data;
+    if (typeof data?.message === "string") return data.message;
+    if (typeof data?.error === "string") return data.error;
+    return null;
+  };
+
+  const goToStore = (highlightOfferId?: string) => {
+    try {
+      router.push({
+        pathname: "/economy/store",
+        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+      } as any);
+    } catch {
+      router.push("/economy/store" as any);
+    }
+  };
+
+  const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
+    const rem = typeof remaining === "number" ? remaining : 0;
+
+    // Try to fetch catalog offer cookies_5 so we can render it in the same style as Store.
+    if (!offerCookies5) {
+      try {
+        const currentUser = firebaseAuth.currentUser;
+        const idToken = currentUser ? await currentUser.getIdToken() : null;
+        const deviceId = await getDeviceId().catch(() => null);
+        const userId = currentUser?.uid ?? null;
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "x-app-env": appEnv,
+        };
+        if (idToken) headers.Authorization = `Bearer ${idToken}`;
+        if (deviceId) headers["x-device-id"] = deviceId;
+        if (userId) headers["x-user-id"] = userId;
+
+        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
+        const data = await res.json().catch(() => null);
+        const root = (data as any)?.data ?? data;
+        const rawOffers: any[] =
+          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
+          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
+          [];
+
+        const o5 = rawOffers.find(
+          (o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5"
+        );
+
+        if (o5) {
+          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
+          setOfferCookies5({
+            id: "cookies_5",
+            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
+            subtitle:
+              (typeof o5?.subtitle === "string"
+                ? o5.subtitle
+                : typeof o5?.description === "string"
+                  ? o5.description
+                  : null) ?? null,
+            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
+            currency,
+            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
+            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
+            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
+            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
+            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    setInsufficientModal({ visible: true, context: "cookbook", remaining: rem });
+  };
+
+  const fetchCookieBalanceSafe = async (): Promise<number | null> => {
+    try {
+      const currentUser = firebaseAuth.currentUser;
+      const idToken = currentUser ? await currentUser.getIdToken() : null;
+      const deviceId = await getDeviceId().catch(() => null);
+      const userId = currentUser?.uid ?? null;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-app-env": appEnv,
+      };
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+      if (deviceId) headers["x-device-id"] = deviceId;
+      if (userId) headers["x-user-id"] = userId;
+
+      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      const bal = data?.balance;
+      return typeof bal === "number" ? bal : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const ensureHasCookiesOrPrompt = async (required: number): Promise<boolean> => {
+    const bal = await fetchCookieBalanceSafe();
+    // If we can't pre-check (endpoint missing, etc.), don't block the action.
+    if (typeof bal !== "number") return true;
+    if (bal >= required) return true;
+    await openInsufficientCookiesModal(bal);
+    return false;
+  };
   // Use translations for difficulty and cost maps (matching i18n.ts structure)
   difficultyMap = {
     Easy: t("difficulty.easy"),
@@ -345,6 +490,18 @@ export default function History() {
     if (!newCookbookName.trim()) {
       Alert.alert(t("common.validation"), t("recipes.validation_name"));
       return;
+    }
+
+    // Creating additional cookbooks beyond the free limit costs 1 Cookie.
+    // Assumption: the first cookbook is free; from the 2nd onward, require 1 Cookie.
+    // We pre-check to avoid wasting AI / backend resources and to give a clear upgrade path.
+    if (Array.isArray(cookbooks) && cookbooks.length >= 1) {
+      // Close the name modal first, then show the insufficient cookies modal if needed.
+      const ok = await ensureHasCookiesOrPrompt(1);
+      if (!ok) {
+        setNewCookbookVisible(false);
+        return;
+      }
     }
 
     const ts = Date.now();
@@ -862,8 +1019,14 @@ export default function History() {
               onPress={async () => {
                 setImportError(null);
                 setImporting(true);
+                const baseUrl = API_BASE_URL;
+                if (!baseUrl) {
+                  setImportError("Backend URL is not configured.");
+                  setImporting(false);
+                  return;
+                }
                 try {
-                  const res = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/importRecipeFromUrl`, {
+                  const res = await fetch(`${baseUrl}/importRecipeFromUrl`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ url: importUrl }),
@@ -1180,6 +1343,133 @@ export default function History() {
           </View>
         </TouchableOpacity>
       </Modal>
+      {/* Insufficient cookies modal (cookbooks) */}
+      <Modal
+        visible={insufficientModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+        />
+        <View style={styles.modalCenter}> 
+          <View
+            style={[
+              styles.modalCard,
+              {
+                backgroundColor: isDark ? "#1f2430" : "#fff",
+                borderColor: isDark ? "#ffffff22" : "#00000012",
+              },
+            ]}
+          >
+            <TouchableOpacity
+              onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+              style={styles.modalCloseBtn}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
+            </TouchableOpacity>
+
+            <Text style={[styles.modalTitleCookies, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+              {t("economy.insufficient_title", "Not enough Cookies")}
+            </Text>
+
+            <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}> 
+              {t("economy.insufficient_cookbook_body_short", {
+                remaining: insufficientModal.remaining,
+                defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
+              })}
+            </Text>
+
+            {/* Offer card (cookies_5) in Store-like style */}
+            {offerCookies5 ? (
+              <View
+                style={[
+                  styles.modalOfferCard,
+                  {
+                    backgroundColor: isDark ? "#171b24" : "#fff",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+              >
+                <View style={styles.modalOfferLeft}>
+                  <View style={styles.modalOfferTopRow}>
+                    <View style={styles.modalOfferTopLeft}>
+                      <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                        🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}> 
+                    {offerCookies5.subtitle
+                      ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(
+                          offerCookies5.currency || "USD"
+                        ).toUpperCase()}`
+                      : `${offerCookies5.price.toFixed(2)} ${String(
+                          offerCookies5.currency || "USD"
+                        ).toUpperCase()}`}
+                  </Text>
+                </View>
+
+                <View style={styles.modalOfferRight}>
+                  <TouchableOpacity
+                    style={styles.buyBtnCookies}
+                    onPress={() => {
+                      setInsufficientModal((s) => ({ ...s, visible: false }));
+                      goToStore("cookies_5");
+                    }}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.buyBtnTextCookies}>{t("economy.buy", "Buy")}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : null}
+
+            {/* Bottom actions: only two buttons */}
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.modalActionBtn,
+                  {
+                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+                onPress={() => {
+                  setInsufficientModal((s) => ({ ...s, visible: false }));
+                  goToStore();
+                }}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                  {t("economy.offers_button", "Other offers")}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.modalActionBtn,
+                  {
+                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                  {t("wizard.button_back", "Back")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Delete confirmation modal */}
       <Modal visible={!!deleteTarget} transparent animationType="fade">
         <TouchableOpacity
@@ -1392,5 +1682,99 @@ const styles = StyleSheet.create({
   addOptionSub: {
     color: "#78849E",
     fontSize: 13,
+  },
+  // --- Insufficient cookies modal styles (reused from AI Kitchen) ---
+  modalBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#00000088",
+  },
+  modalCenter: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+  },
+  modalTitleCookies: {
+    fontSize: 18,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  modalBodyCookies: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  modalOfferCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+    marginBottom: 14,
+  },
+  modalOfferLeft: { flex: 1, paddingRight: 12 },
+  modalOfferRight: { justifyContent: "center", alignItems: "flex-end" },
+  modalOfferTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  modalOfferTopLeft: { flexDirection: "row", alignItems: "center", flexShrink: 1 },
+  modalOfferTitle: { fontSize: 18, fontWeight: "900" },
+  modalOfferPriceLine: { fontSize: 15, marginTop: 8, fontWeight: "600" },
+  modalActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  modalActionBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalActionText: {
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  buyBtnCookies: {
+    backgroundColor: "#E27D60",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 14,
+    minWidth: 92,
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  buyBtnTextCookies: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  modalCloseBtn: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    zIndex: 10,
+    padding: 6,
+  },
+  modalCloseText: {
+    fontSize: 18,
+    fontWeight: "900",
   },
 });

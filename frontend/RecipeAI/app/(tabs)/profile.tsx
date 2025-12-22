@@ -17,7 +17,6 @@ import {
   Keyboard,
   Platform,
   Alert,
-  ToastAndroid,
   LayoutAnimation,
   UIManager,
 } from "react-native";
@@ -25,10 +24,10 @@ import {
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-import { Stack, useRouter } from "expo-router";
+import { Stack, useRouter, useFocusEffect } from "expo-router";
 import i18n from "../../i18n";
 import { supportedLanguages, SupportedLanguage } from "../../i18n";
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
 import Constants from "expo-constants";
 import { useAuth } from "../../context/AuthContext";
@@ -76,6 +75,134 @@ export default function Profile() {
   const { theme, toggleTheme } = useTheme();
   const { t } = useTranslation();
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  // Show destructive/dev-only controls only in dev builds or when explicitly enabled.
+  const SHOW_RESET = __DEV__ || process.env.EXPO_PUBLIC_SHOW_RESET === "1";
+
+  // Router and real authentication context (needed early for cookie balance)
+  const router = useRouter();
+  const { user, logout } = useAuth();
+  const auth = getAuth();
+
+  // --- Cookies economy (balance UI) ---
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+  const [cookieBalance, setCookieBalance] = useState<number | null>(null);
+  const [cookieLoading, setCookieLoading] = useState(false);
+  const [cookieInfoVisible, setCookieInfoVisible] = useState(false);
+  const cookieBalanceRef = useRef<number | null>(null);
+  // ✅ `auth.currentUser` isn't reactive, so we track uid in state to refresh economy correctly.
+  const [economyUid, setEconomyUid] = useState<string | null>(auth.currentUser?.uid ?? null);
+
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged((u) => {
+      setEconomyUid(u?.uid ?? null);
+    });
+    return () => unsub();
+  }, [auth]);
+
+  useEffect(() => {
+    cookieBalanceRef.current = cookieBalance;
+  }, [cookieBalance]);
+
+
+  const loadCookieBalance = useCallback(async () => {
+    const cacheKey = `economy_cookie_balance_${economyUid || "anon"}`;
+    // If backend is not configured, fallback to cached value only.
+    if (!backendUrl) {
+      try {
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached != null && !Number.isNaN(Number(cached))) {
+          setCookieBalance(Number(cached));
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    setCookieLoading(true);
+    try {
+      // Economy is keyed by Firebase Auth uid on the backend.
+      // Always send an ID token so the backend can resolve `uid` and read/write
+      // `users/{uid}/economy/default`.
+      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : undefined;
+      const headers: Record<string, string> = {};
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+
+      // Try GET first; fallback to POST if GET is not supported.
+      let res: Response | null = null;
+      try {
+        const qs = `?env=${encodeURIComponent(appEnv)}`;
+        res = await fetch(`${backendUrl}/economy/balance${qs}`, {
+          method: "GET",
+          headers,
+        });
+      } catch {
+        res = null;
+      }
+
+      if (!res || res.status === 404 || res.status === 405) {
+        res = await fetch(`${backendUrl}/economy/balance`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...headers,
+          },
+          body: JSON.stringify({ env: appEnv }),
+        });
+      }
+
+      if (!res.ok) {
+        // Helpful debug: auth issues should show up here.
+        const bodyText = await res.text().catch(() => "");
+        throw new Error(`economy/balance status ${res.status} ${bodyText}`);
+      }
+
+      const data = await res.json().catch(() => ({}));
+      const next =
+        typeof (data as any)?.balance === "number"
+          ? (data as any).balance
+          : typeof (data as any)?.remaining === "number"
+            ? (data as any).remaining
+            : null;
+
+      if (typeof next === "number") {
+        setCookieBalance(next);
+        try {
+          await AsyncStorage.setItem(cacheKey, String(next));
+        } catch {
+          // ignore
+        }
+      }
+    } catch (e) {
+      // fallback to cache
+      try {
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached != null && !Number.isNaN(Number(cached))) {
+          setCookieBalance(Number(cached));
+        }
+      } catch {
+        // ignore
+      }
+    } finally {
+      setCookieLoading(false);
+    }
+  }, [backendUrl, appEnv, auth, economyUid, t]);
+
+  // Refresh balance when the auth uid changes (e.g., anon sign-in completes).
+  useEffect(() => {
+    loadCookieBalance();
+  }, [economyUid, loadCookieBalance]);
+
+  // Also refresh whenever the Profile tab/screen becomes focused.
+  // This is the main mechanism to reflect cookie deductions made in other tabs/screens.
+  useFocusEffect(
+    useCallback(() => {
+      loadCookieBalance();
+      return () => {
+        // no-op
+      };
+    }, [loadCookieBalance])
+  );
 
   // Dietary and avoid options from i18n (filter out "None" option immediately)
   const rawDietaryOptions = t("dietary", { returnObjects: true }) as any;
@@ -110,11 +237,7 @@ export default function Profile() {
   const [language, setLanguage] = useState<SupportedLanguage>("en");
   const [modalLanguage, setModalLanguage] = useState(false);
   const [modalAppInfo, setModalAppInfo] = useState(false);
-  // Router and real authentication context
-  const router = useRouter();
-  const { user, logout } = useAuth();
   const syncEngine = useSyncEngineHook();
-  const auth = getAuth();
   const isAnon = !!auth.currentUser?.isAnonymous;
   // Scroll ref to ensure focused inputs are always visible
   const scrollRef = useRef<ScrollView | null>(null);
@@ -810,16 +933,17 @@ export default function Profile() {
   }, [avoidOther, prefsHydrated]);
 
   // Theme toggle integration
+  // Theme toggle integration
   useEffect(() => {
     if (!prefsHydrated) return;
+
     const mode = darkMode ? "dark" : "light";
     AsyncStorage.setItem("theme", mode);
     saveUserPrefs({ themeMode: mode });
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
-    // Only call toggleTheme if darkMode and theme are out of sync
-    if ((darkMode && theme !== "dark") || (!darkMode && theme !== "light")) {
-      toggleTheme();
-    }
+
+    // IMPORTANT: do not call toggleTheme() here.
+    // ThemeContext should be toggled only from the user action handler to avoid loops.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [darkMode, prefsHydrated]);
 
@@ -1720,6 +1844,148 @@ export default function Profile() {
           </Pressable>
         </Modal>
 
+        {/* Cookies / Economy */}
+        <View style={[styles.sectionCard, { backgroundColor: card }]}>
+          <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
+                {t("economy.cookies_title", { defaultValue: "Cookies" })}
+              </Text>
+              <Text style={{ fontSize: 13, color: subText, marginTop: 2, flexShrink: 1, flexWrap: "wrap" }}>
+                {t("economy.economy_explainer", {
+                  defaultValue: "Used for AI features and adding extra cookbooks.",
+                })}
+              </Text>
+              {/* Bonus line moved below balance row */}
+            </View>
+            <TouchableOpacity
+              onPress={() => setCookieInfoVisible(true)}
+              style={{ padding: 6 }}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="info-outline" size={20} color={subText} />
+            </TouchableOpacity>
+          </View>
+
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginTop: 12,
+              paddingTop: 10,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: border,
+            }}
+          >
+            <Text style={{ fontSize: 13, color: subText }}>
+              {t("economy.cookies_balance", { defaultValue: "Balance" })}
+            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Text style={{ color: text, fontSize: 18, fontWeight: "800" }}>
+                {cookieLoading ? "…" : cookieBalance === null ? "—" : cookieBalance}
+              </Text>
+              <MaterialCommunityIcons
+                name="cookie"
+                size={18}
+                color={subText}
+                style={{ marginLeft: 6, marginTop: 1 }}
+              />
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.cookieActionButton,
+                  { borderColor: "#E27D60", opacity: pressed ? 0.85 : 1 },
+                ]}
+                onPress={() => {
+                  router.push("/economy/store");
+                }}
+                hitSlop={8}
+              >
+                <Text style={styles.cookieActionButtonText}>
+                  {t("economy.get_more_cookies", { defaultValue: "Add more" })}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+
+          {(!user || isAnon) ? (
+            <Pressable
+              onPress={() => router.push("/auth/signup")}
+              style={({ pressed }) => ({
+                marginTop: 8,
+                opacity: pressed ? 0.85 : 1,
+              })}
+              hitSlop={8}
+            >
+              <Text
+                style={{
+                  fontSize: 13,
+                  color: "#E27D60",
+                  fontWeight: "600",
+                }}
+              >
+                {t("economy.bonus_create_account_line", {
+                  defaultValue: "🎁 Create an account and log in once to get +10 free cookies.",
+                })}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {/* Cookies info modal */}
+        <Modal
+          visible={cookieInfoVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCookieInfoVisible(false)}
+        >
+          <Pressable
+            style={styles.modalOverlay}
+            onPress={() => setCookieInfoVisible(false)}
+          >
+            <View
+              style={[
+                styles.modalContent,
+                { backgroundColor: card, maxHeight: "70%" },
+              ]}
+              onStartShouldSetResponder={() => true}
+            >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 12 }]}>
+                  {t("economy.cookies_what", { defaultValue: "What are cookies?" })}
+                </Text>
+                <Pressable
+                  style={{ marginLeft: 10, marginTop: -6 }}
+                  onPress={() => setCookieInfoVisible(false)}
+                  hitSlop={12}
+                >
+                  <MaterialIcons name="close" size={26} color={subText} />
+                </Pressable>
+              </View>
+
+              <Text style={{ color: subText, fontSize: 14, lineHeight: 20 }}>
+                {(() => {
+                  const isLoggedIn = !!user && !isAnon;
+                  const key = isLoggedIn
+                    ? "economy.cookies_what_body_logged_in"
+                    : "economy.cookies_what_body_logged_out";
+
+                  const defaultLoggedIn =
+                    "Cookies are credits used for AI-powered features and for creating additional cookbooks beyond the free limit. You can earn some for free (we run promotions from time to time) and top up at any time.";
+
+                  const defaultLoggedOut =
+                    "Cookies are credits used for AI-powered features and for creating additional cookbooks beyond the free limit. Create an account and sign in to earn extra cookies for free — and you can also top up at any time.";
+
+                  return t(key, {
+                    defaultValue: isLoggedIn ? defaultLoggedIn : defaultLoggedOut,
+                  });
+                })()}
+              </Text>
+            </View>
+          </Pressable>
+        </Modal>
+
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
           <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.food_preferences")}</Text>
           <Text style={{ fontSize: 13, color: subText, marginBottom: 8 }}>
@@ -1937,7 +2203,16 @@ export default function Profile() {
             <View style={{ marginLeft: "auto", marginBottom: -6 }}>
               <Switch
                 value={darkMode}
-                onValueChange={setDarkMode}
+                onValueChange={(next) => {
+                  // Keep local UI state in sync
+                  setDarkMode(next);
+
+                  // Keep ThemeContext in sync without relying on effects (avoids loops)
+                  const wantTheme = next ? "dark" : "light";
+                  if (theme !== wantTheme) {
+                    toggleTheme();
+                  }
+                }}
               />
             </View>
           </TouchableOpacity>
@@ -2015,16 +2290,18 @@ export default function Profile() {
               {t("profile.contact_support") || "Contact Support"}
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.row, { borderBottomColor: border }]}
-            activeOpacity={0.7}
-            onPress={resetOnboardingNow}
-          >
-            <MaterialIcons name="restart-alt" size={22} color={text} />
-            <Text style={[styles.rowText, { color: text }]}>
-              {t("profile.reset_onboarding") || "Reset onboarding"}
-            </Text>
-          </TouchableOpacity>
+          {SHOW_RESET && (
+            <TouchableOpacity
+              style={[styles.row, { borderBottomColor: border }]}
+              activeOpacity={0.7}
+              onPress={resetOnboardingNow}
+            >
+              <MaterialIcons name="restart-alt" size={22} color={text} />
+              <Text style={[styles.rowText, { color: text }]}>
+                {t("profile.reset_onboarding") || "Reset onboarding"}
+              </Text>
+            </TouchableOpacity>
+          )}
           {__DEV__ && (
             <TouchableOpacity
               style={[styles.row, { borderBottomColor: border }]}
@@ -2290,7 +2567,7 @@ export default function Profile() {
               </Text>
               <Pressable
                 onLongPress={async () => {
-                  if (!__DEV__ && process.env.EXPO_PUBLIC_SHOW_RESET !== "1") return;
+                  if (!SHOW_RESET) return;
                   await resetOnboardingNow();
                 }}
                 delayLongPress={600}
@@ -2594,4 +2871,17 @@ const styles = StyleSheet.create({
     width: "100%",
     lineHeight: 18,
   },
+  cookieActionButton: {
+    marginLeft: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: "transparent",
+  },
+  cookieActionButtonText: {
+    color: "#E27D60",
+    fontWeight: "800",
+    fontSize: 13,
+  }
 });

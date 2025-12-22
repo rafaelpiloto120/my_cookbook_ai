@@ -24,6 +24,8 @@ import {
   Platform,
   TouchableWithoutFeedback,
   Keyboard,
+  Modal,
+  Pressable,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -37,7 +39,7 @@ import AppCard from "../components/AppCard";
 import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import getDeviceId from "../utils/deviceId";
+import { getDeviceId } from "../utils/deviceId";
 import { useSyncEngine } from "../lib/sync/SyncEngine";
 
 const defaultImage = require("../assets/default_recipe.png");
@@ -87,11 +89,139 @@ export default function AddRecipe() {
   const [saving, setSaving] = useState(false);
 
   const router = useRouter();
-  const { bg, text, border, card } = useThemeColors();
+  const { bg, text, border, card, isDark } = useThemeColors();
   const syncEngine = useSyncEngine();
   const backendUrl = process.env.EXPO_PUBLIC_API_URL;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   console.log("Using backend URL:", backendUrl, "env:", appEnv);
+
+  // --- Insufficient cookies modal (cookbooks) ---
+  const [insufficientModal, setInsufficientModal] = useState<{
+    visible: boolean;
+    remaining: number;
+  }>({ visible: false, remaining: 0 });
+
+  const [offerCookies5, setOfferCookies5] = useState<
+    | null
+    | {
+        id: string;
+        title: string;
+        subtitle?: string | null;
+        price: number;
+        currency: string;
+        cookies: number;
+        badges?: string[];
+        isPromo?: boolean;
+        bonusCookies?: number;
+        mostPurchased?: boolean;
+      }
+  >(null);
+
+  const goToStore = (highlightOfferId?: string) => {
+    try {
+      router.push({
+        pathname: "/economy/store",
+        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+      } as any);
+    } catch {
+      router.push("/economy/store" as any);
+    }
+  };
+
+  const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
+    const rem = typeof remaining === "number" ? remaining : 0;
+
+    // Fetch offer cookies_5 so the modal matches the Store cards.
+    if (!offerCookies5 && backendUrl) {
+      try {
+        const currentUser = auth.currentUser;
+        const idToken = currentUser ? await currentUser.getIdToken() : null;
+        const deviceId = await getDeviceId().catch(() => null);
+        const userId = currentUser?.uid ?? null;
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "x-app-env": appEnv,
+        };
+        if (idToken) headers.Authorization = `Bearer ${idToken}`;
+        if (deviceId) headers["x-device-id"] = deviceId;
+        if (userId) headers["x-user-id"] = userId;
+
+        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
+        const data = await res.json().catch(() => null);
+        const root = (data as any)?.data ?? data;
+        const rawOffers: any[] =
+          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
+          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
+          [];
+
+        const o5 = rawOffers.find(
+          (o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5"
+        );
+
+        if (o5) {
+          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
+          setOfferCookies5({
+            id: "cookies_5",
+            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
+            subtitle:
+              (typeof o5?.subtitle === "string"
+                ? o5.subtitle
+                : typeof o5?.description === "string"
+                  ? o5.description
+                  : null) ?? null,
+            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
+            currency,
+            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
+            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
+            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
+            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
+            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    setInsufficientModal({ visible: true, remaining: rem });
+  };
+
+  // --- Economy: fetch cookie balance and pre-check before cookbook creation ---
+  const fetchCookieBalanceSafe = async (): Promise<number | null> => {
+    try {
+      if (!backendUrl) return null;
+      const currentUser = auth.currentUser;
+      const idToken = currentUser ? await currentUser.getIdToken() : null;
+      const deviceId = await getDeviceId().catch(() => null);
+      const userId = currentUser?.uid ?? null;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-app-env": appEnv,
+      };
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+      if (deviceId) headers["x-device-id"] = deviceId;
+      if (userId) headers["x-user-id"] = userId;
+
+      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      const bal = (data as any)?.balance;
+      return typeof bal === "number" ? bal : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const ensureHasCookiesOrPrompt = async (required: number): Promise<boolean> => {
+    const bal = await fetchCookieBalanceSafe();
+    // If we can't pre-check, don't block.
+    if (typeof bal !== "number") return true;
+    if (bal >= required) return true;
+    await openInsufficientCookiesModal(bal);
+    return false;
+  };
 
   // Helper to normalize and apply a recipe object to state for editing
   function normalizeAndApplyRecipe(raw: Recipe) {
@@ -259,6 +389,14 @@ export default function AddRecipe() {
       Alert.alert("Validation", "Cookbook with this name already exists.");
       return;
     }
+    // Economy gate: ALWAYS ask the backend to consume (or allow for free) before creating locally.
+    // This avoids relying on local cookbook counts (defaults/deletions) and guarantees correctness.
+    // Backend may allow for free (default cookbooks + 1 free user-created), or charge 1 Cookie.
+    // If insufficient, it returns 402 and we show the shared Insufficient Cookies modal.
+    const allowed = await consumeCookbookCookieIfNeeded();
+    if (!allowed) {
+      return;
+    }
     const newCookbook: Cookbook = { id: `${Date.now()}`, name };
     const updatedCookbooks = [...cookbooks, newCookbook];
     setCookbooks(updatedCookbooks);
@@ -329,6 +467,163 @@ export default function AddRecipe() {
     } catch (e) {
       console.warn("[AddRecipe] ensureAuthUid failed", e);
       return null;
+    }
+  };
+
+  /**
+   * Economy: attempt to consume cookies for creating an additional cookbook.
+   * Backend decides whether this action costs 0 or 1 cookie based on limits.
+   *
+   * IMPORTANT:
+   * - We must send auth headers; otherwise backend may not be able to identify the user/balance.
+   * - If backend returns 402, we show the shared Insufficient Cookies modal (same UX as History).
+   */
+  const consumeCookbookCookieIfNeeded = async (): Promise<boolean> => {
+    try {
+      // If backend URL is missing, do not block cookbook creation.
+      if (!backendUrl) {
+        console.warn("[AddRecipe] No backend URL configured; skipping economy consume for cookbook");
+        return true;
+      }
+
+      // Ensure we have an authenticated user (anonymous is OK) so the backend can attribute the consume.
+      const authInfo = await ensureAuthUid();
+      if (!authInfo?.token) {
+        // If we can't identify the user, we should not allow a paid action.
+        // This was a major bypass path.
+        console.warn("[AddRecipe] Missing auth token for economy consume; blocking cookbook creation");
+        Alert.alert(
+          t("common.error", "Error"),
+          t("economy.auth_required", "Please sign in again and try one more time.")
+        );
+        return false;
+      }
+
+      let deviceId: string | null = null;
+      try {
+        deviceId = await getDeviceId();
+      } catch {
+        deviceId = null;
+      }
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authInfo.token}`,
+        "x-app-env": appEnv,
+      };
+      if (deviceId) headers["x-device-id"] = deviceId;
+      if (authInfo.uid) headers["x-user-id"] = authInfo.uid;
+
+      const res = await fetch(`${backendUrl}/economy/consume`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          action: "create_cookbook",
+          uid: authInfo.uid,
+        }),
+      });
+
+      // If the backend doesn't implement /economy/consume in this environment,
+      // fall back to a balance pre-check so we *still* block and show the modal when needed.
+      // If even the balance endpoint is missing/unavailable, we avoid blocking.
+      if (res.status === 404) {
+        const ok = await ensureHasCookiesOrPrompt(1);
+        return ok;
+      }
+
+      // Insufficient cookies
+      if (res.status === 402) {
+        let remaining: number | null = null;
+        try {
+          const data = await res.json().catch(() => null);
+          if (typeof (data as any)?.remaining === "number") remaining = (data as any).remaining;
+          else if (typeof (data as any)?.balance === "number") remaining = (data as any).balance;
+        } catch {
+          // ignore
+        }
+
+        await openInsufficientCookiesModal(remaining);
+        return false;
+      }
+
+      // If unauthorized/forbidden, do NOT allow cookbook creation.
+      // Allowing here creates an economy bypass (exactly what you're seeing).
+      if (res.status === 401 || res.status === 403) {
+        let msg: string | null = null;
+        try {
+          const data = await res.json().catch(() => null);
+          if (typeof (data as any)?.message === "string") msg = (data as any).message;
+          if (!msg && typeof (data as any)?.error === "string") msg = (data as any).error;
+        } catch {
+          // ignore
+        }
+
+        Alert.alert(
+          t("common.error", "Error"),
+          msg || t("economy.auth_required", "Please sign in again and try one more time.")
+        );
+        return false;
+      }
+
+      if (res.ok) {
+        // Some deployments may return 200 with a structured payload indicating
+        // the action was NOT allowed (instead of using 402). Handle both.
+        try {
+          const data = await res.json().catch(() => null);
+
+          const allowedFlag = (data as any)?.allowed;
+          const successFlag = (data as any)?.success;
+
+          const remaining =
+            typeof (data as any)?.remaining === "number"
+              ? (data as any).remaining
+              : typeof (data as any)?.balance === "number"
+                ? (data as any).balance
+                : null;
+
+          // If the backend explicitly says it's not allowed, treat it as insufficient.
+          if (allowedFlag === false || successFlag === false) {
+            await openInsufficientCookiesModal(remaining);
+            return false;
+          }
+
+          // Cache remaining balance if provided
+          if (typeof remaining === "number") {
+            try {
+              await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // ignore
+        }
+        return true;
+      }
+
+      // Unexpected non-OK
+      let message: string | null = null;
+      try {
+        const data = await res.json().catch(() => null);
+        if (typeof (data as any)?.message === "string") message = (data as any).message;
+        if (!message && typeof (data as any)?.error === "string") message = (data as any).error;
+      } catch {
+        // ignore
+      }
+
+      // Do not hard-block on unexpected backend failures; show a friendly error.
+      Alert.alert(
+        t("common.error", "Error"),
+        message || t("wizard.error_generate", "Something went wrong. Please try again.")
+      );
+      return false;
+    } catch (err) {
+      console.warn("[AddRecipe] economy/consume exception; blocking cookbook creation to avoid bypass", err);
+      Alert.alert(
+        t("common.error", "Error"),
+        t("economy.try_again", "Couldn't verify your Cookie balance. Please try again.")
+      );
+      return false;
     }
   };
 
@@ -929,6 +1224,131 @@ export default function AddRecipe() {
           />
         </KeyboardAwareScrollView>
       </TouchableWithoutFeedback>
+
+      {/* Insufficient cookies modal (cookbooks) */}
+      <Modal
+        visible={insufficientModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+        />
+        <View style={styles.modalCenter}>
+          <View
+            style={[
+              styles.modalCard,
+              {
+                backgroundColor: isDark ? "#1f2430" : "#fff",
+                borderColor: isDark ? "#ffffff22" : "#00000012",
+              },
+            ]}
+          >
+            <TouchableOpacity
+              onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+              style={styles.modalCloseBtn}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
+            </TouchableOpacity>
+
+            <Text style={[styles.modalTitleCookies, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+              {t("economy.insufficient_title", "Not enough Cookies")}
+            </Text>
+
+            <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}> 
+              {t("economy.insufficient_cookbook_body_short", {
+                remaining: insufficientModal.remaining,
+                defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
+              })}
+            </Text>
+
+            {offerCookies5 ? (
+              <View
+                style={[
+                  styles.modalOfferCard,
+                  {
+                    backgroundColor: isDark ? "#171b24" : "#fff",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+              >
+                <View style={styles.modalOfferLeft}>
+                  <View style={styles.modalOfferTopRow}>
+                    <View style={styles.modalOfferTopLeft}>
+                      <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                        🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}> 
+                    {offerCookies5.subtitle
+                      ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(
+                          offerCookies5.currency || "USD"
+                        ).toUpperCase()}`
+                      : `${offerCookies5.price.toFixed(2)} ${String(
+                          offerCookies5.currency || "USD"
+                        ).toUpperCase()}`}
+                  </Text>
+                </View>
+
+                <View style={styles.modalOfferRight}>
+                  <TouchableOpacity
+                    style={styles.buyBtnCookies}
+                    onPress={() => {
+                      setInsufficientModal((s) => ({ ...s, visible: false }));
+                      goToStore("cookies_5");
+                    }}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.buyBtnTextCookies}>{t("economy.buy", "Buy")}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : null}
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.modalActionBtn,
+                  {
+                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+                onPress={() => {
+                  setInsufficientModal((s) => ({ ...s, visible: false }));
+                  goToStore();
+                }}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                  {t("economy.offers_button", "Other offers")}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.modalActionBtn,
+                  {
+                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                    borderColor: isDark ? "#ffffff22" : "#00000012",
+                  },
+                ]}
+                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
+                  {t("wizard.button_back", "Back")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1017,6 +1437,108 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     // Nudge up slightly on Android to counter baseline differences
     marginTop: Platform.OS === "android" ? 0 : 0,
+  },
+  // --- Insufficient cookies modal styles (match History / AI Kitchen) ---
+  modalBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#00000088",
+  },
+  modalCenter: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+  },
+  modalTitleCookies: {
+    fontSize: 18,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  modalBodyCookies: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  modalOfferCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+    marginBottom: 14,
+  },
+  modalOfferLeft: { flex: 1, paddingRight: 12 },
+  modalOfferRight: { justifyContent: "center", alignItems: "flex-end" },
+  modalOfferTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  modalOfferTopLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 1,
+  },
+  modalOfferTitle: { fontSize: 18, fontWeight: "900" },
+  modalOfferPriceLine: { fontSize: 15, marginTop: 8, fontWeight: "600" },
+  modalActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  modalActionBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalActionText: {
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  buyBtnCookies: {
+    backgroundColor: "#E27D60",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 14,
+    minWidth: 92,
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  buyBtnTextCookies: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  modalCloseBtn: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    zIndex: 10,
+    padding: 6,
+  },
+  modalCloseText: {
+    fontSize: 18,
+    fontWeight: "900",
   },
 });
 // --- AutoExpandingTextInput component ---

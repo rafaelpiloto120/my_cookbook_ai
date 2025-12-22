@@ -27,6 +27,7 @@ function RootStack() {
       <Stack.Screen name="auth/signin" options={{ headerShown: false }} />
       {/* Onboarding flow root (matches app/onboarding/index.tsx) */}
       <Stack.Screen name="onboarding/index" options={{ headerShown: false }} />
+      <Stack.Screen name="economy" options={{ headerShown: false }} />
     </Stack>
   );
 }

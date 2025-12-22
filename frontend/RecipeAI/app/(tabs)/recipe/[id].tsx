@@ -10,12 +10,15 @@ import {
   Image,
   Animated,
   Share,
+  Modal,
+  TouchableWithoutFeedback,
+  Pressable,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useThemeColors } from "../../../context/ThemeContext";
-import { getAuth } from "firebase/auth";
+import { getAuth, signInAnonymously } from "firebase/auth";
 import { getDeviceId } from "../../../utils/deviceId";
 import AppCard from "../../../components/AppCard";
 import { MaterialIcons } from "@expo/vector-icons";
@@ -35,13 +38,20 @@ interface Recipe {
   steps: string[];
   tags: string[];
   createdAt: string;
+  updatedAt?: number | string;
   image?: string;
   cookbooks?: (string | { id: string; name: string })[];
+  isDeleted?: boolean;
 }
 
 interface Cookbook {
   id: string;
   name: string;
+  image?: string;
+  imageUrl?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  isDeleted?: boolean;
 }
 
 export default function RecipeDetail() {
@@ -55,13 +65,291 @@ export default function RecipeDetail() {
   const router = useRouter();
   const { bg, text, subText } = useThemeColors();
   const { t } = useTranslation();
+
+  // economy / cookies gating (cookbook creation)
+  const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+  const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  const isDark = bg !== "#fff";
+
+  const [insufficientModal, setInsufficientModal] = useState<{ visible: boolean; remaining: number }>(
+    { visible: false, remaining: 0 }
+  );
+
+  const [offerCookies5, setOfferCookies5] = useState<
+    | null
+    | {
+        id: string;
+        title: string;
+        subtitle?: string | null;
+        price: number;
+        currency: string;
+        cookies: number;
+        badges?: string[];
+        isPromo?: boolean;
+        bonusCookies?: number;
+        mostPurchased?: boolean;
+      }
+  >(null);
   const editRecipe = () => {
-  if (!currentRecipe) return;
-  router.push({
-    pathname: "/add-recipe",
-    params: { edit: JSON.stringify(currentRecipe) },
-  });
-};
+    if (!currentRecipe) return;
+    router.push({
+      pathname: "/add-recipe",
+      params: { edit: JSON.stringify(currentRecipe) },
+    });
+  };
+
+
+  const goToStore = (highlightOfferId?: string) => {
+    try {
+      router.push({
+        pathname: "/economy/store",
+        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+      } as any);
+    } catch {
+      router.push("/economy/store" as any);
+    }
+  };
+
+  const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
+    const rem = typeof remaining === "number" ? remaining : 0;
+
+    // Fetch offer cookies_5 so the modal matches the Store cards.
+    if (!offerCookies5 && backendUrl) {
+      try {
+        const currentUser = auth.currentUser;
+        const idToken = currentUser ? await currentUser.getIdToken() : null;
+        const deviceId = await getDeviceId().catch(() => null);
+        const userId = currentUser?.uid ?? null;
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "x-app-env": appEnv,
+        };
+        if (idToken) headers.Authorization = `Bearer ${idToken}`;
+        if (deviceId) headers["x-device-id"] = deviceId;
+        if (userId) headers["x-user-id"] = userId;
+
+        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
+        const data = await res.json().catch(() => null);
+        const root = (data as any)?.data ?? data;
+        const rawOffers: any[] =
+          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
+          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
+          [];
+
+        const o5 = rawOffers.find(
+          (o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5"
+        );
+
+        if (o5) {
+          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
+          setOfferCookies5({
+            id: "cookies_5",
+            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
+            subtitle:
+              (typeof o5?.subtitle === "string"
+                ? o5.subtitle
+                : typeof o5?.description === "string"
+                  ? o5.description
+                  : null) ?? null,
+            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
+            currency,
+            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
+            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
+            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
+            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
+            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    setInsufficientModal({ visible: true, remaining: rem });
+  };
+
+  const fetchCookieBalanceSafe = async (): Promise<number | null> => {
+    try {
+      if (!backendUrl) return null;
+      const currentUser = auth.currentUser;
+      const idToken = currentUser ? await currentUser.getIdToken() : null;
+      const deviceId = await getDeviceId().catch(() => null);
+      const userId = currentUser?.uid ?? null;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-app-env": appEnv,
+      };
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+      if (deviceId) headers["x-device-id"] = deviceId;
+      if (userId) headers["x-user-id"] = userId;
+
+      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      const bal = (data as any)?.balance;
+      return typeof bal === "number" ? bal : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const ensureHasCookiesOrPrompt = async (required: number): Promise<boolean> => {
+    const bal = await fetchCookieBalanceSafe();
+    // If we can't pre-check, don't block.
+    if (typeof bal !== "number") return true;
+    if (bal >= required) return true;
+    await openInsufficientCookiesModal(bal);
+    return false;
+  };
+
+  const ensureAuthUid = async (): Promise<{ uid: string; token: string } | null> => {
+    try {
+      if (auth.currentUser) {
+        const token = await auth.currentUser.getIdToken();
+        return { uid: auth.currentUser.uid, token };
+      }
+      // Sign in anonymously to obtain a UID/token when user isn't logged in
+      const cred = await signInAnonymously(auth);
+      const token = await cred.user.getIdToken();
+      return { uid: cred.user.uid, token };
+    } catch (e) {
+      console.warn("[RecipeDetail] ensureAuthUid failed", e);
+      return null;
+    }
+  };
+
+  const consumeCookbookCookieIfNeeded = async (): Promise<boolean> => {
+    try {
+      if (!backendUrl) {
+        console.warn("[RecipeDetail] No backend URL configured; skipping economy consume for cookbook");
+        return true;
+      }
+
+      const authInfo = await ensureAuthUid();
+      if (!authInfo?.token) {
+        console.warn("[RecipeDetail] Missing auth token for economy consume; blocking cookbook creation");
+        Alert.alert(
+          t("common.error", "Error"),
+          t("economy.auth_required", "Please sign in again and try one more time.")
+        );
+        return false;
+      }
+
+      let deviceId: string | null = null;
+      try {
+        deviceId = await getDeviceId();
+      } catch {
+        deviceId = null;
+      }
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authInfo.token}`,
+        "x-app-env": appEnv,
+      };
+      if (deviceId) headers["x-device-id"] = deviceId;
+      if (authInfo.uid) headers["x-user-id"] = authInfo.uid;
+
+      const res = await fetch(`${backendUrl}/economy/consume`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          action: "create_cookbook",
+          uid: authInfo.uid,
+        }),
+      });
+
+      if (res.status === 404) {
+        const ok = await ensureHasCookiesOrPrompt(1);
+        return ok;
+      }
+
+      if (res.status === 402) {
+        let remaining: number | null = null;
+        try {
+          const data = await res.json().catch(() => null);
+          if (typeof (data as any)?.remaining === "number") remaining = (data as any).remaining;
+          else if (typeof (data as any)?.balance === "number") remaining = (data as any).balance;
+        } catch {
+          // ignore
+        }
+        await openInsufficientCookiesModal(remaining);
+        return false;
+      }
+
+      if (res.status === 401 || res.status === 403) {
+        let msg: string | null = null;
+        try {
+          const data = await res.json().catch(() => null);
+          if (typeof (data as any)?.message === "string") msg = (data as any).message;
+          if (!msg && typeof (data as any)?.error === "string") msg = (data as any).error;
+        } catch {
+          // ignore
+        }
+
+        Alert.alert(
+          t("common.error", "Error"),
+          msg || t("economy.auth_required", "Please sign in again and try one more time.")
+        );
+        return false;
+      }
+
+      if (res.ok) {
+        try {
+          const data = await res.json().catch(() => null);
+          const allowedFlag = (data as any)?.allowed;
+          const successFlag = (data as any)?.success;
+
+          const remaining =
+            typeof (data as any)?.remaining === "number"
+              ? (data as any).remaining
+              : typeof (data as any)?.balance === "number"
+                ? (data as any).balance
+                : null;
+
+          if (allowedFlag === false || successFlag === false) {
+            await openInsufficientCookiesModal(remaining);
+            return false;
+          }
+
+          if (typeof remaining === "number") {
+            try {
+              await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // ignore
+        }
+        return true;
+      }
+
+      let message: string | null = null;
+      try {
+        const data = await res.json().catch(() => null);
+        if (typeof (data as any)?.message === "string") message = (data as any).message;
+        if (!message && typeof (data as any)?.error === "string") message = (data as any).error;
+      } catch {
+        // ignore
+      }
+
+      Alert.alert(
+        t("common.error", "Error"),
+        message || t("wizard.error_generate", "Something went wrong. Please try again.")
+      );
+      return false;
+    } catch (err) {
+      console.warn("[RecipeDetail] economy/consume exception; blocking cookbook creation to avoid bypass", err);
+      Alert.alert(
+        t("common.error", "Error"),
+        t("economy.try_again", "Couldn't verify your Cookie balance. Please try again.")
+      );
+      return false;
+    }
+  };
 
   // ✅ Persisted animation value
   const fabAnim = useRef(new Animated.Value(0)).current;
@@ -171,21 +459,76 @@ export default function RecipeDetail() {
     try {
       const storedCookbooks = await AsyncStorage.getItem("cookbooks");
       const allCookbooks: Cookbook[] = storedCookbooks ? JSON.parse(storedCookbooks) : [];
-      const names = cookbookField.map(cb => {
-        if (typeof cb === "string") {
-          const match = allCookbooks.find(c => c.id === cb);
-          return match ? match.name : "";
-        } else if (cb && cb.name) {
-          return cb.name;
-        }
-        return "";
-      }).filter(Boolean);
+
+      // Only consider cookbooks that are not deleted.
+      const activeCookbooks = allCookbooks.filter((c) => c && c.id && c.isDeleted !== true);
+
+      const names = cookbookField
+        .map((cb) => {
+          const id = typeof cb === "string" ? cb : cb?.id;
+          if (!id || typeof id !== "string") return "";
+
+          const match = activeCookbooks.find((c) => c.id === id);
+          // If not found locally, or marked deleted, do not show it.
+          if (!match) return "";
+
+          // Prefer local canonical name; fall back to embedded name if needed.
+          const embeddedName = typeof cb === "object" && cb ? String(cb.name ?? "") : "";
+          return (match.name || embeddedName || "").trim();
+        })
+        .filter((n) => typeof n === "string" && n.trim().length > 0);
+
       setCookbookNames(names);
     } catch (error) {
       console.error("Failed to load cookbooks:", error);
       setCookbookNames([]);
     }
   };
+
+  const loadCookbooksSnapshot = async (): Promise<Cookbook[]> => {
+    try {
+      const storedCookbooks = await AsyncStorage.getItem("cookbooks");
+      const parsed: Cookbook[] = storedCookbooks ? JSON.parse(storedCookbooks) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map((cb: any) => ({
+        ...cb,
+        image: cb.image || cb.imageUrl || undefined,
+      }));
+    } catch {
+      return [];
+    }
+  };
+
+  async function syncCookbooksSnapshot(updated: Cookbook[]) {
+    try {
+      if (!syncEngine) {
+        console.warn("[RecipeDetail] syncEngine is not available (unexpected). Falling back to AsyncStorage only.");
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+        return;
+      }
+
+      if (typeof (syncEngine as any).saveLocalCookbooksSnapshot !== "function") {
+        console.warn(
+          "[RecipeDetail] syncEngine.saveLocalCookbooksSnapshot is not available; falling back to legacy AsyncStorage only"
+        );
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+        return;
+      }
+
+      await (syncEngine as any).saveLocalCookbooksSnapshot(updated);
+
+      if (typeof (syncEngine as any).requestSync === "function") {
+        (syncEngine as any).requestSync("manual");
+      }
+    } catch (err) {
+      console.warn("[RecipeDetail] syncCookbooksSnapshot failed", err);
+      try {
+        await AsyncStorage.setItem("cookbooks", JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   const handleBack = () => {
     if (from === "history") {
@@ -326,49 +669,167 @@ const saveRecipe = async () => {
   if (!currentRecipe) return;
 
   try {
-    // Ensure we always bump an updatedAt so merges treat this as newest.
+    const nowTs = Date.now();
+
+    // Normalize updatedAt to a numeric timestamp.
     const withUpdatedAt: any = {
       ...currentRecipe,
-      updatedAt: (currentRecipe as any).updatedAt ?? Date.now(),
+      updatedAt: nowTs,
     };
 
-    // 1) Always persist locally so offline users still keep their changes.
-    // Prefer sync-engine helpers if available, but ALWAYS fall back to AsyncStorage.
-    {
-      const stored = await AsyncStorage.getItem("recipes");
-      const arr: Recipe[] = stored ? JSON.parse(stored) : [];
-      const next = arr.some((r) => r.id === withUpdatedAt.id)
-        ? arr.map((r) => (r.id === withUpdatedAt.id ? withUpdatedAt : r))
-        : [...arr, withUpdatedAt];
+    // If this recipe references cookbooks that don't exist locally yet (e.g. created during edit flow),
+    // persist those cookbooks first (and apply economy gating), aligned with History.tsx/add-recipe.tsx.
+    try {
+      const cbField = Array.isArray(withUpdatedAt.cookbooks) ? withUpdatedAt.cookbooks : [];
+      const cookbookIdsInRecipe = cbField
+        .map((cb: any) => (typeof cb === "string" ? cb : cb?.id))
+        .filter((v: any) => typeof v === "string" && v.trim().length > 0) as string[];
 
-      const helper = (syncEngine as any)?.saveLocalRecipesSnapshot;
-      if (typeof helper === "function") {
-        try {
-          await helper.call(syncEngine, next);
-        } catch (e) {
-          // If helper fails, persist snapshot directly.
-          await AsyncStorage.setItem("recipes", JSON.stringify(next));
+      const cookbookObjsInRecipe = cbField
+        .map((cb: any) => (typeof cb === "object" && cb ? cb : null))
+        .filter(Boolean) as Array<{ id: string; name?: string }>;
+
+      if (cookbookIdsInRecipe.length > 0) {
+        const existingCookbooks = await loadCookbooksSnapshot();
+        const existingIds = new Set(existingCookbooks.map((c) => c.id));
+
+        const missingIds = cookbookIdsInRecipe.filter((cid) => !existingIds.has(cid));
+        if (missingIds.length > 0) {
+          let updatedCookbooks = [...existingCookbooks];
+
+          for (const missingId of missingIds) {
+            const allowed = await consumeCookbookCookieIfNeeded();
+            if (!allowed) {
+              // Do not proceed with saving the recipe if cookbook creation is blocked.
+              return;
+            }
+
+            const fromObj = cookbookObjsInRecipe.find((o) => o.id === missingId);
+            const name = (fromObj?.name || "").trim() || t("recipes.cookbook");
+            const now = Date.now();
+            const newCb: Cookbook = {
+              id: missingId,
+              name,
+              createdAt: now,
+              updatedAt: now,
+            };
+            updatedCookbooks = [...updatedCookbooks, newCb];
+            existingIds.add(missingId);
+
+            // Best-effort: mark cookbook dirty (History.tsx relies on snapshot; AddRecipe also marks dirty explicitly)
+            try {
+              if (syncEngine && typeof (syncEngine as any).markCookbookDirty === "function") {
+                await (syncEngine as any).markCookbookDirty({ id: newCb.id, name: newCb.name });
+              }
+            } catch (e) {
+              console.warn("[RecipeDetail] failed to mark cookbook dirty", e);
+            }
+          }
+
+          await syncCookbooksSnapshot(updatedCookbooks);
         }
-      } else {
-        await AsyncStorage.setItem("recipes", JSON.stringify(next));
       }
+    } catch (e) {
+      // Safety: never block saving a recipe due to cookbook persistence issues.
+      console.warn("[RecipeDetail] cookbook persistence during saveRecipe failed", e);
     }
 
-    // 2) Mark as dirty in the sync store (this is what makes it eligible to push)
-    if (syncEngine) {
-      if (typeof (syncEngine as any).markRecipeDirty === "function") {
-        await (syncEngine as any).markRecipeDirty(withUpdatedAt);
-      } else {
-        const recipeSync = (syncEngine as any)?.recipeSync;
-        if (recipeSync && typeof recipeSync.upsertLocalRecipe === "function") {
-          await recipeSync.upsertLocalRecipe(withUpdatedAt);
-        } else if (recipeSync && typeof recipeSync.updateLocalRecipe === "function") {
-          await recipeSync.updateLocalRecipe(withUpdatedAt);
-        }
+    // 1) Persist locally so UI stays consistent.
+    const stored = await AsyncStorage.getItem("recipes");
+    const arr: Recipe[] = stored ? JSON.parse(stored) : [];
+    const next = arr.some((r) => r.id === withUpdatedAt.id)
+      ? arr.map((r) => (r.id === withUpdatedAt.id ? withUpdatedAt : r))
+      : [...arr, withUpdatedAt];
+
+    // Prefer sync engine helper when available, but always fall back to AsyncStorage.
+    const helper = (syncEngine as any)?.saveLocalRecipesSnapshot;
+    if (syncEngine && typeof helper === "function") {
+      try {
+        await helper.call(syncEngine, next);
+      } catch (e) {
+        await AsyncStorage.setItem("recipes", JSON.stringify(next));
       }
+    } else {
+      await AsyncStorage.setItem("recipes", JSON.stringify(next));
+    }
+
+    // 2) Mark recipe as dirty in the sync store using the SAME shape as add-recipe.tsx.
+    if (syncEngine && typeof (syncEngine as any).markRecipeDirty === "function") {
+      // Map UI difficulty/cost to sync-friendly values.
+      const difficultyForSync =
+        withUpdatedAt.difficulty === "Easy"
+          ? "easy"
+          : withUpdatedAt.difficulty === "Moderate"
+          ? "medium"
+          : "hard";
+
+      const costForSync =
+        withUpdatedAt.cost === "Cheap"
+          ? "low"
+          : withUpdatedAt.cost === "Medium"
+          ? "medium"
+          : withUpdatedAt.cost === "Expensive"
+          ? "high"
+          : null;
+
+      const cookbookIds = Array.isArray(withUpdatedAt.cookbooks)
+        ? withUpdatedAt.cookbooks
+            .map((cb: any) => (typeof cb === "string" ? cb : cb?.id))
+            .filter((v: any) => typeof v === "string" && v.trim().length > 0)
+        : [];
+
+      // Try to derive a stable createdAt numeric timestamp.
+      const createdAtTs = (() => {
+        const v = (withUpdatedAt as any)?.createdAt;
+        if (typeof v === "number") return v;
+        if (typeof v === "string") {
+          const ms = Date.parse(v);
+          return Number.isFinite(ms) ? ms : nowTs;
+        }
+        return nowTs;
+      })();
+
+      const imageUrlForSync =
+        typeof withUpdatedAt.image === "string" && withUpdatedAt.image.trim()
+          ? withUpdatedAt.image.trim()
+          : null;
+
+      await (syncEngine as any).markRecipeDirty({
+        id: withUpdatedAt.id,
+        title: withUpdatedAt.title,
+        imageUrl: imageUrlForSync,
+        cookingTimeMinutes: withUpdatedAt.cookingTime || 30,
+        servings: withUpdatedAt.servings || 2,
+        difficulty: difficultyForSync,
+        ...(costForSync !== null ? { cost: costForSync } : {}),
+        ingredients: Array.isArray(withUpdatedAt.ingredients) ? [...withUpdatedAt.ingredients] : [],
+        steps: Array.isArray(withUpdatedAt.steps) ? [...withUpdatedAt.steps] : [],
+        cookbookIds,
+        tags: Array.isArray(withUpdatedAt.tags) ? [...withUpdatedAt.tags] : [],
+        createdAt: createdAtTs,
+        updatedAt: nowTs,
+        isDeleted: false,
+      });
 
       // 3) Trigger a full sync immediately (bypass throttling)
-      await syncEngine.syncAll("manual", { bypassThrottle: true });
+      if (typeof (syncEngine as any).syncAll === "function") {
+        await (syncEngine as any).syncAll("manual", { bypassThrottle: true });
+      } else if (typeof (syncEngine as any).requestSync === "function") {
+        (syncEngine as any).requestSync("manual");
+      }
+    } else if (syncEngine) {
+      // Fallback: keep previous behavior if markRecipeDirty is not available.
+      const recipeSync = (syncEngine as any)?.recipeSync;
+      if (recipeSync && typeof recipeSync.upsertLocalRecipe === "function") {
+        await recipeSync.upsertLocalRecipe(withUpdatedAt);
+      } else if (recipeSync && typeof recipeSync.updateLocalRecipe === "function") {
+        await recipeSync.updateLocalRecipe(withUpdatedAt);
+      }
+      if (typeof (syncEngine as any).syncAll === "function") {
+        await (syncEngine as any).syncAll("manual", { bypassThrottle: true });
+      } else if (typeof (syncEngine as any).requestSync === "function") {
+        (syncEngine as any).requestSync("manual");
+      }
     }
 
     Alert.alert("Success", "Recipe saved successfully");
@@ -610,6 +1071,131 @@ return (
             </TouchableOpacity>
           )}
         </Animated.View>
+
+        {/* Insufficient cookies modal (cookbooks) */}
+        <Modal
+          visible={insufficientModal.visible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+        >
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+          />
+          <View style={styles.modalCenter}>
+            <View
+              style={[
+                styles.modalCard,
+                {
+                  backgroundColor: isDark ? "#1f2430" : "#fff",
+                  borderColor: isDark ? "#ffffff22" : "#00000012",
+                },
+              ]}
+            >
+              <TouchableOpacity
+                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+                style={styles.modalCloseBtn}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
+              </TouchableOpacity>
+
+              <Text style={[styles.modalTitleCookies, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+                {t("economy.insufficient_title", "Not enough Cookies")}
+              </Text>
+
+              <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}>
+                {t("economy.insufficient_cookbook_body_short", {
+                  remaining: insufficientModal.remaining,
+                  defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
+                })}
+              </Text>
+
+              {offerCookies5 ? (
+                <View
+                  style={[
+                    styles.modalOfferCard,
+                    {
+                      backgroundColor: isDark ? "#171b24" : "#fff",
+                      borderColor: isDark ? "#ffffff22" : "#00000012",
+                    },
+                  ]}
+                >
+                  <View style={styles.modalOfferLeft}>
+                    <View style={styles.modalOfferTopRow}>
+                      <View style={styles.modalOfferTopLeft}>
+                        <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+                          🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}>
+                      {offerCookies5.subtitle
+                        ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(
+                            offerCookies5.currency || "USD"
+                          ).toUpperCase()}`
+                        : `${offerCookies5.price.toFixed(2)} ${String(
+                            offerCookies5.currency || "USD"
+                          ).toUpperCase()}`}
+                    </Text>
+                  </View>
+
+                  <View style={styles.modalOfferRight}>
+                    <TouchableOpacity
+                      style={styles.buyBtnCookies}
+                      onPress={() => {
+                        setInsufficientModal((s) => ({ ...s, visible: false }));
+                        goToStore("cookies_5");
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.buyBtnTextCookies}>{t("economy.buy", "Buy")}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : null}
+
+              <View style={styles.modalActionsRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.modalActionBtn,
+                    {
+                      backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                      borderColor: isDark ? "#ffffff22" : "#00000012",
+                    },
+                  ]}
+                  onPress={() => {
+                    setInsufficientModal((s) => ({ ...s, visible: false }));
+                    goToStore();
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+                    {t("economy.offers_button", "Other offers")}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.modalActionBtn,
+                    {
+                      backgroundColor: isDark ? "#2b3141" : "#eef1f6",
+                      borderColor: isDark ? "#ffffff22" : "#00000012",
+                    },
+                  ]}
+                  onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+                    {t("wizard.button_back", "Back")}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </>
     )}
   </SafeAreaView>
@@ -691,5 +1277,130 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 2,
     marginLeft: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  modalContent: {
+    width: 320,
+    borderRadius: 12,
+    padding: 20,
+    maxHeight: "80%",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+  },
+  // --- Insufficient cookies modal styles (match AddRecipe / AI Kitchen) ---
+  modalBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#00000088",
+  },
+  modalCenter: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+  },
+  modalTitleCookies: {
+    fontSize: 18,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  modalBodyCookies: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  modalOfferCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+    marginBottom: 14,
+  },
+  modalOfferLeft: { flex: 1, paddingRight: 12 },
+  modalOfferRight: { justifyContent: "center", alignItems: "flex-end" },
+  modalOfferTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  modalOfferTopLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 1,
+  },
+  modalOfferTitle: { fontSize: 18, fontWeight: "900" },
+  modalOfferPriceLine: { fontSize: 15, marginTop: 8, fontWeight: "600" },
+  modalActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  modalActionBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalActionText: {
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  buyBtnCookies: {
+    backgroundColor: "#E27D60",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 14,
+    minWidth: 92,
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  buyBtnTextCookies: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  modalCloseBtn: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    zIndex: 10,
+    padding: 6,
+  },
+  modalCloseText: {
+    fontSize: 18,
+    fontWeight: "900",
   },
 });

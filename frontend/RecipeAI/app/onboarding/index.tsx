@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard, StatusBar } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { StatusBar } from "expo-status-bar";
 import { Stack, useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
@@ -34,6 +33,15 @@ const SYNC_KEYS = {
 };
 
 const HEADER_BG = "#293a53";
+// Android: ensure navigation header accounts for the system status bar height
+const ANDROID_STATUS_BAR_HEIGHT =
+  Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0;
+
+const ANDROID_HEADER_HEIGHT =
+  Platform.OS === "android" ? 56 + ANDROID_STATUS_BAR_HEIGHT : undefined;
+
+// With the navigation header hidden, add a little breathing room below the Android status bar.
+const ANDROID_CONTENT_TOP_SPACER = Platform.OS === "android" ? 60 : 0;
 
 // robust translator: never show raw keys; leverage i18next defaultValue
 const tt = (tfn: any, key: string, fallback: string) => {
@@ -110,6 +118,18 @@ export default function Onboarding() {
   const router = useRouter();
   const { bg, isDark } = useThemeColors();
   const { theme, toggleTheme } = useTheme();
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    try {
+      // Force Android status bar to behave as non-translucent.
+      StatusBar.setTranslucent(false);
+      StatusBar.setBackgroundColor(HEADER_BG, true);
+      StatusBar.setBarStyle("light-content");
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // steps: 1=Intro + Language, 2=Dietary/Avoid, 3=Theme/Measure
   const [step, setStep] = useState(1);
@@ -361,26 +381,36 @@ export default function Onboarding() {
         id: "cb-favorites",
         name: t("cookbook_defaults.favorites", "Favorites"),
         imageUrl: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600",
+        isDefault: true,
+        source: "default",
       },
       {
         id: "cb-breakfast",
         name: t("cookbook_defaults.breakfast", "Breakfast"),
         imageUrl: "https://images.unsplash.com/photo-1504754524776-8f4f37790ca0?w=600",
+        isDefault: true,
+        source: "default",
       },
       {
         id: "cb-lunch",
         name: t("cookbook_defaults.lunch", "Lunch"),
         imageUrl: "https://images.unsplash.com/photo-1525755662778-989d0524087e?w=600",
+        isDefault: true,
+        source: "default",
       },
       {
         id: "cb-dinner",
         name: t("cookbook_defaults.dinner", "Dinner"),
         imageUrl: "https://images.unsplash.com/photo-1543353071-873f17a7a088?w=600",
+        isDefault: true,
+        source: "default",
       },
       {
         id: "cb-desserts",
         name: t("cookbook_defaults.desserts", "Desserts"),
         imageUrl: "https://images.unsplash.com/photo-1540189549336-e6e99c3679fe?w=600",
+        isDefault: true,
+        source: "default",
       },
     ];
 
@@ -399,6 +429,9 @@ export default function Onboarding() {
         createdAt: now,
         updatedAt: now,
         isDeleted: false,
+        // IMPORTANT: mark as default so backend can skip cookie charging
+        isDefault: true,
+        source: "default",
       },
       sync: {
         dirty: true,
@@ -414,354 +447,383 @@ export default function Onboarding() {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={Platform.OS === "ios" ? insets.top + 80 : 0}
-    >
-      <SafeAreaView style={[styles.container, { backgroundColor: HEADER_BG, paddingTop: step === 1 ? insets.top : 0 }]}>
-        <StatusBar style="light" backgroundColor={HEADER_BG} />
-        <Stack.Screen
-          options={{
-            headerShown: step !== 1,
-            title: t("onboarding.title", "Welcome to MyCookbook AI"),
-            headerStyle: { backgroundColor: HEADER_BG },
-            headerTintColor: "#fff",
-            headerTitleAlign: "center",
-            statusBarStyle: "light",
-            statusBarBackgroundColor: HEADER_BG,
-          }}
-        />
-        {/* STEP CONTENT */}
-        {step === 1 && (
-          <View key={language} style={styles.contentIntro}>
-            {/* HERO: logo + title + slogan + blurb grouped together */}
-            <View style={styles.introHero}>
-              <Image
-                source={require("../../assets/images/icon.png")}
-                style={{ width: 128, height: 128, borderRadius: 28, marginBottom: 16 }}
-                resizeMode="contain"
-              />
-              <Text style={[styles.h1, { color: "#fff", textAlign: "center" }]}>
-                {t("onboarding.title", "Welcome to MyCookbook AI")}
-              </Text>
-              <Text style={styles.sloganText}>
-                {t("common.slogan", "Your smart kitchen companion")}
-              </Text>
-              <Text style={styles.descText}>
-                {t("onboarding.intro_blurb", "Tell us a few quick things to personalize your experience.")}
-              </Text>
-              <View style={styles.languageBlock}>
-                <Text style={[styles.h2, { color: "#fff", marginTop: 8, marginBottom: 16 }]}>
-                  {tr("onboarding.choose_language", "Choose your language")}
+    <>
+      <StatusBar translucent={false} backgroundColor={HEADER_BG} barStyle="light-content" />
+
+      <Stack.Screen
+        options={{
+          headerShown: false,
+          title: t("onboarding.title", "Welcome to MyCookbook AI"),
+          headerStyle: {
+            backgroundColor: HEADER_BG,
+            ...(Platform.OS === "android"
+              ? {
+                  height: 56 + ANDROID_STATUS_BAR_HEIGHT,
+                }
+              : null),
+          },
+          headerTintColor: "#fff",
+          headerTitleAlign: "center",
+          headerTitleContainerStyle:
+            Platform.OS === "android" ? { marginTop: ANDROID_STATUS_BAR_HEIGHT } : undefined,
+          headerBackVisible: true,
+          headerRight: () => null,
+          // On Android we manually account for the status bar via header height + headerStatusBarHeight.
+          // Keeping headerTopInsetEnabled=true can still place the header under the status bar on some configs.
+          headerTopInsetEnabled: Platform.OS !== "android",
+          headerStatusBarHeight:
+            Platform.OS === "android" ? ANDROID_STATUS_BAR_HEIGHT : undefined,
+        }}
+      />
+
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "ios" ? insets.top + 80 : 0}
+      >
+        <SafeAreaView
+          style={[
+            styles.container,
+            {
+              backgroundColor: HEADER_BG,
+              // Add extra top spacing so content doesn't sit too close to the Android status bar.
+              paddingTop: ANDROID_CONTENT_TOP_SPACER,
+            },
+          ]}
+          edges={["top", "left", "right", "bottom"]}
+        >
+
+          {/* STEP CONTENT */}
+          {step === 1 && (
+            <View key={language} style={styles.contentIntro}>
+              {/* HERO: logo + title + slogan + blurb grouped together */}
+              <View style={styles.introHero}>
+                <Image
+                  source={require("../../assets/images/icon.png")}
+                  style={{ width: 128, height: 128, borderRadius: 28, marginBottom: 16 }}
+                  resizeMode="contain"
+                />
+                <Text style={[styles.h1, { color: "#fff", textAlign: "center" }]}>
+                  {t("onboarding.title", "Welcome to MyCookbook AI")}
                 </Text>
+                <Text style={styles.sloganText}>
+                  {t("common.slogan", "Your smart kitchen companion")}
+                </Text>
+                <Text style={styles.descText}>
+                  {t("onboarding.intro_blurb", "Tell us a few quick things to personalize your experience.")}
+                </Text>
+                <View style={styles.languageBlock}>
+                  <Text style={[styles.h2, { color: "#fff", marginTop: 8, marginBottom: 16 }]}>
+                    {tr("onboarding.choose_language", "Choose your language")}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setModalLanguage(true)}
+                    activeOpacity={0.8}
+                    style={styles.languagePicker}
+                  >
+                    {(() => {
+                      const current =
+                        languageOptions.find(o => o.code === (language as SupportedLanguage)) ||
+                        { flag: "🌐", label: String(language) };
+                      return (
+                        <View style={{ flexDirection: "row", alignItems: "center" }}>
+                          <Text style={{ fontSize: 20, marginRight: 8 }}>{current.flag}</Text>
+                          <Text style={{ fontSize: 16, color: "#111" }}>{current.label}</Text>
+                        </View>
+                      );
+                    })()}
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* CTA pinned towards the bottom */}
+              <View style={styles.introBottom}>
+                <AppButton
+                  label={t("onboarding.lets_go", "Let's go!")}
+                  onPress={next}
+                  variant="cta"
+                  fullWidth
+                />
+                <Text style={{ color: "#fff", opacity: 0.9, fontSize: 13, textAlign: "center", marginTop: 10 }}>
+                  {tr("onboarding.change_later_note", "You can change these anytime later in your Profile area.")}
+                </Text>
+              </View>
+              {/* Language modal list (like Profile) */}
+              <Modal
+                visible={modalLanguage}
+                animationType="slide"
+                transparent
+                onRequestClose={() => setModalLanguage(false)}
+              >
                 <TouchableOpacity
-                  onPress={() => setModalLanguage(true)}
-                  activeOpacity={0.8}
-                  style={styles.languagePicker}
+                  activeOpacity={1}
+                  onPress={() => setModalLanguage(false)}
+                  style={styles.modalOverlay}
                 >
-                  {(() => {
-                    const current =
-                      languageOptions.find(o => o.code === (language as SupportedLanguage)) ||
-                      { flag: "🌐", label: String(language) };
-                    return (
-                      <View style={{ flexDirection: "row", alignItems: "center" }}>
-                        <Text style={{ fontSize: 20, marginRight: 8 }}>{current.flag}</Text>
-                        <Text style={{ fontSize: 16, color: "#111" }}>{current.label}</Text>
-                      </View>
-                    );
-                  })()}
+                  <View style={[styles.modalContent, { backgroundColor: "#fff" }]} onStartShouldSetResponder={() => true}>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                      <Text style={[styles.h2, { color: "#111", marginBottom: 8 }]}>
+                        {tr("profile.select_language", "Select language")}
+                      </Text>
+                      <TouchableOpacity onPress={() => setModalLanguage(false)}>
+                        <MaterialIcons name="close" size={24} color="#333" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {languageOptions.map((option) => (
+                      <TouchableOpacity
+                        key={option.code}
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          paddingVertical: 12,
+                          borderBottomWidth: StyleSheet.hairlineWidth,
+                          borderBottomColor: "#e0e0e0",
+                        }}
+                        onPress={async () => {
+                          const lng = option.code as SupportedLanguage;
+                          setLanguage(lng);
+                          try { await i18n.changeLanguage(lng); } catch { }
+                          try {
+                            await AsyncStorage.setItem("userLanguage", lng);
+                            await AsyncStorage.setItem(KEYS.LANGUAGE, lng);
+                            await saveUserPrefs({ userLanguage: lng });
+                          } catch { }
+                          setModalLanguage(false);
+                        }}
+                      >
+                        <Text style={{ fontSize: 20, marginRight: 10 }}>{option.flag}</Text>
+                        <Text style={{
+                          color: "#111",
+                          fontWeight: language === option.code ? "bold" : "normal",
+                          fontSize: 16,
+                        }}>
+                          {option.label}
+                        </Text>
+                        {language === option.code && (
+                          <MaterialIcons name="check" size={20} color="#E27D60" style={{ marginLeft: "auto" }} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </TouchableOpacity>
+              </Modal>
+            </View>
+          )}
+
+          {step === 2 && (
+            <ScrollView
+              ref={scrollRef}
+              style={{ flex: 1 }}
+              contentContainerStyle={[
+                styles.content,
+                { paddingBottom: 120 + (keyboardVisible ? keyboardHeight : 0) },
+              ]}
+              keyboardShouldPersistTaps="always"
+              keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+            >
+              <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
+                {tt(t, "profile.food_preferences_explainer", "These questions help us personalize your AI Kitchen experience.")}
+              </Text>
+              <Text style={[styles.h2, { color: "#fff", marginTop: 6, marginBottom: 12 }]}>
+                {tt(t, "profile.dietary_restrictions", "Dietary restrictions")}
+              </Text>
+              <View style={[styles.rowWrap, { marginTop: 4 }]}>
+                {Object.entries(dietaryOptions).map(([k, opt]) => (
+                  <TouchableOpacity
+                    key={k}
+                    style={[
+                      styles.chip,
+                      dietary.includes(k)
+                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
+                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                    ]}
+                    onPress={() => toggleDietary(k)}
+                  >
+                    <Text style={{ color: dietary.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity
+                  style={[
+                    styles.chip,
+                    dietary.length === 0
+                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
+                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                  ]}
+                  onPress={() => setDietary([])}
+                >
+                  <Text style={{ color: dietary.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
                 </TouchableOpacity>
               </View>
-            </View>
 
-            {/* CTA pinned towards the bottom */}
-            <View style={styles.introBottom}>
-              <AppButton
-                label={t("onboarding.lets_go", "Let's go!")}
-                onPress={next}
-                variant="cta"
-                fullWidth
-              />
-              <Text style={{ color: "#fff", opacity: 0.9, fontSize: 13, textAlign: "center", marginTop: 10 }}>
-                {tr("onboarding.change_later_note", "You can change these anytime later in your Profile area.")}
+              <Text style={[styles.h2, { color: "#fff", marginTop: 28, marginBottom: 12 }]}>
+                {tt(t, "profile.ingredients_to_avoid", "Ingredients to avoid")}
               </Text>
-            </View>
-            {/* Language modal list (like Profile) */}
-            <Modal
-              visible={modalLanguage}
-              animationType="slide"
-              transparent
-              onRequestClose={() => setModalLanguage(false)}
-            >
-              <TouchableOpacity
-                activeOpacity={1}
-                onPress={() => setModalLanguage(false)}
-                style={styles.modalOverlay}
-              >
-                <View style={[styles.modalContent, { backgroundColor: "#fff" }]} onStartShouldSetResponder={() => true}>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                    <Text style={[styles.h2, { color: "#111", marginBottom: 8 }]}>
-                      {tr("profile.select_language", "Select language")}
-                    </Text>
-                    <TouchableOpacity onPress={() => setModalLanguage(false)}>
-                      <MaterialIcons name="close" size={24} color="#333" />
-                    </TouchableOpacity>
-                  </View>
-
-                  {languageOptions.map((option) => (
-                    <TouchableOpacity
-                      key={option.code}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        paddingVertical: 12,
-                        borderBottomWidth: StyleSheet.hairlineWidth,
-                        borderBottomColor: "#e0e0e0",
-                      }}
-                      onPress={async () => {
-                        const lng = option.code as SupportedLanguage;
-                        setLanguage(lng);
-                        try { await i18n.changeLanguage(lng); } catch { }
-                        try {
-                          await AsyncStorage.setItem("userLanguage", lng);
-                          await AsyncStorage.setItem(KEYS.LANGUAGE, lng);
-                          await saveUserPrefs({ userLanguage: lng });
-                        } catch { }
-                        setModalLanguage(false);
-                      }}
-                    >
-                      <Text style={{ fontSize: 20, marginRight: 10 }}>{option.flag}</Text>
-                      <Text style={{
-                        color: "#111",
-                        fontWeight: language === option.code ? "bold" : "normal",
-                        fontSize: 16,
-                      }}>
-                        {option.label}
-                      </Text>
-                      {language === option.code && (
-                        <MaterialIcons name="check" size={20} color="#E27D60" style={{ marginLeft: "auto" }} />
-                      )}
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </TouchableOpacity>
-            </Modal>
-          </View>
-        )}
-
-        {step === 2 && (
-          <ScrollView
-            ref={scrollRef}
-            style={{ flex: 1 }}
-            contentContainerStyle={[
-              styles.content,
-              { paddingBottom: 120 + (keyboardVisible ? keyboardHeight : 0) },
-            ]}
-            keyboardShouldPersistTaps="always"
-            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-          >
-            <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
-              {tt(t, "profile.food_preferences_explainer", "These questions help us personalize your AI Kitchen experience.")}
-            </Text>
-            <Text style={[styles.h2, { color: "#fff", marginTop: 6, marginBottom: 12 }]}>
-              {tt(t, "profile.dietary_restrictions", "Dietary restrictions")}
-            </Text>
-            <View style={[styles.rowWrap, { marginTop: 4 }]}>
-              {Object.entries(dietaryOptions).map(([k, opt]) => (
+              <View style={[styles.rowWrap, { marginTop: 4 }]}>
+                {Object.entries(avoidOptions).map(([k, opt]) => (
+                  <TouchableOpacity
+                    key={k}
+                    style={[
+                      styles.chip,
+                      avoid.includes(k)
+                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
+                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                    ]}
+                    onPress={() => toggleAvoid(k)}
+                  >
+                    <Text style={{ color: avoid.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
+                  </TouchableOpacity>
+                ))}
                 <TouchableOpacity
-                  key={k}
                   style={[
                     styles.chip,
-                    dietary.includes(k)
+                    avoid.length === 0
                       ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
                       : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
                   ]}
-                  onPress={() => toggleDietary(k)}
+                  onPress={() => { setAvoid([]); setAvoidOther(""); }}
                 >
-                  <Text style={{ color: dietary.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
+                  <Text style={{ color: avoid.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
                 </TouchableOpacity>
-              ))}
-              <TouchableOpacity
-                style={[
-                  styles.chip,
-                  dietary.length === 0
-                    ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                    : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
-                ]}
-                onPress={() => setDietary([])}
-              >
-                <Text style={{ color: dietary.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
-              </TouchableOpacity>
-            </View>
+              </View>
 
-            <Text style={[styles.h2, { color: "#fff", marginTop: 28, marginBottom: 12 }]}>
-              {tt(t, "profile.ingredients_to_avoid", "Ingredients to avoid")}
-            </Text>
-            <View style={[styles.rowWrap, { marginTop: 4 }]}>
-              {Object.entries(avoidOptions).map(([k, opt]) => (
-                <TouchableOpacity
-                  key={k}
+              {avoid.includes("other") && (
+                <TextInput
                   style={[
-                    styles.chip,
-                    avoid.includes(k)
-                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                    styles.input,
+                    {
+                      backgroundColor: "#ffffff",
+                      color: "#111111",
+                      borderColor: "#ccc",
+                      textAlignVertical: "top",
+                      marginBottom: keyboardVisible ? keyboardHeight + 16 : 16,
+                    },
                   ]}
-                  onPress={() => toggleAvoid(k)}
-                >
-                  <Text style={{ color: avoid.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
-                </TouchableOpacity>
-              ))}
-              <TouchableOpacity
-                style={[
-                  styles.chip,
-                  avoid.length === 0
-                    ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                    : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
-                ]}
-                onPress={() => { setAvoid([]); setAvoidOther(""); }}
-              >
-                <Text style={{ color: avoid.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
-              </TouchableOpacity>
-            </View>
-
-            {avoid.includes("other") && (
-              <TextInput
-                style={[
-                  styles.input,
-                  {
-                    backgroundColor: "#ffffff",
-                    color: "#111111",
-                    borderColor: "#ccc",
-                    textAlignVertical: "top",
-                    marginBottom: keyboardVisible ? keyboardHeight + 16 : 16,
-                  },
-                ]}
-                placeholder={t("profile.avoid_other_placeholder")}
-                placeholderTextColor="#888"
-                value={avoidOther}
-                onChangeText={setAvoidOther}
-                multiline
-                onFocus={() => {
-                  setTimeout(() => {
-                    scrollRef.current?.scrollToEnd({ animated: true });
-                  }, 50);
-                }}
-              />
-            )}
-
-            <View style={{ height: 8 }} />
-            <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
-              <AppButton label={tr("common.back", "Back")} onPress={back} variant="secondary" style={{ flex: 1, marginRight: 8 }} />
-              <AppButton label={tr("common.next", "Next")} onPress={next} variant="cta" style={{ flex: 1, marginLeft: 8 }} />
-            </View>
-          </ScrollView>
-        )}
-
-        {step === 3 && (
-          <View style={styles.contentStep}>
-            <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
-              {tt(
-                t,
-                "onboarding.final_prefs_explainer",
-                "You're almost ready! Set your appearance, measurement units, and, if you like, create or sign in to a free account now or later from your Profile."
+                  placeholder={t("profile.avoid_other_placeholder")}
+                  placeholderTextColor="#888"
+                  value={avoidOther}
+                  onChangeText={setAvoidOther}
+                  multiline
+                  onFocus={() => {
+                    setTimeout(() => {
+                      scrollRef.current?.scrollToEnd({ animated: true });
+                    }, 50);
+                  }}
+                />
               )}
-            </Text>
-            {/* Appearance */}
-            <Text style={[styles.h2, { color: "#fff", marginTop: 4, marginBottom: 12 }]}>
-              {tr("profile.theme_title", "Appearance")}
-            </Text>
-            <View style={styles.rowWrap}>
-              {[
-                { k: "light", label: tr("onboarding.theme_light", "Light") },
-                { k: "dark", label: tr("onboarding.theme_dark", "Dark") },
-              ].map(m => (
-                <TouchableOpacity
-                  key={m.k}
-                  style={[
-                    styles.chip,
-                    themeMode === m.k
-                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
-                  ]}
-                  onPress={() => setThemeMode(m.k as ThemeMode)}
-                >
-                  <Text style={{ color: themeMode === m.k ? "#fff" : "#000" }}>{m.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
 
-            {/* Measurement */}
-            <Text style={[styles.h2, { color: "#fff", marginTop: 28, marginBottom: 12 }]}>
-              {tr("profile.measure_system_title", "Measurement system")}
-            </Text>
-            <View style={styles.rowWrap}>
-              {[
-                { k: "metric", label: tr("onboarding.measurement_metric", "Metric") },
-                { k: "imperial", label: tr("onboarding.measurement_imperial", "Imperial") },
-              ].map(m => (
-                <TouchableOpacity
-                  key={m.k}
-                  style={[
-                    styles.chip,
-                    measure === m.k
-                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
-                  ]}
-                  onPress={() => setMeasure(m.k as Measure)}
-                >
-                  <Text style={{ color: measure === m.k ? "#fff" : "#000" }}>{m.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+              <View style={{ height: 8 }} />
+              <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
+                <AppButton label={tr("common.back", "Back")} onPress={back} variant="secondary" style={{ flex: 1, marginRight: 8 }} />
+                <AppButton label={tr("common.next", "Next")} onPress={next} variant="cta" style={{ flex: 1, marginLeft: 8 }} />
+              </View>
+            </ScrollView>
+          )}
 
-            {/* Optional account creation section */}
-            <View style={{ marginTop: 28 }}>
-              <Text style={[styles.h2, { color: "#fff", marginBottom: 12 }]}>
-                {tr("onboarding.account_title", "Create a free account (optional)")}
-              </Text>
-              <Text style={[styles.p, { color: "#fff", fontSize: 15, marginBottom: 14 }]}>
-                {tr(
-                  "onboarding.account_explainer",
-                  "Save your cookbooks and preferences across devices and get ready for future premium features."
+          {step === 3 && (
+            <View style={styles.contentStep}>
+              <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
+                {tt(
+                  t,
+                  "onboarding.final_prefs_explainer",
+                  "You're almost ready! Set your appearance, measurement units, and, if you like, create or sign in to a free account now or later from your Profile."
                 )}
               </Text>
-              <View style={{ flexDirection: "row" }}>
+              {/* Appearance */}
+              <Text style={[styles.h2, { color: "#fff", marginTop: 4, marginBottom: 12 }]}>
+                {tr("profile.theme_title", "Appearance")}
+              </Text>
+              <View style={styles.rowWrap}>
+                {[
+                  { k: "light", label: tr("onboarding.theme_light", "Light") },
+                  { k: "dark", label: tr("onboarding.theme_dark", "Dark") },
+                ].map(m => (
+                  <TouchableOpacity
+                    key={m.k}
+                    style={[
+                      styles.chip,
+                      themeMode === m.k
+                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
+                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                    ]}
+                    onPress={() => setThemeMode(m.k as ThemeMode)}
+                  >
+                    <Text style={{ color: themeMode === m.k ? "#fff" : "#000" }}>{m.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Measurement */}
+              <Text style={[styles.h2, { color: "#fff", marginTop: 28, marginBottom: 12 }]}>
+                {tr("profile.measure_system_title", "Measurement system")}
+              </Text>
+              <View style={styles.rowWrap}>
+                {[
+                  { k: "metric", label: tr("onboarding.measurement_metric", "Metric") },
+                  { k: "imperial", label: tr("onboarding.measurement_imperial", "Imperial") },
+                ].map(m => (
+                  <TouchableOpacity
+                    key={m.k}
+                    style={[
+                      styles.chip,
+                      measure === m.k
+                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
+                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                    ]}
+                    onPress={() => setMeasure(m.k as Measure)}
+                  >
+                    <Text style={{ color: measure === m.k ? "#fff" : "#000" }}>{m.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Optional account creation section */}
+              <View style={{ marginTop: 28 }}>
+                <Text style={[styles.h2, { color: "#fff", marginBottom: 12 }]}>
+                  {tr("onboarding.account_title", "Create a free account (optional)")}
+                </Text>
+                <Text style={[styles.p, { color: "#fff", fontSize: 15, marginBottom: 14 }]}>
+                  {tr(
+                    "onboarding.account_explainer",
+                    "Save your cookbooks and preferences across devices and get ready for future premium features."
+                  )}
+                </Text>
+                <View style={{ flexDirection: "row" }}>
+                  <AppButton
+                    label={tr("onboarding.account_create", "Create account")}
+                    onPress={handleCreateAccount}
+                    variant="cta"
+                    style={{ flex: 1, marginRight: 8 }}
+                  />
+                  <AppButton
+                    label={tr("onboarding.account_signin", "Sign in")}
+                    onPress={handleSignInInstead}
+                    variant="secondary"
+                    style={{ flex: 1, marginLeft: 8 }}
+                  />
+                </View>
+              </View>
+
+              {/* Footer */}
+              <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
                 <AppButton
-                  label={tr("onboarding.account_create", "Create account")}
-                  onPress={handleCreateAccount}
-                  variant="cta"
+                  label={tr("common.back", "Back")}
+                  onPress={back}
+                  variant="secondary"
                   style={{ flex: 1, marginRight: 8 }}
                 />
                 <AppButton
-                  label={tr("onboarding.account_signin", "Sign in")}
-                  onPress={handleSignInInstead}
-                  variant="secondary"
+                  label={tr("onboarding.skip_account", "Continue without account")}
+                  onPress={finalize}
+                  variant="cta"
                   style={{ flex: 1, marginLeft: 8 }}
                 />
               </View>
             </View>
-
-            {/* Footer */}
-            <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
-              <AppButton
-                label={tr("common.back", "Back")}
-                onPress={back}
-                variant="secondary"
-                style={{ flex: 1, marginRight: 8 }}
-              />
-              <AppButton
-                label={tr("onboarding.skip_account", "Continue without account")}
-                onPress={finalize}
-                variant="cta"
-                style={{ flex: 1, marginLeft: 8 }}
-              />
-            </View>
-          </View>
-        )}
-      </SafeAreaView>
-    </KeyboardAvoidingView>
+          )}
+        </SafeAreaView>
+      </KeyboardAvoidingView>
+    </>
   );
 }
 
