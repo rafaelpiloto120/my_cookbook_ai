@@ -379,12 +379,11 @@ export default function EconomyStoreScreen() {
       try {
         let prods: any[] = [];
         try {
-          // Newer versions
-          prods = await getProducts({ skus: offerSkus } as any);
+          // v14+ expects a product type; these are one-time (consumable) in-app products.
+          prods = await getProducts({ skus: offerSkus, type: "in-app" } as any);
         } catch (e1) {
           try {
-            // Some versions use `skus`
-            prods = await getProducts({ skus: offerSkus } as any);
+            prods = await getProducts({ skus: offerSkus, type: "in-app" } as any);
           } catch (e2) {
             // Older versions accept an array
             prods = await (getProducts as any)(offerSkus);
@@ -631,47 +630,37 @@ export default function EconomyStoreScreen() {
     }
 
     try {
-      // Launch Google Play purchase flow (Android only).
-      // `react-native-iap` has had multiple requestPurchase signatures across versions.
-      // We try a few known-good variants to avoid:
-      // "Missing purchase request configuration".
+      // Launch Google Play purchase flow.
+      // react-native-iap v14.6+ (OpenIAP) expects a structured request.
+      // Using the wrong shape produces: "Missing purchase request configuration".
       const fn: any = requestPurchase as any;
 
-      const attempts: Array<() => Promise<any>> = [
-        // Most common signature (many versions): requestPurchase({ sku })
-        () => fn({ sku }),
-
-        // Some versions support skus array (Android)
-        () => fn({ skus: [sku] }),
-
-        // Some versions accept a plain string
-        () => fn(sku),
-
-        // Newer structured request format (some v14+ builds)
-        () =>
-          fn({
+      try {
+        // Preferred v14+ shape (OpenIAP): google/apple keys
+        await fn({
+          type: "in-app",
+          request: {
+            google: {
+              skus: [sku],
+            },
+          },
+        });
+      } catch (err1: any) {
+        // Some builds/docs also accept `android` instead of `google`.
+        try {
+          await fn({
             type: "in-app",
             request: {
               android: {
                 skus: [sku],
               },
             },
-          }),
-      ];
-
-      let lastErr: any = null;
-      for (const attempt of attempts) {
-        try {
-          await attempt();
-          lastErr = null;
-          break;
-        } catch (err) {
-          lastErr = err;
+          });
+        } catch (err2) {
+          // Last-resort legacy signature (older native module)
+          // (kept to avoid breaking older installs)
+          await fn({ sku });
         }
-      }
-
-      if (lastErr) {
-        throw lastErr;
       }
 
       // The rest continues in purchaseUpdatedListener:
@@ -688,6 +677,7 @@ export default function EconomyStoreScreen() {
       const lowerMsg = msg.toLowerCase();
       const isMissingConfig =
         lowerMsg.includes("missing purchase request configuration") ||
+        lowerMsg.includes("missing purchase request") ||
         lowerMsg.includes("invalid purchase request") ||
         lowerMsg.includes("invalid argument") ||
         lowerMsg.includes("must be a string") ||
