@@ -48,6 +48,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 
+function loadGooglePlayServiceAccount() {
+  // 1) Prefer FILE (Render secret file)
+  const filePath = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_FILE;
+  if (filePath) {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(raw);
+  }
+
+  // 2) Fallback to JSON env var (local/dev)
+  const jsonStr = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
+  if (jsonStr) {
+    return JSON.parse(jsonStr);
+  }
+
+  throw new Error("Missing Google Play service account config. Set GOOGLE_PLAY_SERVICE_ACCOUNT_FILE or GOOGLE_PLAY_SERVICE_ACCOUNT_JSON.");
+}
+
+
 const app = express();
 
 app.use(cors());

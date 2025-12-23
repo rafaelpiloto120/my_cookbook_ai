@@ -18,6 +18,7 @@ import {
   flushFailedPurchasesCachedAsPendingAndroid,
   type Product,
   type Purchase,
+  type ProductPurchase,
 } from "react-native-iap";
 
 type Offer = {
@@ -82,6 +83,7 @@ export default function EconomyStoreScreen() {
 
   const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+  const isLocalDev = __DEV__ || appEnv === "local";
 
   // ✅ auth.currentUser isn't reactive; track uid in state so balance refreshes on login/logout.
   const auth = getAuth();
@@ -111,7 +113,7 @@ export default function EconomyStoreScreen() {
   }, [offers]);
 
   const verifyPurchaseWithBackend = useCallback(
-    async (purchase: Purchase): Promise<{ ok: boolean; message?: string; balance?: number | null }>
+    async (purchase: Purchase | ProductPurchase): Promise<{ ok: boolean; message?: string; balance?: number | null }>
     => {
       if (!backendUrl) {
         return { ok: false, message: "Backend URL is not configured." };
@@ -579,11 +581,28 @@ export default function EconomyStoreScreen() {
       return;
     }
 
-    // Google Play Billing is not ready yet. Make sure you uploaded an AAB with Play Billing enabled and try again.
-    if (!iapReady) {
+    // Local/dev builds cannot reliably use Google Play Billing unless the app is installed from Play
+    // (internal/closed testing or internal app sharing). Otherwise Billing returns "service unavailable".
+    if (isLocalDev) {
       Alert.alert(
-        "Billing not ready",
-        "Please try again later."
+        "Purchases not available in local dev",
+        "Google Play Billing usually won't work when the app is installed via local dev/ADB.\n\nTo test purchases:\n1) Upload an AAB to Play Console (internal testing / closed testing)\n2) Add your account as a license tester / tester\n3) Install the app from Google Play\n4) Make sure the IAP products are ACTIVE for that track\n\nThen retry the purchase."
+      );
+      return;
+    }
+
+    // Google Play Billing is not ready yet.
+    if (!iapReady) {
+      Alert.alert("Billing not ready", "Please try again later.");
+      return;
+    }
+
+    // If the native IAP module is partially available (e.g., requestPurchase exists but getProducts does not),
+    // it's usually a dev client issue and purchases will fail.
+    if (typeof getProducts !== "function") {
+      Alert.alert(
+        "Billing not available",
+        "This build doesn't have full Google Play Billing support (native module mismatch). Install the app from Google Play (internal/closed testing) to test purchases."
       );
       return;
     }
@@ -612,20 +631,49 @@ export default function EconomyStoreScreen() {
     }
 
     try {
-      // Launch Play purchase flow.
-      // For one-time consumables (cookies), requestPurchase is correct.
-      try {
-        // Newer versions often accept `{ sku }`
-        await (requestPurchase as any)({ sku });
-      } catch (e1: any) {
+      // Launch Google Play purchase flow (Android only).
+      // `react-native-iap` has had multiple requestPurchase signatures across versions.
+      // We try a few known-good variants to avoid:
+      // "Missing purchase request configuration".
+      const fn: any = requestPurchase as any;
+
+      const attempts: Array<() => Promise<any>> = [
+        // Most common signature (many versions): requestPurchase({ sku })
+        () => fn({ sku }),
+
+        // Some versions support skus array (Android)
+        () => fn({ skus: [sku] }),
+
+        // Some versions accept a plain string
+        () => fn(sku),
+
+        // Newer structured request format (some v14+ builds)
+        () =>
+          fn({
+            type: "in-app",
+            request: {
+              android: {
+                skus: [sku],
+              },
+            },
+          }),
+      ];
+
+      let lastErr: any = null;
+      for (const attempt of attempts) {
         try {
-          // Some versions use `{ skus: [...] }`
-          await (requestPurchase as any)({ skus: [sku] });
-        } catch (e2) {
-          // Older versions accept `(sku)`
-          await (requestPurchase as any)(sku);
+          await attempt();
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
         }
       }
+
+      if (lastErr) {
+        throw lastErr;
+      }
+
       // The rest continues in purchaseUpdatedListener:
       // - backend verifies & grants
       // - finishTransaction after success
@@ -637,14 +685,35 @@ export default function EconomyStoreScreen() {
           ? String(e.message || (e as any).debugMessage)
           : "Couldn't start the purchase. Please try again.";
       const code = e && typeof e === "object" && (e as any).code ? String((e as any).code) : "";
-      Alert.alert("Purchase failed", code ? `${msg} (code: ${code})` : msg);
+      const lowerMsg = msg.toLowerCase();
+      const isMissingConfig =
+        lowerMsg.includes("missing purchase request configuration") ||
+        lowerMsg.includes("invalid purchase request") ||
+        lowerMsg.includes("invalid argument") ||
+        lowerMsg.includes("must be a string") ||
+        lowerMsg.includes("must be an object");
+
+      const isBillingUnavailable =
+        lowerMsg.includes("billing service is unavailable") ||
+        lowerMsg.includes("service unavailable") ||
+        lowerMsg.includes("service-error") ||
+        lowerMsg.includes("billing is unavailable");
+
+      Alert.alert(
+        "Purchase failed",
+        isBillingUnavailable
+          ? "Google Play Billing service is unavailable for this install. Install the app from Google Play (internal/closed testing) to test purchases."
+          : isMissingConfig
+            ? "This build/library expects a different purchase request format (IAP API mismatch). Ensure the app is rebuilt and installed from Google Play, then try again."
+            : (code ? `${msg} (code: ${code})` : msg)
+      );
     }
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }} edges={["left", "right", "bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }} edges={["top", "left", "right", "bottom"]}>
       <ScrollView
-        style={{ flex: 1 }}
+        style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }}
         contentContainerStyle={[styles.container, { paddingBottom: 28 }]}
         keyboardShouldPersistTaps="handled"
       >
