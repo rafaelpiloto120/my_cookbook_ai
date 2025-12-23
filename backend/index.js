@@ -83,7 +83,7 @@ const ECONOMY_LIMITS = {
   SIGNUP_BONUS_COOKIES: 10,
 
   // Cookie costs (Import from URL is FREE for now)
-  COST_AI_RECIPE_SUGGESTIONS: 1,
+  COST_AI_RECIPE_SUGGESTIONS: 0,
   COST_AI_RECIPE_FULL: 1,
 
   // Cookbooks: (enforced later on sync endpoints)

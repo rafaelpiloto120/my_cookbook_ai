@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard, StatusBar } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard, StatusBar, findNodeHandle, UIManager } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Stack, useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -114,6 +114,44 @@ function resolveSupportedLanguageFromDevice(): SupportedLanguage {
 export default function Onboarding() {
   const insets = useSafeAreaInsets();
   const scrollRef = useRef<ScrollView | null>(null);
+  const avoidOtherInputRef = useRef<TextInput | null>(null);
+
+  const scrollToAvoidOtherInput = () => {
+    try {
+      requestAnimationFrame(() => {
+        const input = avoidOtherInputRef.current as any;
+        const scroll = scrollRef.current as any;
+        if (!input || !scroll) return;
+
+        const inputHandle = findNodeHandle(input);
+        if (!inputHandle) return;
+
+        // Preferred approach (most consistent across RN apps):
+        // Ask ScrollView to scroll just enough so the input sits above the keyboard.
+        const extraOffset = Platform.OS === "android" ? 110 : 80;
+        if (typeof scroll?.scrollResponderScrollNativeHandleToKeyboard === "function") {
+          scroll.scrollResponderScrollNativeHandleToKeyboard(inputHandle, extraOffset, true);
+          return;
+        }
+
+        // Fallback: measure relative to the ScrollView node and scroll.
+        const scrollHandle = findNodeHandle(scroll);
+        if (!scrollHandle) return;
+
+        UIManager.measureLayout(
+          inputHandle,
+          scrollHandle,
+          () => {},
+          (_x: number, y: number) => {
+            const targetY = Math.max(0, y - extraOffset);
+            scroll.scrollTo({ y: targetY, animated: true });
+          }
+        );
+      });
+    } catch {
+      // ignore
+    }
+  };
   const { t } = useTranslation();
   const router = useRouter();
   const { bg, isDark } = useThemeColors();
@@ -447,7 +485,7 @@ export default function Onboarding() {
   }
 
   return (
-    <>
+    <View style={{ flex: 1, backgroundColor: HEADER_BG }}>
       <StatusBar translucent={false} backgroundColor={HEADER_BG} barStyle="light-content" />
 
       <Stack.Screen
@@ -458,8 +496,8 @@ export default function Onboarding() {
             backgroundColor: HEADER_BG,
             ...(Platform.OS === "android"
               ? {
-                  height: 56 + ANDROID_STATUS_BAR_HEIGHT,
-                }
+                height: 56 + ANDROID_STATUS_BAR_HEIGHT,
+              }
               : null),
           },
           headerTintColor: "#fff",
@@ -477,8 +515,8 @@ export default function Onboarding() {
       />
 
       <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1, backgroundColor: HEADER_BG }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={Platform.OS === "ios" ? insets.top + 80 : 0}
       >
         <SafeAreaView
@@ -614,12 +652,17 @@ export default function Onboarding() {
           {step === 2 && (
             <ScrollView
               ref={scrollRef}
-              style={{ flex: 1 }}
+              style={{ flex: 1, backgroundColor: HEADER_BG }}
+              contentInsetAdjustmentBehavior={Platform.OS === "ios" ? "automatic" : undefined}
               contentContainerStyle={[
                 styles.content,
-                { paddingBottom: 120 + (keyboardVisible ? keyboardHeight : 0) },
+                {
+                  backgroundColor: HEADER_BG,
+                  // Ensure we can scroll past the keyboard so the "Other" input isn't hidden.
+                  paddingBottom: keyboardVisible ? Math.max(220, keyboardHeight + 120) : 160,
+                },
               ]}
-              keyboardShouldPersistTaps="always"
+              keyboardShouldPersistTaps="handled"
               keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             >
               <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
@@ -689,6 +732,7 @@ export default function Onboarding() {
 
               {avoid.includes("other") && (
                 <TextInput
+                  ref={(r) => (avoidOtherInputRef.current = r)}
                   style={[
                     styles.input,
                     {
@@ -696,7 +740,7 @@ export default function Onboarding() {
                       color: "#111111",
                       borderColor: "#ccc",
                       textAlignVertical: "top",
-                      marginBottom: keyboardVisible ? keyboardHeight + 16 : 16,
+                      marginBottom: 16,
                     },
                   ]}
                   placeholder={t("profile.avoid_other_placeholder")}
@@ -705,9 +749,9 @@ export default function Onboarding() {
                   onChangeText={setAvoidOther}
                   multiline
                   onFocus={() => {
-                    setTimeout(() => {
-                      scrollRef.current?.scrollToEnd({ animated: true });
-                    }, 50);
+                    scrollToAvoidOtherInput();
+                    // Android can finish laying out after the keyboard appears; re-scroll once.
+                    setTimeout(() => scrollToAvoidOtherInput(), 180);
                   }}
                 />
               )}
@@ -823,7 +867,7 @@ export default function Onboarding() {
           )}
         </SafeAreaView>
       </KeyboardAvoidingView>
-    </>
+    </View>
   );
 }
 

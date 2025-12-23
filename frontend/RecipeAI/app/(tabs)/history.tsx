@@ -1332,6 +1332,16 @@ export default function History() {
                 />
               </TouchableOpacity>
             </View>
+            <Text
+              style={{
+                fontSize: 13,
+                lineHeight: 18,
+                marginBottom: 12,
+                color: subText,
+              }}
+            >
+              {t("economy.cookbook_pricing_note")}
+            </Text>
             <TextInput
               style={[styles.input, { borderColor: border, color: text }]}
               placeholder={t("recipes.cookbook_name_placeholder")}

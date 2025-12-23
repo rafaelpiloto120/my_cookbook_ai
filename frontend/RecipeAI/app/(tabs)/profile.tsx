@@ -906,14 +906,36 @@ export default function Profile() {
   // Persist preferences
   useEffect(() => {
     if (!prefsHydrated) return;
-    // Send both userDietary and dietary so we stay compatible with
-    // any code still listening to the legacy "dietary" key.
+
+    // Persist to central prefs (used by other screens)
+    // Send both userDietary and dietary for backwards compatibility.
     saveUserPrefs({ userDietary: dietary, dietary });
+
+    // ALSO persist to the legacy AsyncStorage keys that this screen hydrates from
+    // so selections survive app restarts even if other code reads these keys.
+    try {
+      AsyncStorage.setItem("dietary", JSON.stringify(dietary || []));
+    } catch {
+      // ignore
+    }
+
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [dietary, prefsHydrated]);
   useEffect(() => {
     if (!prefsHydrated) return;
-    saveUserPrefs({ userAvoid: avoid });
+
+    // Persist to central prefs (used by other screens)
+    // Send both userAvoid and avoid for backwards compatibility.
+    saveUserPrefs({ userAvoid: avoid, avoid });
+
+    // ALSO persist to the legacy AsyncStorage keys that this screen hydrates from
+    // so selections survive app restarts.
+    try {
+      AsyncStorage.setItem("avoid", JSON.stringify(avoid || []));
+    } catch {
+      // ignore
+    }
+
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [avoid, prefsHydrated]);
   useEffect(() => {
@@ -1429,13 +1451,6 @@ export default function Profile() {
         "You can explore the app as a guest, but creating an account lets you sync your recipes and preferences across devices and keeps your data safe if you change phones.",
     },
     {
-      id: "faq.guest_mode",
-      question: t("faq.guest_mode") || "What is guest mode?",
-      answer:
-        t("faq.guest_mode_answer") ||
-        "Guest mode creates a temporary session on this device only. Your recipes and settings stay local and may be lost if you uninstall the app or clear data. Create an account to keep everything saved.",
-    },
-    {
       id: "faq.where_are_recipes_stored",
       question: t("faq.where_are_recipes_stored") || "Where are my recipes stored?",
       answer:
@@ -1455,6 +1470,20 @@ export default function Profile() {
       answer:
         t("faq.ai_kitchen_one_time_changes_answer") ||
         "No. Any changes to dietary restrictions or ingredients to avoid inside AI Kitchen apply only to that single AI request. Your Profile remains the source of truth for your long-term preferences.",
+    },
+    {
+      id: "faq.cookies_what",
+      question: t("faq.cookies_what") || "What are Cookies and what are they used for?",
+      answer:
+        t("faq.cookies_what_answer") ||
+        "Cookies are credits used for premium actions in MyCookbook AI, such as generating recipes with AI and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
+    },
+    {
+      id: "faq.cookies_charged",
+      question: t("faq.cookies_charged") || "When do Cookies get deducted and how can I get more?",
+      answer:
+        t("faq.cookies_charged_answer") ||
+        "The first cookbook you create is free. Creating additional cookbooks deducts 1 Cookie from your balance. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer free bonus Cookies through promotions.",
     },
     {
       id: "faq.measurement_system",
@@ -1483,13 +1512,6 @@ export default function Profile() {
       answer:
         t("faq.offline_answer") ||
         "Most of your saved recipes are available offline. However, AI features, image uploads and sync actions require an internet connection.",
-    },
-    {
-      id: "faq.reset_preferences",
-      question: t("faq.reset_preferences") || "How do I reset my onboarding and preferences?",
-      answer:
-        t("faq.reset_preferences_answer") ||
-        "In the Profile page you can use the Reset onboarding option (only visible in development or special builds) to clear your saved preferences and run the onboarding again.",
     },
     {
       id: "faq.ai_unique_recipes",

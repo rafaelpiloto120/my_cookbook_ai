@@ -103,41 +103,11 @@ const resources = {
         what_is_app: "❓ What is MyCookbook AI?",
         what_is_app_answer: "MyCookbook AI helps you organize recipes, generate ideas with AI, and adapt meals to your preferences.",
         where_are_recipes_stored: "📦 Where are my recipes stored?",
-        where_are_recipes_stored_answer: "With an account, your recipes are securely stored in the cloud. As a guest, they stay stored locally on your device."
-      },
-      faq: {
-        ai_kitchen_one_time_changes: "🔄 Les changements effectués dans AI Kitchen modifient-ils mon Profil ?",
-        ai_kitchen_one_time_changes_answer: "Non. Les changements effectués dans AI Kitchen ne concernent que cette requête. Votre Profil garde vos préférences durables.",
-        ai_kitchen_preferences: "🍽️ Comment AI Kitchen utilise-t-il mes préférences alimentaires ?",
-        ai_kitchen_preferences_answer: "AI Kitchen lit vos restrictions alimentaires et ingrédients à éviter pour améliorer les suggestions de recettes.",
-        ai_unique_recipes: "✨ L’IA génère-t-elle toujours des recettes totalement uniques ?",
-        ai_unique_recipes_answer: "L’IA utilise des modèles appris et vos préférences. Certaines recettes peuvent ressembler à des plats connus.",
-        dark_mode: "🌙 Comment activer le mode sombre ?",
-        dark_mode_answer: "Allez dans Profil → Général et activez le Mode Sombre.",
-        do_i_need_account: "👤 Ai-je besoin d’un compte pour utiliser l’application ?",
-        do_i_need_account_answer: "Vous pouvez utiliser l’application en tant qu’invité, mais un compte permet de synchroniser vos données entre appareils.",
-        free_or_paid: "💰 MyCookbook AI est-il gratuit ?",
-        free_or_paid_answer: "L’application est gratuite dans sa version principale. Certaines fonctionnalités avancées pourraient devenir payantes.",
-        guest_mode: "🕓 Qu’est-ce que le mode invité ?",
-        guest_mode_answer: "En mode invité, vos données restent sur cet appareil uniquement. Un compte sauvegarde tout dans le cloud.",
-        language_change: "🌐 Comment changer la langue de l’application ?",
-        language_change_answer: "Allez dans Profil → Général → Langue.",
-        measurement_system: "⚖️ Quels systèmes de mesure sont disponibles ?",
-        measurement_system_answer: "Vous pouvez choisir entre le système métrique (g, kg, ml) et le système impérial (oz, lb, cup).",
-        offline: "📴 L’application fonctionne-t-elle hors ligne ?",
-        offline_answer: "Vos recettes enregistrées fonctionnent hors ligne, mais les fonctions IA nécessitent Internet.",
-        privacy: "🔒 Mes photos et recettes sont-elles privées ?",
-        privacy_answer: "Oui. Elles ne sont visibles que par votre compte.",
-        report_bug: "🐞 Comment signaler un bug ou proposer une amélioration ?",
-        report_bug_answer: "Utilisez l’option Contacter le Support dans la section Aide & Support.",
-        reset_preferences: "♻️ Comment réinitialiser mes préférences et mon onboarding ?",
-        reset_preferences_answer: "Rendez-vous dans la page Profil pour réinitialiser l’onboarding (si disponible).",
-        search_placeholder: "Rechercher dans la FAQ...",
-        no_results: "Aucun résultat trouvé",
-        what_is_app: "❓ Qu’est‑ce que MyCookbook AI ?",
-        what_is_app_answer: "MyCookbook AI vous aide à organiser vos recettes, générer des idées avec IA et adapter vos repas à vos préférences.",
-        where_are_recipes_stored: "📦 Où mes recettes sont-elles stockées ?",
-        where_are_recipes_stored_answer: "Avec un compte, elles sont sauvegardées dans le cloud. En mode invité, elles restent sur l’appareil."
+        where_are_recipes_stored_answer: "With an account, your recipes are securely stored in the cloud. As a guest, they stay stored locally on your device.",
+        cookies_what: "🍪 What are Cookies and what are they used for?",
+        cookies_what_answer: "Cookies are credits used for premium actions in MyCookbook AI, such as generating recipes with AI and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
+        cookies_charged: "🔖 When do Cookies get deducted and how can I get more?",
+        cookies_charged_answer: "The first cookbook you create is free. Creating additional cookbooks deducts 1 Cookie from your balance. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer free bonus Cookies through promotions.",
       },
       common: {
         done: "Done",
@@ -428,6 +398,8 @@ const resources = {
         insufficient_suggestions_body_short: "You need 1 cookie to generate recipe suggestions. You have {{remaining}}.",
         offers_button: "All offers",
         full_recipe_cost_note: "Opening a recipe deducts 1 Cookie from your balance. You can see your Cookie balance in Profile.",
+        cookbook_pricing_note: "First cookbook is free.\nExtra cookbooks deduct 1 Cookie from your balance.",
+        cookbook_pricing_note_short: "New cookbooks deduct 1 Cookie from your balance."
       }
     },
   },
@@ -494,39 +466,61 @@ const resources = {
         photo_updated: "¡Foto de perfil actualizada con éxito!",
         photo_update_error: "Error al actualizar la foto de perfil. Inténtalo de nuevo.",
       },
+      // es
       faq: {
         ai_kitchen_one_time_changes: "🔄 ¿Los cambios en AI Kitchen actualizan mi Perfil?",
-        ai_kitchen_one_time_changes_answer: "No. Los cambios realizados dentro de AI Kitchen solo aplican a esa generación. Tu Perfil mantiene tus preferencias permanentes.",
+        ai_kitchen_one_time_changes_answer:
+          "No. Cualquier cambio realizado dentro de AI Kitchen se aplica solo a esa solicitud específica de IA. Tu Perfil sigue siendo el lugar donde guardas tus preferencias a largo plazo.",
         ai_kitchen_preferences: "🍽️ ¿Cómo usa AI Kitchen mis preferencias alimentarias?",
-        ai_kitchen_preferences_answer: "AI Kitchen utiliza tus restricciones alimentarias e ingredientes a evitar para sugerirte mejores recetas.",
-        ai_unique_recipes: "✨ ¿La IA genera siempre recetas completamente únicas?",
-        ai_unique_recipes_answer: "La IA usa patrones aprendidos y tus preferencias. Algunas recetas pueden parecerse a platos conocidos.",
+        ai_kitchen_preferences_answer:
+          "AI Kitchen lee tus restricciones dietéticas y los ingredientes a evitar desde tu Perfil para generar mejores sugerencias de recetas.",
+        ai_unique_recipes: "✨ ¿La IA siempre generará recetas completamente únicas?",
+        ai_unique_recipes_answer:
+          "La IA genera recetas basándose en patrones y en tus inputs. Algunas recetas pueden parecerse a platos conocidos.",
         dark_mode: "🌙 ¿Cómo activo el modo oscuro?",
-        dark_mode_answer: "Ve a Perfil → General y activa el modo oscuro. La app cambiará el tema al instante.",
+        dark_mode_answer:
+          "Ve a Perfil → General y activa el Modo oscuro. La app cambiará de tema de inmediato.",
         do_i_need_account: "👤 ¿Necesito una cuenta para usar la app?",
-        do_i_need_account_answer: "Puedes usar la app como invitado, pero crear una cuenta te permite sincronizar recetas y preferencias entre dispositivos.",
+        do_i_need_account_answer:
+          "Puedes usar la app como invitado, pero crear una cuenta te permite sincronizar tus recetas y preferencias entre dispositivos.",
         free_or_paid: "💰 ¿MyCookbook AI es gratis?",
-        free_or_paid_answer: "La app principal es gratuita. En el futuro, algunas funciones avanzadas podrían requerir suscripción.",
+        free_or_paid_answer:
+          "La app principal es gratuita. En el futuro, algunas funciones avanzadas podrían requerir un plan de pago.",
         guest_mode: "🕓 ¿Qué es el modo invitado?",
-        guest_mode_answer: "El modo invitado guarda tus datos solo en este dispositivo. Crear una cuenta mantiene todo respaldado en la nube.",
+        guest_mode_answer:
+          "El modo invitado guarda tus datos solo en este dispositivo. Crear una cuenta mantiene todo respaldado.",
         language_change: "🌐 ¿Cómo cambio el idioma de la app?",
-        language_change_answer: "Ve a Perfil → General → Idioma y elige uno nuevo.",
-        measurement_system: "⚖️ ¿Qué sistemas de medida son compatibles?",
-        measurement_system_answer: "Puedes elegir entre Métrico (g, kg, ml) y Americano (cups, oz, lb).",
+        language_change_answer:
+          "Ve a Perfil → General → Idioma y elige un nuevo idioma.",
+        measurement_system: "⚖️ ¿Qué sistemas de medida están disponibles?",
+        measurement_system_answer:
+          "Puedes elegir entre el sistema estadounidense (tazas, onzas, libras) y el sistema métrico (gramos, mililitros, kilogramos).",
         offline: "📴 ¿La app funciona sin conexión?",
-        offline_answer: "Las recetas guardadas funcionan sin conexión. Las funciones de IA y subidas requieren internet.",
+        offline_answer:
+          "Las recetas guardadas funcionan sin conexión, pero las funciones de IA y las subidas requieren internet.",
         privacy: "🔒 ¿Mis fotos y recetas son privadas?",
-        privacy_answer: "Sí. Tus recetas y fotos son privadas y solo accesibles desde tu cuenta.",
-        report_bug: "🐞 ¿Cómo reporto un error o sugiero una función?",
-        report_bug_answer: "Usa la opción Contactar Soporte en la sección Ayuda y Soporte.",
+        privacy_answer:
+          "Sí. El contenido de tus recetas es privado para tu cuenta.",
+        report_bug: "🐞 ¿Cómo puedo reportar un error o sugerir una función?",
+        report_bug_answer:
+          "Usa la opción Contactar soporte dentro de la sección Ayuda y soporte.",
         reset_preferences: "♻️ ¿Cómo restablezco el onboarding y mis preferencias?",
-        reset_preferences_answer: "En la página de Perfil, usa la opción Restablecer onboarding (cuando esté disponible).",
+        reset_preferences_answer:
+          "Usa la opción Restablecer onboarding en la página de Perfil (cuando esté disponible).",
         search_placeholder: "Buscar en la FAQ...",
         no_results: "No se encontraron resultados",
         what_is_app: "❓ ¿Qué es MyCookbook AI?",
-        what_is_app_answer: "MyCookbook AI te ayuda a organizar recetas, generar ideas con IA y adaptar comidas a tus preferencias.",
+        what_is_app_answer:
+          "MyCookbook AI te ayuda a organizar recetas, generar ideas con IA y adaptar comidas a tus preferencias.",
         where_are_recipes_stored: "📦 ¿Dónde se guardan mis recetas?",
-        where_are_recipes_stored_answer: "Con cuenta, tus recetas se guardan en la nube. Como invitado, solo en tu dispositivo."
+        where_are_recipes_stored_answer:
+          "Con una cuenta, tus recetas se almacenan de forma segura en la nube. Como invitado, se guardan localmente en tu dispositivo.",
+        cookies_what: "🍪 ¿Qué son las Cookies y para qué se usan?",
+        cookies_what_answer:
+          "Las Cookies son créditos usados para acciones premium en MyCookbook AI, como generar recetas con IA y crear libros de recetas adicionales más allá del límite gratuito. Tu saldo de Cookies se muestra en tu Perfil.",
+        cookies_charged: "🔖 ¿Cuándo se descuentan Cookies y cómo puedo conseguir más?",
+        cookies_charged_answer:
+          "El primer libro de recetas que creas es gratis. Crear libros adicionales descuenta 1 Cookie de tu saldo. La generación de recetas con IA también usa Cookies. Puedes conseguir más Cookies en la Tienda, y ocasionalmente podemos ofrecer Cookies extra gratis mediante promociones.",
       },
       common: {
         done: "Hecho",
@@ -819,7 +813,8 @@ const resources = {
         insufficient_suggestions_body_short: "Necesitas 1 cookie para generar sugerencias de recetas. Tienes {{remaining}}.",
         offers_button: "Otras ofertas",
         full_recipe_cost_note: "Abrir una receta descuenta 1 Cookie de tu saldo. Puedes ver tu saldo de Cookies en el Perfil.",
-
+        cookbook_pricing_note: "El primer recetario es gratis.\nLos recetarios extra descuentan 1 Cookie de tu saldo.",
+        cookbook_pricing_note_short: "Los nuevos recetarios descuentan 1 Cookie de tu saldo."
       }
     },
   },
@@ -886,39 +881,61 @@ const resources = {
         photo_updated: "Foto de perfil atualizada com sucesso!",
         photo_update_error: "Falha ao atualizar a foto de perfil. Tente novamente.",
       },
+      // pt (PT-PT)
       faq: {
-        ai_kitchen_one_time_changes: "🔄 As alterações feitas na AI Kitchen afetam o meu Perfil?",
-        ai_kitchen_one_time_changes_answer: "Não. Quaisquer alterações dentro da AI Kitchen aplicam-se apenas a esse pedido específico. O Perfil mantém as suas preferências permanentes.",
+        ai_kitchen_one_time_changes: "🔄 As alterações na AI Kitchen atualizam o meu Perfil?",
+        ai_kitchen_one_time_changes_answer:
+          "Não. Qualquer alteração feita dentro da AI Kitchen aplica-se apenas a esse pedido específico de IA. O seu Perfil continua a guardar as suas preferências de longo prazo.",
         ai_kitchen_preferences: "🍽️ Como é que a AI Kitchen usa as minhas preferências alimentares?",
-        ai_kitchen_preferences_answer: "A AI Kitchen lê as suas restrições alimentares e ingredientes a evitar do Perfil para sugerir receitas mais adequadas.",
-        ai_unique_recipes: "✨ A IA gera sempre receitas totalmente únicas?",
-        ai_unique_recipes_answer: "A IA baseia-se em padrões aprendidos e nas suas preferências. Algumas receitas poderão ser semelhantes a pratos conhecidos.",
-        dark_mode: "🌙 Como ativar o modo escuro?",
-        dark_mode_answer: "Vá a Perfil → Geral e ative o Modo Escuro. A aplicação muda imediatamente.",
-        do_i_need_account: "👤 Preciso de uma conta para usar a aplicação?",
-        do_i_need_account_answer: "Pode usar a aplicação como convidado, mas criar uma conta permite sincronizar receitas e preferências entre dispositivos.",
+        ai_kitchen_preferences_answer:
+          "A AI Kitchen lê as suas restrições alimentares e os ingredientes a evitar no seu Perfil para gerar melhores sugestões de receitas.",
+        ai_unique_recipes: "✨ A IA vai sempre gerar receitas totalmente únicas?",
+        ai_unique_recipes_answer:
+          "A IA gera receitas com base em padrões e nos seus inputs. Algumas receitas podem ser semelhantes a pratos conhecidos.",
+        dark_mode: "🌙 Como ativo o modo escuro?",
+        dark_mode_answer:
+          "Vá a Perfil → Geral e ative o Modo Escuro. A app muda de tema imediatamente.",
+        do_i_need_account: "👤 Preciso de uma conta para usar a app?",
+        do_i_need_account_answer:
+          "Pode usar a app como convidado, mas criar uma conta permite sincronizar as suas receitas e preferências entre dispositivos.",
         free_or_paid: "💰 O MyCookbook AI é gratuito?",
-        free_or_paid_answer: "A experiência principal é gratuita. No futuro, algumas funcionalidades avançadas poderão requerer subscrição.",
+        free_or_paid_answer:
+          "A app base é gratuita. No futuro, algumas funcionalidades avançadas poderão exigir um plano pago.",
         guest_mode: "🕓 O que é o modo convidado?",
-        guest_mode_answer: "No modo convidado, os dados ficam apenas neste dispositivo. Criar uma conta garante que tudo fica guardado na cloud.",
-        language_change: "🌐 Como altero o idioma da aplicação?",
-        language_change_answer: "Vá a Perfil → Geral → Idioma e selecione o idioma pretendido.",
+        guest_mode_answer:
+          "O modo convidado guarda os seus dados apenas neste dispositivo. Criar uma conta mantém tudo com backup.",
+        language_change: "🌐 Como altero o idioma da app?",
+        language_change_answer:
+          "Vá a Perfil → Geral → Idioma e escolha um novo idioma.",
         measurement_system: "⚖️ Que sistemas de medidas são suportados?",
-        measurement_system_answer: "Pode escolher entre Métrico (g, kg, ml) e Americano (cups, oz, lb).",
-        offline: "📴 A aplicação funciona offline?",
-        offline_answer: "As suas receitas guardadas funcionam offline. Funcionalidades de IA e uploads requerem internet.",
+        measurement_system_answer:
+          "Pode escolher entre o sistema US (chávenas, onças, libras) e o sistema Métrico (gramas, mililitros, quilogramas).",
+        offline: "📴 A app funciona offline?",
+        offline_answer:
+          "As receitas guardadas funcionam offline, mas as funcionalidades de IA e os uploads exigem ligação à internet.",
         privacy: "🔒 As minhas fotos e receitas são privadas?",
-        privacy_answer: "Sim. As suas receitas e fotos são privadas e apenas associadas à sua conta.",
-        report_bug: "🐞 Como posso reportar um erro ou sugerir uma funcionalidade?",
-        report_bug_answer: "Use a opção Contactar Suporte na secção Ajuda e Suporte.",
-        reset_preferences: "♻️ Como posso reiniciar o onboarding e preferências?",
-        reset_preferences_answer: "Na área de Perfil, pode usar a opção Resetar onboarding (quando disponível).",
+        privacy_answer:
+          "Sim. O conteúdo das suas receitas é privado para a sua conta.",
+        report_bug: "🐞 Como posso reportar um bug ou sugerir uma funcionalidade?",
+        report_bug_answer:
+          "Use a opção Contactar Suporte na secção Ajuda e Suporte.",
+        reset_preferences: "♻️ Como posso repor o onboarding e as minhas preferências?",
+        reset_preferences_answer:
+          "Use a opção Repor onboarding na página de Perfil (quando disponível).",
         search_placeholder: "Pesquisar na FAQ...",
         no_results: "Nenhum resultado encontrado",
         what_is_app: "❓ O que é o MyCookbook AI?",
-        what_is_app_answer: "O MyCookbook AI ajuda-o a organizar receitas, gerar novas ideias com IA e adaptar refeições às suas preferências.",
+        what_is_app_answer:
+          "O MyCookbook AI ajuda a organizar receitas, gerar ideias com IA e adaptar refeições às suas preferências.",
         where_are_recipes_stored: "📦 Onde ficam guardadas as minhas receitas?",
-        where_are_recipes_stored_answer: "Com conta, são guardadas na cloud. Como convidado, ficam apenas no dispositivo."
+        where_are_recipes_stored_answer:
+          "Com uma conta, as suas receitas são guardadas de forma segura na cloud. Como convidado, ficam guardadas localmente no seu dispositivo.",
+        cookies_what: "🍪 O que são Cookies e para que servem?",
+        cookies_what_answer:
+          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA e criar livros de receitas adicionais para além do limite gratuito. O seu saldo de Cookies é mostrado no seu Perfil.",
+        cookies_charged: "🔖 Quando é que os Cookies são deduzidos e como posso obter mais?",
+        cookies_charged_answer:
+          "O primeiro livro de receitas que criar é grátis. Criar livros adicionais deduz 1 Cookie do seu saldo. A geração de receitas com IA também usa Cookies. Pode obter mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies extra grátis através de promoções.",
       },
       common: {
         done: "Concluir",
@@ -1181,6 +1198,7 @@ const resources = {
         economy: "Economia",
         economy_explainer: "As cookies são usadas para IA e para adicionar mais livros de receitas.",
         cookies_balance: "Saldo",
+        c_cookies_balance1: "Saldo",
         learn_more: "Saber mais",
         get_more_cookies: "Obter mais",
         restore_purchases: "Restaurar compras",
@@ -1212,7 +1230,8 @@ const resources = {
         insufficient_suggestions_body_short: "Precisas de 1 cookie para gerar sugestões de receitas. Tens {{remaining}}.",
         offers_button: "Outras ofertas",
         full_recipe_cost_note: "Abrir uma receita desconta 1 Cookie do teu saldo. Podes ver o teu saldo de Cookies no Perfil.",
-
+        cookbook_pricing_note: "O primeiro livro de receitas é grátis.\nOs livros de receitas extra deduzem 1 Cookie do teu saldo.",
+        cookbook_pricing_note_short: "Os novos livros de receitas deduzem 1 Cookie do teu saldo."
       }
     },
   },
@@ -1279,39 +1298,61 @@ const resources = {
         photo_updated: "Foto de perfil atualizada com sucesso!",
         photo_update_error: "Falha ao atualizar a foto de perfil. Tente novamente.",
       },
+      // pt-BR
       faq: {
-        ai_kitchen_one_time_changes: "🔄 As mudanças feitas na AI Kitchen alteram meu Perfil?",
-        ai_kitchen_one_time_changes_answer: "Não. Mudanças dentro da AI Kitchen valem apenas para aquela receita. Seu Perfil continua com suas preferências permanentes.",
+        ai_kitchen_one_time_changes: "🔄 As mudanças na AI Kitchen atualizam meu Perfil?",
+        ai_kitchen_one_time_changes_answer:
+          "Não. Qualquer mudança feita dentro da AI Kitchen vale apenas para aquela solicitação específica de IA. Seu Perfil continua sendo onde ficam suas preferências de longo prazo.",
         ai_kitchen_preferences: "🍽️ Como a AI Kitchen usa minhas preferências alimentares?",
-        ai_kitchen_preferences_answer: "A AI Kitchen lê suas restrições e ingredientes a evitar no Perfil para gerar receitas mais adequadas.",
-        ai_unique_recipes: "✨ A IA sempre cria receitas totalmente únicas?",
-        ai_unique_recipes_answer: "A IA usa padrões aprendidos e suas preferências. Algumas receitas podem lembrar pratos conhecidos.",
-        dark_mode: "🌙 Como ativar o modo escuro?",
-        dark_mode_answer: "Vá em Perfil → Geral e ative o Modo Escuro.",
+        ai_kitchen_preferences_answer:
+          "A AI Kitchen lê suas restrições alimentares e os ingredientes a evitar no seu Perfil para gerar melhores sugestões de receitas.",
+        ai_unique_recipes: "✨ A IA sempre vai gerar receitas totalmente únicas?",
+        ai_unique_recipes_answer:
+          "A IA gera receitas com base em padrões e nos seus inputs. Algumas receitas podem se parecer com pratos conhecidos.",
+        dark_mode: "🌙 Como ativo o modo escuro?",
+        dark_mode_answer:
+          "Vá em Perfil → Geral e ative o Modo escuro. O app muda o tema na hora.",
         do_i_need_account: "👤 Preciso de uma conta para usar o app?",
-        do_i_need_account_answer: "Você pode usar como convidado, mas criar conta permite sincronizar suas receitas entre dispositivos.",
+        do_i_need_account_answer:
+          "Você pode usar como convidado, mas criar uma conta permite sincronizar suas receitas e preferências entre dispositivos.",
         free_or_paid: "💰 O MyCookbook AI é gratuito?",
-        free_or_paid_answer: "A maior parte é gratuita. No futuro, recursos avançados podem exigir assinatura.",
+        free_or_paid_answer:
+          "O app base é gratuito. No futuro, alguns recursos avançados podem exigir um plano pago.",
         guest_mode: "🕓 O que é o modo convidado?",
-        guest_mode_answer: "É um modo local: tudo fica salvo apenas no dispositivo. Criar conta deixa tudo salvo na nuvem.",
-        language_change: "🌐 Como mudar o idioma do app?",
-        language_change_answer: "Vá em Perfil → Geral → Idioma.",
+        guest_mode_answer:
+          "O modo convidado guarda seus dados apenas neste dispositivo. Criar uma conta mantém tudo com backup.",
+        language_change: "🌐 Como mudo o idioma do app?",
+        language_change_answer:
+          "Vá em Perfil → Geral → Idioma e escolha um novo idioma.",
         measurement_system: "⚖️ Quais sistemas de medida são suportados?",
-        measurement_system_answer: "Você pode escolher entre Métrico (g, kg, ml) e Americano (cups, oz, lb).",
+        measurement_system_answer:
+          "Você pode escolher entre o sistema US (xícaras, onças, libras) e o sistema Métrico (gramas, mililitros, quilogramas).",
         offline: "📴 O app funciona offline?",
-        offline_answer: "Receitas salvas funcionam offline. Recursos de IA e uploads precisam de internet.",
+        offline_answer:
+          "Receitas salvas funcionam offline, mas recursos de IA e uploads precisam de internet.",
         privacy: "🔒 Minhas fotos e receitas são privadas?",
-        privacy_answer: "Sim. Elas pertencem somente à sua conta.",
-        report_bug: "🐞 Como reporto um bug ou sugiro um recurso?",
-        report_bug_answer: "Use a opção Contatar Suporte na área Ajuda e Suporte.",
-        reset_preferences: "♻️ Como redefinir meu onboarding e preferências?",
-        reset_preferences_answer: "Na página de Perfil, use a opção de Redefinir onboarding (quando disponível).",
+        privacy_answer:
+          "Sim. O conteúdo das suas receitas é privado para a sua conta.",
+        report_bug: "🐞 Como posso reportar um bug ou sugerir um recurso?",
+        report_bug_answer:
+          "Use a opção Contatar Suporte dentro da seção Ajuda e Suporte.",
+        reset_preferences: "♻️ Como redefino meu onboarding e preferências?",
+        reset_preferences_answer:
+          "Use a opção Redefinir onboarding na página de Perfil (quando disponível).",
         search_placeholder: "Pesquisar na FAQ...",
         no_results: "Nenhum resultado encontrado",
         what_is_app: "❓ O que é o MyCookbook AI?",
-        what_is_app_answer: "É um app que organiza receitas, gera ideias com IA e personaliza pratos conforme suas preferências.",
+        what_is_app_answer:
+          "MyCookbook AI ajuda você a organizar receitas, gerar ideias com IA e adaptar refeições às suas preferências.",
         where_are_recipes_stored: "📦 Onde minhas receitas ficam armazenadas?",
-        where_are_recipes_stored_answer: "Com conta, ficam na nuvem. No modo convidado, ficam apenas no celular."
+        where_are_recipes_stored_answer:
+          "Com uma conta, suas receitas ficam armazenadas com segurança na nuvem. Como convidado, elas ficam salvas localmente no seu dispositivo.",
+        cookies_what: "🍪 O que são Cookies e para que servem?",
+        cookies_what_answer:
+          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA e criar livros de receitas adicionais além do limite grátis. Seu saldo de Cookies aparece no seu Perfil.",
+        cookies_charged: "🔖 Quando os Cookies são descontados e como consigo mais?",
+        cookies_charged_answer:
+          "O primeiro livro de receitas que você criar é grátis. Criar livros adicionais desconta 1 Cookie do seu saldo. A geração de receitas com IA também usa Cookies. Você pode conseguir mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies bônus grátis em promoções.",
       },
       common: {
         done: "Concluir",
@@ -1604,7 +1645,8 @@ const resources = {
         insufficient_suggestions_body_short: "Você precisa de 1 cookie para gerar sugestões de receitas. Você tem {{remaining}}.",
         offers_button: "Outras ofertas",
         full_recipe_cost_note: "Abrir uma receita desconta 1 Cookie do seu saldo. Você pode ver seu saldo de Cookies no Perfil.",
-
+        cookbook_pricing_note: "O primeiro livro de receitas é grátis.\nLivros de receitas extras descontam 1 Cookie do seu saldo.",
+        cookbook_pricing_note_short: "Os novos livros de receitas deduzem 1 Cookie do seu saldo."
       }
     },
   },
@@ -1670,6 +1712,62 @@ const resources = {
         remove_photo: "Supprimer la Photo",
         photo_updated: "Photo de profil mise à jour avec succès!",
         photo_update_error: "Échec de la mise à jour de la photo de profil. Veuillez réessayer.",
+      },
+      // fr
+      faq: {
+        ai_kitchen_one_time_changes: "🔄 Les changements dans AI Kitchen mettent-ils à jour mon Profil ?",
+        ai_kitchen_one_time_changes_answer:
+          "Non. Les changements effectués dans AI Kitchen s’appliquent uniquement à cette demande d’IA. Votre Profil reste la référence pour vos préférences à long terme.",
+        ai_kitchen_preferences: "🍽️ Comment AI Kitchen utilise-t-il mes préférences alimentaires ?",
+        ai_kitchen_preferences_answer:
+          "AI Kitchen lit vos restrictions alimentaires et les ingrédients à éviter depuis votre Profil pour générer de meilleures suggestions de recettes.",
+        ai_unique_recipes: "✨ L’IA générera-t-elle toujours des recettes totalement uniques ?",
+        ai_unique_recipes_answer:
+          "L’IA génère des recettes à partir de modèles et de vos informations. Certaines recettes peuvent ressembler à des plats connus.",
+        dark_mode: "🌙 Comment activer le mode sombre ?",
+        dark_mode_answer:
+          "Allez dans Profil → Général et activez le Mode sombre. L’application change de thème immédiatement.",
+        do_i_need_account: "👤 Ai-je besoin d’un compte pour utiliser l’application ?",
+        do_i_need_account_answer:
+          "Vous pouvez utiliser l’application en invité, mais créer un compte vous permet de synchroniser vos recettes et préférences entre appareils.",
+        free_or_paid: "💰 MyCookbook AI est-il gratuit ?",
+        free_or_paid_answer:
+          "L’application de base est gratuite. À l’avenir, certaines fonctionnalités avancées pourront nécessiter une offre payante.",
+        guest_mode: "🕓 Qu’est-ce que le mode invité ?",
+        guest_mode_answer:
+          "Le mode invité stocke vos données uniquement sur cet appareil. Créer un compte permet de tout sauvegarder.",
+        language_change: "🌐 Comment changer la langue de l’application ?",
+        language_change_answer:
+          "Allez dans Profil → Général → Langue et choisissez une nouvelle langue.",
+        measurement_system: "⚖️ Quels systèmes de mesure sont pris en charge ?",
+        measurement_system_answer:
+          "Vous pouvez choisir entre le système US (tasses, onces, livres) et le système métrique (grammes, millilitres, kilogrammes).",
+        offline: "📴 L’application fonctionne-t-elle hors ligne ?",
+        offline_answer:
+          "Les recettes enregistrées fonctionnent hors ligne, mais les fonctionnalités IA et les envois nécessitent une connexion internet.",
+        privacy: "🔒 Mes photos et recettes sont-elles privées ?",
+        privacy_answer:
+          "Oui. Le contenu de vos recettes est privé et lié à votre compte.",
+        report_bug: "🐞 Comment signaler un bug ou suggérer une fonctionnalité ?",
+        report_bug_answer:
+          "Utilisez l’option Contacter le support dans la section Aide & Support.",
+        reset_preferences: "♻️ Comment réinitialiser l’onboarding et mes préférences ?",
+        reset_preferences_answer:
+          "Utilisez l’option Réinitialiser l’onboarding dans la page Profil (lorsqu’elle est disponible).",
+        search_placeholder: "Rechercher dans la FAQ...",
+        no_results: "Aucun résultat trouvé",
+        what_is_app: "❓ Qu’est-ce que MyCookbook AI ?",
+        what_is_app_answer:
+          "MyCookbook AI vous aide à organiser vos recettes, générer des idées avec l’IA et adapter vos repas à vos préférences.",
+        where_are_recipes_stored: "📦 Où sont stockées mes recettes ?",
+        where_are_recipes_stored_answer:
+          "Avec un compte, vos recettes sont stockées de façon sécurisée dans le cloud. En invité, elles restent stockées localement sur votre appareil.",
+        cookies_what: "🍪 Que sont les Cookies et à quoi servent-ils ?",
+        cookies_what_answer:
+          "Les Cookies sont des crédits utilisés pour des actions premium dans MyCookbook AI, comme générer des recettes avec l’IA et créer des livres de recettes supplémentaires au-delà de la limite gratuite. Votre solde de Cookies est affiché dans votre Profil.",
+        cookies_charged: "🔖 Quand les Cookies sont-ils déduits et comment en obtenir plus ?",
+        cookies_charged_answer:
+          "Le premier livre de recettes que vous créez est gratuit. La création de livres supplémentaires déduit 1 Cookie de votre solde. La génération de recettes par IA utilise aussi des Cookies. Vous pouvez obtenir plus de Cookies dans la Boutique, et nous pouvons parfois offrir des Cookies bonus gratuits via des promotions.",
       },
       common: {
         done: "Terminer",
@@ -1962,7 +2060,8 @@ const resources = {
         insufficient_suggestions_body_short: "Vous avez besoin d’1 cookie pour générer des suggestions de recettes. Vous en avez {{remaining}}.",
         offers_button: "Autres offres",
         full_recipe_cost_note: "Ouvrir une recette déduit 1 Cookie de votre solde. Vous pouvez voir votre solde de Cookies dans le Profil.",
-
+        cookbook_pricing_note: "Le premier livre de recettes est gratuit.\nLes livres de recettes supplémentaires déduisent 1 Cookie de votre solde.",
+        cookbook_pricing_note_short: "Les nouveaux livres de recettes déduisent 1 Cookie de votre solde."
       }
     },
   },
@@ -2029,39 +2128,61 @@ const resources = {
         photo_updated: "Profilfoto erfolgreich aktualisiert!",
         photo_update_error: "Fehler beim Aktualisieren des Profilfotos. Bitte versuchen Sie es erneut.",
       },
+      // de
       faq: {
-        ai_kitchen_one_time_changes: "🔄 Aktualisieren Änderungen in AI Kitchen mein Profil?",
-        ai_kitchen_one_time_changes_answer: "Nein. Änderungen gelten nur für diese einzelne AI‑Anfrage. Ihr Profil bleibt unverändert.",
-        ai_kitchen_preferences: "🍽️ Wie nutzt AI Kitchen meine Ernährungseinstellungen?",
-        ai_kitchen_preferences_answer: "AI Kitchen liest Ihre Ernährungspräferenzen und auszuschließenden Zutaten, um bessere Rezeptvorschläge zu machen.",
-        ai_unique_recipes: "✨ Erstellt die KI immer völlig einzigartige Rezepte?",
-        ai_unique_recipes_answer: "Die KI nutzt Muster und Ihre Eingaben. Einige Rezepte können bekannten Gerichten ähneln.",
+        ai_kitchen_one_time_changes: "🔄 Werden Änderungen in der AI Kitchen in meinem Profil gespeichert?",
+        ai_kitchen_one_time_changes_answer:
+          "Nein. Änderungen in der AI Kitchen gelten nur für diese konkrete KI-Anfrage. Dein Profil bleibt die Quelle deiner langfristigen Einstellungen.",
+        ai_kitchen_preferences: "🍽️ Wie nutzt AI Kitchen meine Ernährungspräferenzen?",
+        ai_kitchen_preferences_answer:
+          "AI Kitchen liest deine Ernährungsrestriktionen und Zutaten, die du vermeiden möchtest, aus deinem Profil, um bessere Rezeptvorschläge zu erstellen.",
+        ai_unique_recipes: "✨ Erzeugt die KI immer vollständig einzigartige Rezepte?",
+        ai_unique_recipes_answer:
+          "Die KI erstellt Rezepte basierend auf Mustern und deinen Eingaben. Manche Rezepte können bekannten Gerichten ähneln.",
         dark_mode: "🌙 Wie aktiviere ich den Dunkelmodus?",
-        dark_mode_answer: "Gehen Sie zu Profil → Allgemein und aktivieren Sie den Dunkelmodus.",
+        dark_mode_answer:
+          "Gehe zu Profil → Allgemein und aktiviere den Dunkelmodus. Die App wechselt das Design sofort.",
         do_i_need_account: "👤 Brauche ich ein Konto, um die App zu nutzen?",
-        do_i_need_account_answer: "Sie können die App als Gast nutzen, aber ein Konto ermöglicht Synchronisierung und Backups.",
+        do_i_need_account_answer:
+          "Du kannst die App als Gast nutzen, aber mit einem Konto kannst du Rezepte und Einstellungen zwischen Geräten synchronisieren.",
         free_or_paid: "💰 Ist MyCookbook AI kostenlos?",
-        free_or_paid_answer: "Die Hauptfunktionen sind kostenlos. Später könnten Premium-Funktionen kostenpflichtig werden.",
+        free_or_paid_answer:
+          "Die Basis-App ist kostenlos. In Zukunft können einige erweiterte Funktionen ein kostenpflichtiges Angebot erfordern.",
         guest_mode: "🕓 Was ist der Gastmodus?",
-        guest_mode_answer: "Im Gastmodus bleiben Ihre Daten nur auf diesem Gerät gespeichert. Ein Konto speichert alles in der Cloud.",
+        guest_mode_answer:
+          "Im Gastmodus werden deine Daten nur auf diesem Gerät gespeichert. Mit einem Konto bleibt alles gesichert und gesichert.",
         language_change: "🌐 Wie ändere ich die App-Sprache?",
-        language_change_answer: "Gehen Sie zu Profil → Allgemein → Sprache.",
-        measurement_system: "⚖️ Welche Maßeinheiten unterstützt die App?",
-        measurement_system_answer: "Sie können zwischen US‑Maßen (cups, oz, lb) und metrischen Einheiten (g, ml, kg) wählen.",
+        language_change_answer:
+          "Gehe zu Profil → Allgemein → Sprache und wähle eine neue Sprache.",
+        measurement_system: "⚖️ Welche Einheitensysteme werden unterstützt?",
+        measurement_system_answer:
+          "Du kannst zwischen US (cups, ounces, pounds) und Metrisch (Gramm, Milliliter, Kilogramm) wählen.",
         offline: "📴 Funktioniert die App offline?",
-        offline_answer: "Gespeicherte Rezepte funktionieren offline. KI‑Funktionen benötigen jedoch Internet.",
+        offline_answer:
+          "Gespeicherte Rezepte funktionieren offline, aber KI-Funktionen und Uploads benötigen eine Internetverbindung.",
         privacy: "🔒 Sind meine Fotos und Rezepte privat?",
-        privacy_answer: "Ja. Ihre Inhalte sind nur über Ihr Konto zugänglich.",
-        report_bug: "🐞 Wie kann ich einen Fehler melden oder ein Feature vorschlagen?",
-        report_bug_answer: "Nutzen Sie die Option Support kontaktieren im Bereich Hilfe & Support.",
-        reset_preferences: "♻️ Wie kann ich meine Einstellungen und das Onboarding zurücksetzen?",
-        reset_preferences_answer: "Auf der Profilseite können Sie das Onboarding zurücksetzen (falls verfügbar).",
+        privacy_answer:
+          "Ja. Deine Rezeptinhalte sind privat und an dein Konto gebunden.",
+        report_bug: "🐞 Wie kann ich einen Bug melden oder eine Funktion vorschlagen?",
+        report_bug_answer:
+          "Nutze die Option Support kontaktieren im Bereich Hilfe & Support.",
+        reset_preferences: "♻️ Wie setze ich Onboarding und Einstellungen zurück?",
+        reset_preferences_answer:
+          "Nutze die Option Onboarding zurücksetzen in der Profil-Seite (sofern verfügbar).",
         search_placeholder: "FAQ durchsuchen...",
         no_results: "Keine Ergebnisse gefunden",
         what_is_app: "❓ Was ist MyCookbook AI?",
-        what_is_app_answer: "MyCookbook AI hilft Ihnen, Rezepte zu organisieren, Ideen mit KI zu generieren und Gerichte an Ihre Vorlieben anzupassen.",
+        what_is_app_answer:
+          "MyCookbook AI hilft dir, Rezepte zu organisieren, Ideen mit KI zu generieren und Mahlzeiten an deine Vorlieben anzupassen.",
         where_are_recipes_stored: "📦 Wo werden meine Rezepte gespeichert?",
-        where_are_recipes_stored_answer: "Mit Konto: sicher in der Cloud. Als Gast: nur lokal auf dem Gerät."
+        where_are_recipes_stored_answer:
+          "Mit einem Konto werden deine Rezepte sicher in der Cloud gespeichert. Als Gast bleiben sie lokal auf deinem Gerät gespeichert.",
+        cookies_what: "🍪 Was sind Cookies und wofür werden sie verwendet?",
+        cookies_what_answer:
+          "Cookies sind Guthaben für Premium-Aktionen in MyCookbook AI, z. B. das Generieren von Rezepten mit KI und das Erstellen zusätzlicher Kochbücher über das kostenlose Limit hinaus. Dein Cookie-Saldo wird in deinem Profil angezeigt.",
+        cookies_charged: "🔖 Wann werden Cookies abgezogen und wie bekomme ich mehr?",
+        cookies_charged_answer:
+          "Das erste Kochbuch, das du erstellst, ist kostenlos. Für weitere Kochbücher wird 1 Cookie von deinem Guthaben abgezogen. Auch die KI-Rezeptgenerierung nutzt Cookies. Du kannst Cookies im Store nachkaufen, und gelegentlich gibt es kostenlose Bonus-Cookies durch Aktionen.",
       },
       common: {
         done: "Fertig",
@@ -2354,6 +2475,8 @@ const resources = {
         insufficient_suggestions_body_short: "Du brauchst 1 Cookie, um Rezeptvorschläge zu erstellen. Du hast {{remaining}}.",
         offers_button: "Weitere Angebote",
         full_recipe_cost_note: "Das Öffnen eines Rezepts zieht 1 Cookie von deinem Guthaben ab. Deinen Cookie-Stand siehst du im Profil.",
+        cookbook_pricing_note: "Das erste Kochbuch ist kostenlos.\nZusätzliche Kochbücher ziehen 1 Cookie von deinem Guthaben ab.",
+        cookbook_pricing_note_short: "Neue Kochbücher ziehen 1 Cookie von deinem Guthaben ab."
       }
     },
   },

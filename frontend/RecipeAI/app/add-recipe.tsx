@@ -1149,6 +1149,17 @@ export default function AddRecipe() {
                 ]}
               />
             </View>
+            <Text
+              style={[
+                styles.cookbookPricingNote,
+                { color: isDark ? "#bbb" : "#666" },
+              ]}
+            >
+              {t(
+                "economy.cookbook_pricing_note_short",
+                "New cookbooks deduct 1 Cookie from your balance."
+              )}
+            </Text>
           </AppCard>
 
           {/* Tags Section */}
@@ -1539,6 +1550,12 @@ const styles = StyleSheet.create({
   modalCloseText: {
     fontSize: 18,
     fontWeight: "900",
+  },
+  cookbookPricingNote: {
+    fontSize: 13,
+    marginTop: 6,
+    marginLeft: 4,
+    lineHeight: 18,
   },
 });
 // --- AutoExpandingTextInput component ---

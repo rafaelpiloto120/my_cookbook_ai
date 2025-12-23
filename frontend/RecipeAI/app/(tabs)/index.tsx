@@ -26,6 +26,7 @@ import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view
 import i18n from "../../i18n";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
+import { prefsEvents, PREFS_UPDATED } from "../../lib/prefs";
 
 // --- Types ---
 interface Recipe {
@@ -222,6 +223,27 @@ export default function Index() {
     }, [loadProfilePrefsFromStorage])
   );
 
+  // Refresh instantly when preferences are updated elsewhere (e.g., Profile tab)
+  useEffect(() => {
+    const onPrefsUpdated = () => {
+      loadProfilePrefsFromStorage();
+    };
+
+    prefsEvents.on(PREFS_UPDATED, onPrefsUpdated);
+    return () => {
+      prefsEvents.off(PREFS_UPDATED, onPrefsUpdated as any);
+    };
+  }, [loadProfilePrefsFromStorage]);
+
+  // Also refresh defaults when the user reaches Step 3.
+  // This ensures Profile changes are reflected in the Step 3 chips,
+  // while still allowing the user to override selections within the step.
+  useEffect(() => {
+    if (step === 3) {
+      loadProfilePrefsFromStorage();
+    }
+  }, [step, loadProfilePrefsFromStorage]);
+
   // Sanitizer for avoidOther input
   const sanitizeAvoidOther = (raw: string) => {
     if (!raw) return "";
@@ -360,6 +382,13 @@ export default function Index() {
   useEffect(() => {
     animateStep();
   }, [step]);
+
+  // When Step 3 opens, refresh prefs from Profile so the UI reflects the latest selections
+  useEffect(() => {
+    if (step === 3) {
+      loadProfilePrefsFromStorage();
+    }
+  }, [step, loadProfilePrefsFromStorage]);
 
   // --- Helpers for chips ---
   // Toggle logic for dietary and avoid options (Profile is source of truth; this is per-request only)

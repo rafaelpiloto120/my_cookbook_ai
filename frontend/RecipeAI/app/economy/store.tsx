@@ -7,7 +7,18 @@ import { useTranslation } from "react-i18next";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as RNIap from "react-native-iap";
+import {
+  initConnection,
+  endConnection,
+  getProducts,
+  requestPurchase,
+  purchaseUpdatedListener,
+  purchaseErrorListener,
+  finishTransaction,
+  flushFailedPurchasesCachedAsPendingAndroid,
+  type Product,
+  type Purchase,
+} from "react-native-iap";
 
 type Offer = {
   id: string;
@@ -88,7 +99,7 @@ export default function EconomyStoreScreen() {
   // with Google Play and then credit the user's balance. Only after backend success do we
   // finish/acknowledge the transaction.
   const [iapReady, setIapReady] = useState(false);
-  const [iapProducts, setIapProducts] = useState<Record<string, RNIap.Product>>({});
+  const [iapProducts, setIapProducts] = useState<Record<string, Product>>({});
   const purchaseInFlightRef = useRef(false);
 
   const offerSkus = useMemo(() => {
@@ -100,7 +111,7 @@ export default function EconomyStoreScreen() {
   }, [offers]);
 
   const verifyPurchaseWithBackend = useCallback(
-    async (purchase: RNIap.Purchase): Promise<{ ok: boolean; message?: string; balance?: number | null }>
+    async (purchase: Purchase): Promise<{ ok: boolean; message?: string; balance?: number | null }>
     => {
       if (!backendUrl) {
         return { ok: false, message: "Backend URL is not configured." };
@@ -180,93 +191,6 @@ export default function EconomyStoreScreen() {
     [backendUrl, auth, appEnv]
   );
 
-
-  // --- IAP useEffects moved below loadBalance for TDZ safety ---
-  // --- IAP Android: Init connection and listeners ---
-  useEffect(() => {
-    if (Platform.OS !== "android") return;
-
-    let purchaseSub: any;
-    let errorSub: any;
-    let mounted = true;
-
-    (async () => {
-      try {
-        const ok = await RNIap.initConnection();
-        if (!mounted) return;
-        setIapReady(!!ok);
-
-        // Recommended on Android to clear pending failed purchases cached as pending.
-        try {
-          await RNIap.flushFailedPurchasesCachedAsPendingAndroid();
-        } catch {
-          // ignore
-        }
-
-        purchaseSub = RNIap.purchaseUpdatedListener(async (purchase) => {
-          try {
-            // Guard against parallel callbacks
-            if (purchaseInFlightRef.current) return;
-            purchaseInFlightRef.current = true;
-
-            const result = await verifyPurchaseWithBackend(purchase);
-            if (!result.ok) {
-              // Do NOT finishTransaction here, otherwise we could lose the ability to re-verify.
-              Alert.alert("Purchase pending", result.message || "We couldn't verify your purchase yet. Please try again.");
-              return;
-            }
-
-            // Backend verified + granted. Now acknowledge/finish the consumable.
-            await RNIap.finishTransaction({ purchase, isConsumable: true });
-
-            // Refresh balance UI.
-            await loadBalance();
-          } catch (e: any) {
-            console.warn("[IAP] purchaseUpdatedListener error", e);
-            Alert.alert("Purchase error", "Something went wrong while confirming your purchase.");
-          } finally {
-            purchaseInFlightRef.current = false;
-          }
-        });
-
-        errorSub = RNIap.purchaseErrorListener((err) => {
-          console.warn("[IAP] purchaseError", err);
-        });
-      } catch (e) {
-        console.warn("[IAP] initConnection failed", e);
-        if (!mounted) return;
-        setIapReady(false);
-      }
-    })();
-
-    return () => {
-      mounted = false;
-      try { purchaseSub?.remove?.(); } catch {}
-      try { errorSub?.remove?.(); } catch {}
-      try { RNIap.endConnection(); } catch {}
-    };
-  }, [verifyPurchaseWithBackend, loadBalance]);
-
-  // --- IAP Android: Refresh Play product cache when offers change ---
-  useEffect(() => {
-    if (Platform.OS !== "android") return;
-    if (!iapReady) return;
-    if (!offerSkus || offerSkus.length === 0) return;
-
-    (async () => {
-      try {
-        const prods = await RNIap.getProducts({ skus: offerSkus });
-        const map: Record<string, RNIap.Product> = {};
-        for (const p of prods) {
-          const sku = String((p as any)?.productId || (p as any)?.sku || "").trim();
-          if (sku) map[sku] = p;
-        }
-        setIapProducts(map);
-      } catch (e) {
-        console.warn("[IAP] getProducts failed", e);
-      }
-    })();
-  }, [iapReady, offerSkus]);
 
   useEffect(() => {
     const unsub = auth.onAuthStateChanged((u) => {
@@ -353,6 +277,128 @@ export default function EconomyStoreScreen() {
       }
     }
   }, [backendUrl, appEnv, auth, economyUid]);
+
+  // --- IAP Android: Init connection and listeners ---
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    let purchaseSub: any;
+    let errorSub: any;
+    let mounted = true;
+
+    (async () => {
+      try {
+        if (typeof initConnection !== "function") {
+          console.warn("[IAP] Native module not available: initConnection is not a function. Are you running a build that includes react-native-iap?");
+          setIapReady(false);
+          return;
+        }
+
+        const ok = await initConnection();
+        if (!mounted) return;
+        setIapReady(!!ok);
+
+        // Recommended on Android to clear pending failed purchases cached as pending.
+        try {
+          await flushFailedPurchasesCachedAsPendingAndroid();
+        } catch {
+          // ignore
+        }
+
+        purchaseSub = purchaseUpdatedListener(async (purchase) => {
+          try {
+            // Guard against parallel callbacks
+            if (purchaseInFlightRef.current) return;
+            purchaseInFlightRef.current = true;
+
+            const result = await verifyPurchaseWithBackend(purchase);
+            if (!result.ok) {
+              // Do NOT finishTransaction here, otherwise we could lose the ability to re-verify.
+              Alert.alert(
+                "Purchase pending",
+                result.message || "We couldn't verify your purchase yet. Please try again."
+              );
+              return;
+            }
+
+            // Backend verified + granted. Now acknowledge/finish the consumable.
+            await finishTransaction({ purchase, isConsumable: true });
+
+            // Refresh balance UI.
+            await loadBalance();
+          } catch (e: any) {
+            console.warn("[IAP] purchaseUpdatedListener error", e);
+            Alert.alert("Purchase error", "Something went wrong while confirming your purchase.");
+          } finally {
+            purchaseInFlightRef.current = false;
+          }
+        });
+
+        errorSub = purchaseErrorListener((err) => {
+          console.warn("[IAP] purchaseError", err);
+        });
+      } catch (e) {
+        console.warn("[IAP] initConnection failed", e);
+        if (!mounted) return;
+        setIapReady(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      try {
+        purchaseSub?.remove?.();
+      } catch {}
+      try {
+        errorSub?.remove?.();
+      } catch {}
+      try {
+        endConnection();
+      } catch {}
+    };
+  }, [verifyPurchaseWithBackend, loadBalance]);
+
+  // --- IAP Android: Refresh Play product cache when offers change ---
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    if (!iapReady) return;
+    if (!offerSkus || offerSkus.length === 0) return;
+    // In some dev builds (or Expo Go / stale dev client), the native IAP module isn't present.
+    // In that case, `getProducts` will be undefined. Don't spam warnings or break the store UI.
+    if (typeof getProducts !== "function") {
+      console.warn(
+        "[IAP] getProducts is not available (native module missing). Rebuild your dev client after installing react-native-iap, or test with a Play-installed build."
+      );
+      setIapProducts({});
+      return;
+    }
+
+    (async () => {
+      try {
+        let prods: any[] = [];
+        try {
+          // Newer versions
+          prods = await getProducts({ skus: offerSkus } as any);
+        } catch (e1) {
+          try {
+            // Some versions use `skus`
+            prods = await getProducts({ skus: offerSkus } as any);
+          } catch (e2) {
+            // Older versions accept an array
+            prods = await (getProducts as any)(offerSkus);
+          }
+        }
+        const map: Record<string, Product> = {};
+        for (const p of prods) {
+          const sku = String((p as any)?.productId || (p as any)?.sku || "").trim();
+          if (sku) map[sku] = p;
+        }
+        setIapProducts(map);
+      } catch (e) {
+        console.warn("[IAP] getProducts failed", e);
+      }
+    })();
+  }, [iapReady, offerSkus]);
 
   const loadCatalog = useCallback(async () => {
     if (!backendUrl) {
@@ -542,6 +588,23 @@ export default function EconomyStoreScreen() {
       return;
     }
 
+    // If Play doesn't know this SKU yet, the purchase flow will usually fail.
+    // On local/dev builds, `getProducts` may not run (native module missing) so we don't hard-block.
+    if (!iapProducts[sku]) {
+      console.warn(
+        `[IAP] SKU '${sku}' not found in product cache. Attempting purchase anyway (this may fail if the product isn't active/available for this build).`
+      );
+    }
+
+    // If the native purchase function isn't available, we can't proceed.
+    if (typeof requestPurchase !== "function") {
+      Alert.alert(
+        "Billing not available",
+        "In-app purchases aren't available in this build. Rebuild your dev client after adding react-native-iap, or install the app from Google Play (internal testing) and try again."
+      );
+      return;
+    }
+
     // Must be logged in (or anonymous) so we have an idToken to let the backend grant cookies.
     if (!auth.currentUser) {
       Alert.alert("Sign in required", "Please sign in and try again.");
@@ -551,16 +614,16 @@ export default function EconomyStoreScreen() {
     try {
       // Launch Play purchase flow.
       // For one-time consumables (cookies), requestPurchase is correct.
-      const req: any = (RNIap as any).requestPurchase;
       try {
         // Newer versions often accept `{ sku }`
-        await req({ sku });
+        await (requestPurchase as any)({ sku });
       } catch (e1: any) {
         try {
-          // Older versions may require `{ skus: [sku] }`
-          await req({ skus: [sku] });
+          // Some versions use `{ skus: [...] }`
+          await (requestPurchase as any)({ skus: [sku] });
         } catch (e2) {
-          throw e2;
+          // Older versions accept `(sku)`
+          await (requestPurchase as any)(sku);
         }
       }
       // The rest continues in purchaseUpdatedListener:
@@ -569,7 +632,12 @@ export default function EconomyStoreScreen() {
       // - refresh balance
     } catch (e: any) {
       console.warn("[IAP] requestPurchase failed", e);
-      Alert.alert("Purchase failed", "Couldn't start the purchase. Please try again.");
+      const msg =
+        (e && typeof e === "object" && (e.message || (e as any).debugMessage))
+          ? String(e.message || (e as any).debugMessage)
+          : "Couldn't start the purchase. Please try again.";
+      const code = e && typeof e === "object" && (e as any).code ? String((e as any).code) : "";
+      Alert.alert("Purchase failed", code ? `${msg} (code: ${code})` : msg);
     }
   };
 
@@ -590,10 +658,10 @@ export default function EconomyStoreScreen() {
         ) : (
           <>
             <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-              {t("economy.cookies_balance:", "Balance")}
+              {t("economy.cookies_balance", "Balance")}
             </Text>
             <View style={[styles.balanceCard, { backgroundColor: card, borderColor: border }]}>
-              <Text style={[styles.balanceValue, { color: text }]}>🍪 {balance === null ? "—" : balance}</Text>
+              <Text style={[styles.balanceValue, { color: text }]}>🍪 {balance === null ? "—" : balance} Cookies</Text>
             </View>
 
             <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
@@ -630,8 +698,10 @@ export default function EconomyStoreScreen() {
                             <Text style={[styles.offerMainTitle, { color: text }]}>
                               +{b.cookies} {t("economy.cookies", "Cookies")}
                             </Text>
-                            <View style={styles.freeChip}>
-                              <Text style={styles.freeChipText}>{t("economy.free", "Free")}</Text>
+                            <View style={[styles.freeChip, isDark ? styles.freeChipDark : null]}>
+                              <Text style={[styles.freeChipText, isDark ? styles.freeChipTextDark : null]}>
+                                {t("economy.free", "Free")}
+                              </Text>
                             </View>
                           </View>
 
@@ -756,8 +826,10 @@ export default function EconomyStoreScreen() {
                             <Text style={[styles.offerMainTitle, { color: text }]}>
                               +{b.cookies} {t("economy.cookies", "Cookies")}
                             </Text>
-                            <View style={styles.freeChip}>
-                              <Text style={styles.freeChipText}>{t("economy.free", "Free")}</Text>
+                            <View style={[styles.freeChip, isDark ? styles.freeChipDark : null]}>
+                              <Text style={[styles.freeChipText, isDark ? styles.freeChipTextDark : null]}>
+                                {t("economy.free", "Free")}
+                              </Text>
                             </View>
                           </View>
 
@@ -809,7 +881,7 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   balanceCard: { borderWidth: 1, borderRadius: 16, padding: 16, marginBottom: 16 },
   balanceLabel: { fontSize: 14, opacity: 0.8 },
-  balanceValue: { fontSize: 22, fontWeight: "800"},
+  balanceValue: { fontSize: 19, fontWeight: "800"},
   sectionTitle: { fontSize: 17, fontWeight: "800", marginBottom: 10, marginTop: 6 },
   offerCard: {
     borderWidth: 1,
@@ -849,6 +921,14 @@ const styles = StyleSheet.create({
   freeChipText: {
     fontSize: 13,
     fontWeight: "900",
+    color: "#293a53",
+  },
+  freeChipDark: {
+    backgroundColor: "#ffbd80aa",
+    borderColor: "#ffbd80",
+    borderWidth: 1,
+  },
+  freeChipTextDark: {
     color: "#293a53",
   },
   highlightChip: {
