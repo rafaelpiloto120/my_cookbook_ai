@@ -83,7 +83,7 @@ export default function EconomyStoreScreen() {
 
   const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
-  const isLocalDev = __DEV__ || appEnv === "local";
+  const isLocalDev = __DEV__;
 
   // ✅ auth.currentUser isn't reactive; track uid in state so balance refreshes on login/logout.
   const auth = getAuth();
@@ -596,14 +596,21 @@ export default function EconomyStoreScreen() {
       return;
     }
 
-    // If the native IAP module is partially available (e.g., requestPurchase exists but getProducts does not),
-    // it's usually a dev client issue and purchases will fail.
-    if (typeof getProducts !== "function") {
+    // If the native purchase function isn't available, we can't proceed.
+    if (typeof requestPurchase !== "function") {
       Alert.alert(
         "Billing not available",
-        "This build doesn't have full Google Play Billing support (native module mismatch). Install the app from Google Play (internal/closed testing) to test purchases."
+        "In-app purchases aren't available in this build. Rebuild your dev client after adding react-native-iap, or install the app from Google Play (internal testing) and try again."
       );
       return;
+    }
+
+    // `getProducts` is used only to show localized pricing. Some builds can still purchase even if
+    // product fetching isn't available (or fails). Don't hard-block the purchase flow.
+    if (typeof getProducts !== "function") {
+      console.warn(
+        "[IAP] getProducts is not available in this build. Prices may be shown from backend fallback. Attempting purchase anyway."
+      );
     }
 
     // If Play doesn't know this SKU yet, the purchase flow will usually fail.
@@ -612,15 +619,6 @@ export default function EconomyStoreScreen() {
       console.warn(
         `[IAP] SKU '${sku}' not found in product cache. Attempting purchase anyway (this may fail if the product isn't active/available for this build).`
       );
-    }
-
-    // If the native purchase function isn't available, we can't proceed.
-    if (typeof requestPurchase !== "function") {
-      Alert.alert(
-        "Billing not available",
-        "In-app purchases aren't available in this build. Rebuild your dev client after adding react-native-iap, or install the app from Google Play (internal testing) and try again."
-      );
-      return;
     }
 
     // Must be logged in (or anonymous) so we have an idToken to let the backend grant cookies.
