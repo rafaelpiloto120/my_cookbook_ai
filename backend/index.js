@@ -39,6 +39,7 @@ import * as cheerio from "cheerio";
 import path from "path";
 import he from "he";
 import fs from "fs";
+import { google } from "googleapis";
 
 import admin from "firebase-admin";
 import { Firestore } from "@google-cloud/firestore";
@@ -63,6 +64,89 @@ function loadGooglePlayServiceAccount() {
   }
 
   throw new Error("Missing Google Play service account config. Set GOOGLE_PLAY_SERVICE_ACCOUNT_FILE or GOOGLE_PLAY_SERVICE_ACCOUNT_JSON.");
+}
+
+// ---------------- Google Play purchase verification (Server-side) ----------------
+// We verify purchases using Google Play Developer API.
+// Required envs:
+// - ANDROID_PACKAGE_NAME (e.g. ai.mycookbook.app)
+// - GOOGLE_PLAY_SERVICE_ACCOUNT_FILE (Render secret file path) OR GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+
+const ANDROID_PACKAGE_NAME = process.env.ANDROID_PACKAGE_NAME || "";
+
+let _playPublisherClient = null;
+function getPlayPublisherClient() {
+  if (_playPublisherClient) return _playPublisherClient;
+
+  const svc = loadGooglePlayServiceAccount();
+  const auth = new google.auth.GoogleAuth({
+    credentials: svc,
+    scopes: ["https://www.googleapis.com/auth/androidpublisher"],
+  });
+
+  _playPublisherClient = google.androidpublisher({
+    version: "v3",
+    auth,
+  });
+
+  return _playPublisherClient;
+}
+
+function isPlayVerifierConfigured() {
+  const hasPkg = typeof ANDROID_PACKAGE_NAME === "string" && ANDROID_PACKAGE_NAME.trim().length > 0;
+  const hasFile = !!process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_FILE;
+  const hasJson = !!process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
+  return hasPkg && (hasFile || hasJson);
+}
+
+async function verifyGooglePlayInAppPurchase({ packageName, productId, purchaseToken }) {
+  const pkg = String(packageName || ANDROID_PACKAGE_NAME || "").trim();
+  const pid = String(productId || "").trim();
+  const token = String(purchaseToken || "").trim();
+
+  if (!pkg) {
+    const err = new Error("Missing Android package name");
+    err.code = "MISSING_PACKAGE_NAME";
+    throw err;
+  }
+  if (!pid || !token) {
+    const err = new Error("Missing productId or purchaseToken");
+    err.code = "MISSING_PURCHASE_FIELDS";
+    throw err;
+  }
+
+  const publisher = getPlayPublisherClient();
+
+  // In-app products (consumables/non-consumables): purchases.products.get
+  const resp = await publisher.purchases.products.get({
+    packageName: pkg,
+    productId: pid,
+    token,
+  });
+
+  const data = resp && resp.data ? resp.data : {};
+
+  // purchaseState: 0 Purchased, 1 Canceled, 2 Pending
+  // Note: for some products, fields can be missing; default to safe values.
+  const purchaseState = typeof data.purchaseState === "number" ? data.purchaseState : null;
+  const consumptionState = typeof data.consumptionState === "number" ? data.consumptionState : null;
+  const acknowledgementState = typeof data.acknowledgementState === "number" ? data.acknowledgementState : null;
+
+  const orderId = typeof data.orderId === "string" ? data.orderId : null;
+  const purchaseTimeMillis = typeof data.purchaseTimeMillis === "string" ? Number(data.purchaseTimeMillis) : null;
+
+  return {
+    ok: true,
+    packageName: pkg,
+    productId: pid,
+    purchaseToken: token,
+    purchaseState,
+    consumptionState,
+    acknowledgementState,
+    orderId,
+    purchaseTimeMillis: Number.isFinite(purchaseTimeMillis) ? purchaseTimeMillis : null,
+    raw: data,
+  };
 }
 
 
@@ -840,6 +924,10 @@ async function handleEconomyPurchaseVerify(req, res) {
       });
     }
 
+    if (ECONOMY_BILLING_ENABLED && !isPlayVerifierConfigured()) {
+      console.warn("[Economy] Billing enabled but Play verifier not configured. Check ANDROID_PACKAGE_NAME and service account envs.");
+    }
+
     const auth = await requireVerifiedUid(req, res);
     if (!auth) return;
 
@@ -847,10 +935,10 @@ async function handleEconomyPurchaseVerify(req, res) {
 
     // Accept a couple of common field aliases just in case different clients send different names.
     const sku =
-      (typeof body.sku === "string" && body.sku.trim())
-        ? body.sku.trim()
-        : (typeof body.productId === "string" && body.productId.trim())
+      (typeof body.productId === "string" && body.productId.trim())
         ? body.productId.trim()
+        : (typeof body.sku === "string" && body.sku.trim())
+        ? body.sku.trim()
         : (typeof body.offerId === "string" && body.offerId.trim())
         ? body.offerId.trim()
         : "";
@@ -863,7 +951,10 @@ async function handleEconomyPurchaseVerify(req, res) {
         : "";
 
     const orderId = typeof body.orderId === "string" ? body.orderId.trim() : null;
-    const packageName = typeof body.packageName === "string" ? body.packageName.trim() : null;
+    const packageName =
+      (typeof body.packageName === "string" && body.packageName.trim())
+        ? body.packageName.trim()
+        : (ANDROID_PACKAGE_NAME ? String(ANDROID_PACKAGE_NAME).trim() : null);
 
     if (!sku || !purchaseToken) {
       return res.status(400).json({ ok: false, error: "sku and purchaseToken are required" });
@@ -874,16 +965,46 @@ async function handleEconomyPurchaseVerify(req, res) {
       return res.status(400).json({ ok: false, error: "Unknown sku" });
     }
 
-    // TODO: Real verification with Google Play Developer API.
-    // When you are ready:
-    // - Add a service account with access to your Play Console
-    // - Verify the purchaseToken against Google APIs
-    // For now, we fail with a clear status so clients can handle it.
-    if (!process.env.GOOGLE_PLAY_VERIFIER_READY) {
+    // Ensure verifier is configured
+    if (!isPlayVerifierConfigured()) {
       return res.status(501).json({
         ok: false,
         code: "VERIFIER_NOT_CONFIGURED",
-        message: "Purchase verification is not configured yet.",
+        message:
+          "Purchase verification is not configured yet. Set ANDROID_PACKAGE_NAME and GOOGLE_PLAY_SERVICE_ACCOUNT_FILE (or GOOGLE_PLAY_SERVICE_ACCOUNT_JSON).",
+      });
+    }
+
+    // Verify purchase with Google Play Developer API
+    const effectivePackageName = packageName || ANDROID_PACKAGE_NAME;
+
+    let play;
+    try {
+      play = await verifyGooglePlayInAppPurchase({
+        packageName: effectivePackageName,
+        productId: sku, // sku/productId are the same in your catalog
+        purchaseToken,
+      });
+    } catch (e) {
+      console.error("[Economy] Google Play verification failed", {
+        message: e?.message,
+        code: e?.code,
+      });
+      return res.status(400).json({
+        ok: false,
+        code: "PLAY_VERIFY_FAILED",
+        message: e?.message || "Failed to verify purchase with Google Play",
+      });
+    }
+
+    // Validate state
+    if (play.purchaseState !== 0) {
+      const stateMsg = play.purchaseState === 2 ? "Purchase is pending" : "Purchase is not completed";
+      return res.status(409).json({
+        ok: false,
+        code: "PURCHASE_NOT_PURCHASED",
+        message: stateMsg,
+        purchaseState: play.purchaseState,
       });
     }
 
@@ -944,9 +1065,21 @@ async function handleEconomyPurchaseVerify(req, res) {
           sku: offer.sku || offer.id,
           offerId: offer.id,
           grantedCookies,
-          orderId,
-          packageName,
+
+          // Client-supplied fields
+          orderId: orderId || play.orderId || null,
+          packageName: play.packageName,
           purchaseToken,
+
+          // Verification snapshot
+          play: {
+            purchaseState: play.purchaseState,
+            consumptionState: play.consumptionState,
+            acknowledgementState: play.acknowledgementState,
+            orderId: play.orderId,
+            purchaseTimeMillis: play.purchaseTimeMillis,
+          },
+
           status: "granted",
           createdAt: now,
           _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -973,9 +1106,11 @@ async function handleEconomyPurchaseVerify(req, res) {
     return res.json({
       ok: true,
       sku: offer.sku || offer.id,
+      productId: offer.sku || offer.id,
       grantedCookies,
       balance: newBalance,
       cookies: newBalance,
+      message: "Purchase verified and cookies granted",
     });
   } catch (err) {
     console.error("❌ /economy/purchases/verify error:", err?.message || err);
