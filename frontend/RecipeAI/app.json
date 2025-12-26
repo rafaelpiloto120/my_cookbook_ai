@@ -21,7 +21,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "ai.mycookbook.app",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 2
+      "versionCode": 11
     },
     "web": {
       "output": "static",
