@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import yauzl from "yauzl";
 import zlib from "zlib";
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 60 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 1000;
 const MAX_ARCHIVE_RATIO = 150;
@@ -436,6 +436,21 @@ function resolveImportedImage(candidate, archiveFilesByName) {
   return sanitizeLine(fallback ?? "", 2048);
 }
 
+function isLikelyRecipeIndex(candidate, ingredients, steps, servings, cookingTime) {
+  if (steps.length > 0 || ingredients.length === 0) return false;
+  if ((servings || 0) > 0 || (cookingTime || 0) > 0) return false;
+
+  const rawIngredients = sanitizeText(candidate.ingredients ?? "", MAX_TEXT_FIELD_LENGTH);
+  const lines = rawIngredients
+    .split(/\n+/)
+    .map((line) => sanitizeLine(line, MAX_INGREDIENT_LENGTH))
+    .filter(Boolean);
+  const bulletLines = lines.filter((line) => /^[-*]/.test(line)).length;
+  const title = sanitizeLine(candidate.title ?? candidate.name ?? "", MAX_TITLE_LENGTH).toLowerCase();
+
+  return bulletLines >= 12 || /\blista\b|\bmenu\b|\bíndice\b|\bindex\b/.test(title);
+}
+
 function normalizeRecipeCandidate(candidate, sourceLabel = "import", options = {}) {
   const { archiveFilesByName = null } = options;
   const title = sanitizeLine(
@@ -456,12 +471,14 @@ function normalizeRecipeCandidate(candidate, sourceLabel = "import", options = {
       candidate.raw_ingredients
   ).slice(0, MAX_INGREDIENTS_PER_RECIPE);
 
-  const steps = parseSteps(
+  let steps = parseSteps(
     candidate.steps ??
       candidate.instructions ??
       candidate.directions ??
       candidate.recipeInstructions ??
-      candidate.method
+      candidate.method ??
+      candidate.notes ??
+      candidate.description
   ).slice(0, MAX_STEPS_PER_RECIPE);
 
   const tags = parseTags(
@@ -503,6 +520,18 @@ function normalizeRecipeCandidate(candidate, sourceLabel = "import", options = {
     candidate.times?.inactive,
     candidate.time?.inactive
   );
+
+  if (!ingredients.length && !steps.length) {
+    return null;
+  }
+
+  if (isLikelyRecipeIndex(candidate, ingredients, steps, servings, cookingTime)) {
+    return null;
+  }
+
+  if (!steps.length && ingredients.length > 0) {
+    steps = ["Review this imported recipe and add the cooking steps."];
+  }
 
   const resolvedImage = resolveImportedImage(candidate, archiveFilesByName);
 
@@ -621,7 +650,9 @@ function parseHtmlRecipesFromString(html, sourceLabel) {
   const $ = cheerio.load(html);
   const jsonLdRecipes = extractJsonLdRecipes($);
   const fallback = jsonLdRecipes.length > 0 ? [] : fallbackHtmlRecipe($);
-  return [...jsonLdRecipes, ...fallback].map((item) => normalizeRecipeCandidate(item, sourceLabel));
+  return [...jsonLdRecipes, ...fallback]
+    .map((item) => normalizeRecipeCandidate(item, sourceLabel))
+    .filter(Boolean);
 }
 
 function parseCsvLine(line) {
@@ -733,22 +764,25 @@ function parseCsvRecipes(text, sourceLabel) {
     );
   }
 
-  return rows.slice(1).map((row) =>
-    normalizeRecipeCandidate(
-      {
-        title: row[titleIdx],
-        ingredients: row[ingredientsIdx],
-        steps: row[stepsIdx],
-        servings: row[headerIndex.servings ?? headerIndex.yield ?? -1],
-        cookingTime: row[headerIndex.cookingtime ?? headerIndex.cooking_time ?? headerIndex.total_time ?? -1],
-        difficulty: row[headerIndex.difficulty ?? -1],
-        cost: row[headerIndex.cost ?? -1],
-        tags: row[headerIndex.tags ?? headerIndex.categories ?? -1],
-        image: row[headerIndex.image ?? headerIndex.image_url ?? -1],
-      },
-      sourceLabel
+  return rows
+    .slice(1)
+    .map((row) =>
+      normalizeRecipeCandidate(
+        {
+          title: row[titleIdx],
+          ingredients: row[ingredientsIdx],
+          steps: row[stepsIdx],
+          servings: row[headerIndex.servings ?? headerIndex.yield ?? -1],
+          cookingTime: row[headerIndex.cookingtime ?? headerIndex.cooking_time ?? headerIndex.total_time ?? -1],
+          difficulty: row[headerIndex.difficulty ?? -1],
+          cost: row[headerIndex.cost ?? -1],
+          tags: row[headerIndex.tags ?? headerIndex.categories ?? -1],
+          image: row[headerIndex.image ?? headerIndex.image_url ?? -1],
+        },
+        sourceLabel
+      )
     )
-  );
+    .filter(Boolean);
 }
 
 function isRecipeLikeObject(value) {
@@ -792,7 +826,9 @@ function collectRecipeLikeObjects(value, found = [], depth = 0) {
 function parseJsonRecipes(text, sourceLabel, options = {}) {
   const parsed = JSON.parse(text);
   const found = collectRecipeLikeObjects(parsed);
-  return found.map((item) => normalizeRecipeCandidate(item, sourceLabel, options));
+  return found
+    .map((item) => normalizeRecipeCandidate(item, sourceLabel, options))
+    .filter(Boolean);
 }
 
 function openZipFromBuffer(buffer) {

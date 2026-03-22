@@ -85,6 +85,7 @@ export default function CookbookDetail() {
   const [importError, setImportError] = useState("");
   const [importFileVisible, setImportFileVisible] = useState(false);
   const [importFileLoading, setImportFileLoading] = useState(false);
+  const [importFileLoadingText, setImportFileLoadingText] = useState<string | null>(null);
   const [importFileError, setImportFileError] = useState("");
 
   // Success Modal for import
@@ -139,6 +140,11 @@ export default function CookbookDetail() {
 
     setImportFileError("");
     setImportFileLoading(true);
+    setImportFileLoadingText(
+      t("recipes.file_import_progress_uploading", {
+        defaultValue: "Uploading file...",
+      })
+    );
     try {
       const result = await importRecipesFromFile({
         backendUrl,
@@ -148,6 +154,27 @@ export default function CookbookDetail() {
           name: cookbookName,
         },
         syncEngine,
+        onProgress: (stage) => {
+          const key =
+            stage === "uploading"
+              ? "recipes.file_import_progress_uploading"
+              : stage === "processing"
+              ? "recipes.file_import_progress_processing"
+              : stage === "saving"
+              ? "recipes.file_import_progress_saving"
+              : "recipes.file_import_progress_syncing";
+
+          const fallback =
+            stage === "uploading"
+              ? "Uploading file..."
+              : stage === "processing"
+              ? "Reading recipes..."
+              : stage === "saving"
+              ? "Saving recipes..."
+              : "Syncing recipes...";
+
+          setImportFileLoadingText(t(key, { defaultValue: fallback }));
+        },
       });
 
       const storedRecipes = await AsyncStorage.getItem("recipes");
@@ -180,6 +207,7 @@ export default function CookbookDetail() {
       );
     } finally {
       setImportFileLoading(false);
+      setImportFileLoadingText(null);
     }
   };
 
@@ -917,6 +945,7 @@ export default function CookbookDetail() {
         onImport={handleImportFromFile}
         onHelpPress={openImportFileHelp}
         loading={importFileLoading}
+        loadingText={importFileLoadingText}
         error={importFileError || null}
         cardColor={card}
         textColor={text}

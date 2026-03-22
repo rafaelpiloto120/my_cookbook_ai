@@ -1,11 +1,12 @@
 import { Directory, File, Paths } from "expo-file-system";
 import { EncodingType, writeAsStringAsync } from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImageManipulator from "expo-image-manipulator";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "./deviceId";
 import i18n from "../i18n";
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = [".rtk", ".paprikarecipes", ".zip", ".html", ".htm", ".csv"];
 const MIME_TYPE_TO_EXTENSION: Record<string, string> = {
   "text/csv": ".csv",
@@ -18,6 +19,9 @@ const MIME_TYPE_TO_EXTENSION: Record<string, string> = {
 };
 const DATA_URI_IMAGE_RE =
   /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\n\r]+)$/;
+const MAX_IMPORTED_IMAGE_DIMENSION = 1600;
+const IMPORTED_IMAGE_QUALITY = 0.72;
+const ImageManipulatorCompat = ImageManipulator as any;
 
 export type ImportedRecipe = {
   id: string;
@@ -47,6 +51,7 @@ type ImportRecipesFromFileOptions = {
   appEnv?: string;
   cookbook?: ImportCookbookTarget | null;
   syncEngine?: any;
+  onProgress?: (stage: "uploading" | "processing" | "saving" | "syncing") => void;
 };
 
 type ImportRecipesFromFileResult = {
@@ -97,6 +102,41 @@ function extensionFromMimeType(mimeType: string) {
   return ".img";
 }
 
+async function compressImportedImageIfNeeded(uri: string): Promise<string> {
+  try {
+    if (!uri) return uri;
+
+    const info = await ImageManipulatorCompat.getInfoAsync(uri, { size: true } as any);
+    const width = (info as any)?.width as number | undefined;
+    const height = (info as any)?.height as number | undefined;
+
+    const actions: ImageManipulator.Action[] = [];
+
+    if (width && height) {
+      const longest = Math.max(width, height);
+      if (longest > MAX_IMPORTED_IMAGE_DIMENSION) {
+        const scale = MAX_IMPORTED_IMAGE_DIMENSION / longest;
+        actions.push({
+          resize: {
+            width: Math.max(1, Math.round(width * scale)),
+            height: Math.max(1, Math.round(height * scale)),
+          } as any,
+        } as any);
+      }
+    }
+
+    const result = await ImageManipulatorCompat.manipulateAsync(uri, actions, {
+      compress: IMPORTED_IMAGE_QUALITY,
+      format: ImageManipulatorCompat.SaveFormat.JPEG,
+    });
+
+    return result?.uri || uri;
+  } catch (e) {
+    console.warn("[ImportFromFile] compressImportedImageIfNeeded failed", e);
+    return uri;
+  }
+}
+
 async function materializeEmbeddedImage(imageValue: string, recipeId: string): Promise<string> {
   const match = imageValue.match(DATA_URI_IMAGE_RE);
   if (!match) return imageValue;
@@ -117,7 +157,7 @@ async function materializeEmbeddedImage(imageValue: string, recipeId: string): P
     encoding: EncodingType.Base64,
   });
 
-  return file.uri;
+  return compressImportedImageIfNeeded(file.uri);
 }
 
 function normalizeImportedRecipe(
@@ -132,40 +172,47 @@ function normalizeImportedRecipe(
   const imageValue = raw?.image || raw?.imageUrl || "";
 
   return Promise.resolve(
-    materializeEmbeddedImage(imageValue, recipeId).then((materializedImage) => ({
-      id: recipeId,
-      title: String(raw?.title || "").trim(),
-      cookingTime:
-        typeof raw?.cookingTime === "number" && Number.isFinite(raw.cookingTime)
-          ? raw.cookingTime
-          : 0,
-      difficulty:
+    materializeEmbeddedImage(imageValue, recipeId).then((materializedImage) => {
+      const difficulty: "Easy" | "Moderate" | "Challenging" =
         raw?.difficulty === "Moderate" || raw?.difficulty === "Challenging"
           ? raw.difficulty
-          : "Easy",
-      servings:
-        typeof raw?.servings === "number" && Number.isFinite(raw.servings)
-          ? raw.servings
-          : 0,
-      cost:
-        raw?.cost === "Cheap" || raw?.cost === "Expensive" ? raw.cost : "Medium",
-      ingredients: Array.isArray(raw?.ingredients) ? raw.ingredients.filter(Boolean) : [],
-      steps: Array.isArray(raw?.steps) ? raw.steps.filter(Boolean) : [],
-      tags: Array.isArray(raw?.tags) ? raw.tags.filter(Boolean) : [],
-      createdAt: raw?.createdAt ?? now,
-      updatedAt: now,
-      image: materializedImage || undefined,
-      imageUrl: materializedImage || undefined,
-      cookbooks: safeCookbooks,
-      isDeleted: false,
-    }))
+          : "Easy";
+      const cost: "Cheap" | "Medium" | "Expensive" =
+        raw?.cost === "Cheap" || raw?.cost === "Expensive" ? raw.cost : "Medium";
+
+      return {
+        id: recipeId,
+        title: String(raw?.title || "").trim(),
+        cookingTime:
+          typeof raw?.cookingTime === "number" && Number.isFinite(raw.cookingTime)
+            ? raw.cookingTime
+            : 0,
+        difficulty,
+        servings:
+          typeof raw?.servings === "number" && Number.isFinite(raw.servings)
+            ? raw.servings
+            : 0,
+        cost,
+        ingredients: Array.isArray(raw?.ingredients) ? raw.ingredients.filter(Boolean) : [],
+        steps: Array.isArray(raw?.steps) ? raw.steps.filter(Boolean) : [],
+        tags: Array.isArray(raw?.tags) ? raw.tags.filter(Boolean) : [],
+        createdAt: raw?.createdAt ?? now,
+        updatedAt: now,
+        image: materializedImage || undefined,
+        imageUrl: materializedImage || undefined,
+        cookbooks: safeCookbooks,
+        isDeleted: false,
+      };
+    })
   );
 }
 
 async function persistImportedRecipes(
   recipes: ImportedRecipe[],
-  syncEngine?: any
+  syncEngine?: any,
+  onProgress?: (stage: "uploading" | "processing" | "saving" | "syncing") => void
 ): Promise<ImportedRecipe[]> {
+  onProgress?.("saving");
   const stored = await AsyncStorage.getItem("recipes");
   const current: ImportedRecipe[] = stored ? JSON.parse(stored) : [];
   const next = [...recipes, ...current];
@@ -173,6 +220,7 @@ async function persistImportedRecipes(
   await AsyncStorage.setItem("recipes", JSON.stringify(next));
 
   if (syncEngine) {
+    onProgress?.("syncing");
     if (typeof syncEngine.saveLocalRecipesSnapshot === "function") {
       await syncEngine.saveLocalRecipesSnapshot(next);
     }
@@ -232,7 +280,8 @@ async function pickImportFile(): Promise<File> {
   if (typeof size === "number" && size > MAX_FILE_SIZE_BYTES) {
     throw new Error(
       i18n.t("recipes.file_import_error_too_large", {
-        defaultValue: "This file is too large. The maximum supported size is 25 MB.",
+        defaultValue: "This file is too large. The maximum supported size is 50 MB.",
+        limitMB: Math.round(MAX_FILE_SIZE_BYTES / (1024 * 1024)),
       })
     );
   }
@@ -324,12 +373,14 @@ export async function importRecipesFromFile(
   }
 
   const pickedFile = await pickImportFile();
+  options.onProgress?.("uploading");
   const uploaded = await uploadImportFile(pickedFile, options.backendUrl, options.appEnv ?? "local");
+  options.onProgress?.("processing");
   const normalizedRecipes = await Promise.all(
     uploaded.recipes.map((recipe) => normalizeImportedRecipe(recipe, options.cookbook))
   );
 
-  await persistImportedRecipes(normalizedRecipes, options.syncEngine);
+  await persistImportedRecipes(normalizedRecipes, options.syncEngine, options.onProgress);
 
   return {
     count: uploaded.count,

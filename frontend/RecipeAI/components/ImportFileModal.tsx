@@ -16,6 +16,7 @@ type Props = {
   onImport: () => void;
   onHelpPress: () => void;
   loading?: boolean;
+  loadingText?: string | null;
   error?: string | null;
   cardColor: string;
   textColor: string;
@@ -29,6 +30,7 @@ export default function ImportFileModal({
   onImport,
   onHelpPress,
   loading = false,
+  loadingText,
   error,
   cardColor,
   textColor,
@@ -103,7 +105,8 @@ export default function ImportFileModal({
           >
             <Text style={styles.buttonText}>
               {loading
-                ? t("recipes.importing", { defaultValue: "Importing..." })
+                ? loadingText ||
+                  t("recipes.importing", { defaultValue: "Importing..." })
                 : t("recipes.import_button", { defaultValue: "Import" })}
             </Text>
           </TouchableOpacity>

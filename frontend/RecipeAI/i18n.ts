@@ -324,7 +324,11 @@ const resources = {
         file_import_error_unsupported:
           "Unsupported file type. Supported formats are .rtk, .paprikarecipes, .zip, .html, and .csv.",
         file_import_error_too_large:
-          "This file is too large. The maximum supported size is 25 MB.",
+          "This file is too large. The maximum supported size is {{limitMB}} MB.",
+        file_import_progress_uploading: "Uploading file...",
+        file_import_progress_processing: "Reading recipes...",
+        file_import_progress_saving: "Saving recipes...",
+        file_import_progress_syncing: "Syncing recipes...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Recipe Backup (.zip)",
@@ -791,7 +795,11 @@ const resources = {
         file_import_error_unsupported:
           "Tipo de archivo no compatible. Los formatos admitidos son .rtk, .paprikarecipes, .zip, .html y .csv.",
         file_import_error_too_large:
-          "Este archivo es demasiado grande. El tamaño máximo permitido es de 25 MB.",
+          "Este archivo es demasiado grande. El tamaño máximo permitido es de {{limitMB}} MB.",
+        file_import_progress_uploading: "Subiendo archivo...",
+        file_import_progress_processing: "Leyendo recetas...",
+        file_import_progress_saving: "Guardando recetas...",
+        file_import_progress_syncing: "Sincronizando recetas...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Copia de seguridad de recetas (.zip)",
@@ -1261,7 +1269,11 @@ const resources = {
         file_import_error_unsupported:
           "Tipo de ficheiro não suportado. Os formatos suportados são .rtk, .paprikarecipes, .zip, .html e .csv.",
         file_import_error_too_large:
-          "Este ficheiro é demasiado grande. O tamanho máximo suportado é 25 MB.",
+          "Este ficheiro é demasiado grande. O tamanho máximo suportado é {{limitMB}} MB.",
+        file_import_progress_uploading: "A carregar ficheiro...",
+        file_import_progress_processing: "A ler receitas...",
+        file_import_progress_saving: "A guardar receitas...",
+        file_import_progress_syncing: "A sincronizar receitas...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Cópia de segurança de receitas (.zip)",
@@ -1733,7 +1745,11 @@ const resources = {
         file_import_error_unsupported:
           "Tipo de arquivo não suportado. Os formatos compatíveis são .rtk, .paprikarecipes, .zip, .html e .csv.",
         file_import_error_too_large:
-          "Este arquivo é muito grande. O tamanho máximo suportado é 25 MB.",
+          "Este arquivo é muito grande. O tamanho máximo suportado é {{limitMB}} MB.",
+        file_import_progress_uploading: "Enviando arquivo...",
+        file_import_progress_processing: "Lendo receitas...",
+        file_import_progress_saving: "Salvando receitas...",
+        file_import_progress_syncing: "Sincronizando receitas...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Backup de receitas (.zip)",
@@ -2203,7 +2219,11 @@ const resources = {
         file_import_error_unsupported:
           "Type de fichier non pris en charge. Les formats pris en charge sont .rtk, .paprikarecipes, .zip, .html et .csv.",
         file_import_error_too_large:
-          "Ce fichier est trop volumineux. La taille maximale prise en charge est de 25 Mo.",
+          "Ce fichier est trop volumineux. La taille maximale prise en charge est de {{limitMB}} Mo.",
+        file_import_progress_uploading: "Téléchargement du fichier...",
+        file_import_progress_processing: "Lecture des recettes...",
+        file_import_progress_saving: "Enregistrement des recettes...",
+        file_import_progress_syncing: "Synchronisation des recettes...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Sauvegarde de recettes (.zip)",
@@ -2673,7 +2693,11 @@ const resources = {
         file_import_error_unsupported:
           "Nicht unterstützter Dateityp. Unterstützte Formate sind .rtk, .paprikarecipes, .zip, .html und .csv.",
         file_import_error_too_large:
-          "Diese Datei ist zu groß. Die maximal unterstützte Größe beträgt 25 MB.",
+          "Diese Datei ist zu groß. Die maximal unterstützte Größe beträgt {{limitMB}} MB.",
+        file_import_progress_uploading: "Datei wird hochgeladen...",
+        file_import_progress_processing: "Rezepte werden gelesen...",
+        file_import_progress_saving: "Rezepte werden gespeichert...",
+        file_import_progress_syncing: "Rezepte werden synchronisiert...",
         file_import_format_recipe_box: "My Recipe Box (.rtk)",
         file_import_format_paprika: "Paprika (.paprikarecipes)",
         file_import_format_backup_zip: "Rezept-Backup (.zip)",
