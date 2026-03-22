@@ -1476,14 +1476,32 @@ export default function Profile() {
       question: t("faq.cookies_what") || "What are Cookies and what are they used for?",
       answer:
         t("faq.cookies_what_answer") ||
-        "Cookies are credits used for premium actions in MyCookbook AI, such as generating recipes with AI and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
+        "Cookies are credits used for premium actions in MyCookbook AI, such as generating AI recipes, importing recipes from Instagram Reels, and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
     },
     {
       id: "faq.cookies_charged",
       question: t("faq.cookies_charged") || "When do Cookies get deducted and how can I get more?",
       answer:
         t("faq.cookies_charged_answer") ||
-        "The first cookbook you create is free. Creating additional cookbooks deducts 1 Cookie from your balance. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer free bonus Cookies through promotions.",
+        "The first cookbook you create is free. Additional cookbooks deduct 1 Cookie. Instagram Reel imports deduct 2 Cookies only when we create a valid draft. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer bonus Cookies through promotions.",
+    },
+    {
+      id: "faq.import_file_app",
+      question:
+        t("faq.import_file_app") ||
+        "How does Import from File / App work?",
+      answer:
+        t("faq.import_file_app_answer") ||
+        "You can import recipes from supported backup or export files, including My Recipe Box (.rtk), Paprika (.paprikarecipes), supported recipe ZIP exports, HTML, and CSV. Open My Recipes, tap New Recipe, then choose Import from File / App. If the file is invalid, no recipes are imported.",
+    },
+    {
+      id: "faq.instagram_reel_import",
+      question:
+        t("faq.instagram_reel_import") ||
+        "How does Instagram Reel import work?",
+      answer:
+        t("faq.instagram_reel_import_answer") ||
+        "Paste a public Instagram Reel link into Import from URL. We analyze the Reel and create a recipe draft for you to review before saving. This import costs 2 Cookies only when a valid draft is created.",
     },
     {
       id: "faq.measurement_system",
@@ -1525,14 +1543,14 @@ export default function Profile() {
       question: t("faq.privacy") || "Are my photos and recipes private?",
       answer:
         t("faq.privacy_answer") ||
-        "Your recipe photos and content are only linked to your account. We do not make them public or searchable by other users.",
+        "Yes. If you use the app as a guest, your data stays on this device. If you are signed in, your recipes and photos are linked to your account for sync. We do not make your recipes public or searchable by other users.",
     },
     {
       id: "faq.free_or_paid",
       question: t("faq.free_or_paid") || "Is MyCookbook AI free?",
       answer:
         t("faq.free_or_paid_answer") ||
-        "The core experience is free to use. In the future, some advanced features may require a paid plan, but we will always be clear before charging anything.",
+        "Yes, the core experience is free. Some premium actions use Cookies, such as AI generation, Instagram Reel imports, and extra cookbooks beyond the free limit. We always show the cost before charging.",
     },
     {
       id: "faq.report_bug",

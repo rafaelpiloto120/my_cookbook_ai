@@ -83,7 +83,7 @@ const resources = {
         do_i_need_account: "👤 Do I need an account to use the app?",
         do_i_need_account_answer: "You can use the app as a guest, but creating an account lets you sync your recipes and preferences across devices.",
         free_or_paid: "💰 Is MyCookbook AI free?",
-        free_or_paid_answer: "The core app is free to use. In the future, advanced features may require a paid plan.",
+        free_or_paid_answer: "Yes, the core experience is free. Some premium actions use Cookies, such as AI generation, Instagram Reel imports, and extra cookbooks beyond the free limit. We always show the cost before charging.",
         guest_mode: "🕓 What is guest mode?",
         guest_mode_answer: "Guest mode stores your data only on this device. Creating an account keeps everything backed up.",
         language_change: "🌐 How do I change the app language?",
@@ -93,7 +93,7 @@ const resources = {
         offline: "📴 Does the app work offline?",
         offline_answer: "Saved recipes work offline, but AI features and uploads require internet access.",
         privacy: "🔒 Are my photos and recipes private?",
-        privacy_answer: "Yes. Your recipe content is private to your account.",
+        privacy_answer: "Yes. If you use the app as a guest, your data stays on this device. If you are signed in, your recipes and photos are linked to your account for sync. We do not make your recipes public or searchable by other users.",
         report_bug: "🐞 How can I report a bug or suggest a feature?",
         report_bug_answer: "Use the Contact Support option inside the Help & Support section.",
         reset_preferences: "♻️ How do I reset my onboarding and preferences?",
@@ -105,9 +105,13 @@ const resources = {
         where_are_recipes_stored: "📦 Where are my recipes stored?",
         where_are_recipes_stored_answer: "With an account, your recipes are securely stored in the cloud. As a guest, they stay stored locally on your device.",
         cookies_what: "🍪 What are Cookies and what are they used for?",
-        cookies_what_answer: "Cookies are credits used for premium actions in MyCookbook AI, such as generating recipes with AI and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
+        cookies_what_answer: "Cookies are credits used for premium actions in MyCookbook AI, such as generating AI recipes, importing recipes from Instagram Reels, and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
         cookies_charged: "🔖 When do Cookies get deducted and how can I get more?",
-        cookies_charged_answer: "The first cookbook you create is free. Creating additional cookbooks deducts 1 Cookie from your balance. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer free bonus Cookies through promotions.",
+        cookies_charged_answer: "The first cookbook you create is free. Additional cookbooks deduct 1 Cookie. Instagram Reel imports deduct 2 Cookies only when we create a valid draft. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer bonus Cookies through promotions.",
+        import_file_app: "📁 How does Import from File / App work?",
+        import_file_app_answer: "You can import recipes from supported backup or export files, including My Recipe Box (.rtk), Paprika (.paprikarecipes), supported recipe ZIP exports, HTML, and CSV. Open My Recipes, tap New Recipe, then choose Import from File / App. If the file is invalid, no recipes are imported.",
+        instagram_reel_import: "🎞️ How does Instagram Reel import work?",
+        instagram_reel_import_answer: "Paste a public Instagram Reel link into Import from URL. We analyze the Reel and create a recipe draft for you to review before saving. This import costs 2 Cookies only when a valid draft is created.",
       },
       common: {
         done: "Done",
@@ -308,8 +312,8 @@ const resources = {
         validation_name: "Please enter a name.",
         success_import: "Recipe imported successfully!",
         import_from_url: "Import from URL",
-        import_from_url_sub: "Paste a recipe website link.",
-        import_desc: "Paste a recipe website link.",
+        import_from_url_sub: "Paste a recipe website or Instagram Reel link.",
+        import_desc: "Paste a recipe website or Instagram Reel link.",
         import_from_image: "Import from Image",
         import_from_image_sub: "Upload a photo of a recipe",
         import_from_file: "Import from File/App",
@@ -373,7 +377,18 @@ const resources = {
           "If a cloud storage provider gives an error, download the file locally first and try again.",
         import_help_tip_4:
           "If import fails, no recipes are saved, so you can safely try again.",
-        paste_url: "Paste the URL of a recipe.",
+        paste_url: "Paste the URL of a recipe or Instagram Reel.",
+        invalid_instagram_import:
+          "We could not build a reliable recipe draft from this Instagram Reel. Try another Reel or edit the recipe manually.",
+        invalid_instagram_reel_url: "This Instagram link is not a supported Reel URL.",
+        instagram_reel_import_inline_title: "Instagram Reel import",
+        instagram_reel_import_confirm_title: "Use Cookies for Instagram import?",
+        instagram_reel_import_confirm_body:
+          "Importing a recipe from an Instagram Reel costs {{count}} Cookies. We will only charge you if we create a high-quality draft.",
+        instagram_reel_import_button: "Proceed for {{count}} Cookies",
+        url_import_progress_fetching: "Fetching recipe...",
+        url_import_progress_analyzing_reel: "Analyzing Instagram Reel...",
+        url_import_progress_opening_review: "Opening recipe review...",
         import: "Import",
         import_button: "Import",
         importing: "Importing...",
@@ -431,6 +446,8 @@ const resources = {
         cookies_balance: "Balance",
         learn_more: "Learn more",
         get_more_cookies: "Get more",
+        loading_balance: "Checking your Cookies...",
+        current_balance_short: "You have {{count}} Cookies.",
         restore_purchases: "Restore purchases",
         cookies: "Cookies",
         store_title: "Get more cookies",
@@ -455,6 +472,8 @@ const resources = {
         insufficient_title: "Not enough cookies",
         insufficient_full_recipe_body_short: "You need 1 cookie to open the full recipe. You have {{remaining}}.",
         insufficient_suggestions_body_short: "You need 1 cookie to generate recipe suggestions. You have {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "You need {{count}} Cookies to import a recipe from an Instagram Reel. You have {{remaining}}.",
         offers_button: "All offers",
         full_recipe_cost_note: "Opening a recipe deducts 1 Cookie from your balance. You can see your Cookie balance in Profile.",
         cookbook_pricing_note: "First cookbook is free.\nExtra cookbooks deduct 1 Cookie from your balance.",
@@ -544,7 +563,7 @@ const resources = {
           "Puedes usar la app como invitado, pero crear una cuenta te permite sincronizar tus recetas y preferencias entre dispositivos.",
         free_or_paid: "💰 ¿MyCookbook AI es gratis?",
         free_or_paid_answer:
-          "La app principal es gratuita. En el futuro, algunas funciones avanzadas podrían requerir un plan de pago.",
+          "Sí, la experiencia principal es gratuita. Algunas acciones premium usan Cookies, como la generación con IA, la importación desde Reels de Instagram y los libros extra más allá del límite gratuito. Siempre mostramos el coste antes de cobrar.",
         guest_mode: "🕓 ¿Qué es el modo invitado?",
         guest_mode_answer:
           "El modo invitado guarda tus datos solo en este dispositivo. Crear una cuenta mantiene todo respaldado.",
@@ -559,7 +578,7 @@ const resources = {
           "Las recetas guardadas funcionan sin conexión, pero las funciones de IA y las subidas requieren internet.",
         privacy: "🔒 ¿Mis fotos y recetas son privadas?",
         privacy_answer:
-          "Sí. El contenido de tus recetas es privado para tu cuenta.",
+          "Sí. Si usas la app como invitado, tus datos permanecen en este dispositivo. Si inicias sesión, tus recetas y fotos se vinculan a tu cuenta para sincronizarse. No hacemos tus recetas públicas ni visibles para otros usuarios.",
         report_bug: "🐞 ¿Cómo puedo reportar un error o sugerir una función?",
         report_bug_answer:
           "Usa la opción Contactar soporte dentro de la sección Ayuda y soporte.",
@@ -576,10 +595,16 @@ const resources = {
           "Con una cuenta, tus recetas se almacenan de forma segura en la nube. Como invitado, se guardan localmente en tu dispositivo.",
         cookies_what: "🍪 ¿Qué son las Cookies y para qué se usan?",
         cookies_what_answer:
-          "Las Cookies son créditos usados para acciones premium en MyCookbook AI, como generar recetas con IA y crear libros de recetas adicionales más allá del límite gratuito. Tu saldo de Cookies se muestra en tu Perfil.",
+          "Las Cookies son créditos usados para acciones premium en MyCookbook AI, como generar recetas con IA, importar recetas desde Reels de Instagram y crear libros de recetas adicionales más allá del límite gratuito. Tu saldo de Cookies se muestra en tu Perfil.",
         cookies_charged: "🔖 ¿Cuándo se descuentan Cookies y cómo puedo conseguir más?",
         cookies_charged_answer:
-          "El primer libro de recetas que creas es gratis. Crear libros adicionales descuenta 1 Cookie de tu saldo. La generación de recetas con IA también usa Cookies. Puedes conseguir más Cookies en la Tienda, y ocasionalmente podemos ofrecer Cookies extra gratis mediante promociones.",
+          "El primer libro de recetas que creas es gratis. Los libros adicionales descuentan 1 Cookie. Las importaciones desde Reels de Instagram descuentan 2 Cookies solo cuando creamos un borrador válido. La generación de recetas con IA también usa Cookies. Puedes conseguir más Cookies en la Tienda y, ocasionalmente, podemos ofrecer Cookies de regalo en promociones.",
+        import_file_app: "📁 ¿Cómo funciona Importar desde archivo/app?",
+        import_file_app_answer:
+          "Puedes importar recetas desde archivos de copia de seguridad o exportación compatibles, incluyendo My Recipe Box (.rtk), Paprika (.paprikarecipes), exportaciones ZIP compatibles, HTML y CSV. Ve a Mis recetas, toca Nueva receta y elige Importar desde archivo/app. Si el archivo no es válido, no se importará ninguna receta.",
+        instagram_reel_import: "🎞️ ¿Cómo funciona la importación desde Reels de Instagram?",
+        instagram_reel_import_answer:
+          "Pega un enlace público de un Reel de Instagram en Importar desde URL. Analizamos el Reel y creamos un borrador de receta para que lo revises antes de guardar. Esta importación cuesta 2 Cookies solo cuando se crea un borrador válido.",
       },
       common: {
         done: "Hecho",
@@ -779,8 +804,8 @@ const resources = {
         validation_name: "Por favor, ingresa un nombre.",
         success_import: "¡Receta importada exitosamente!",
         import_from_url: "Importar desde URL",
-        import_from_url_sub: "Pega un enlace de un sitio web de recetas.",
-        import_desc: "Pega un enlace de un sitio web de recetas.",
+        import_from_url_sub: "Pega un enlace de una web de recetas o de un Reel de Instagram.",
+        import_desc: "Pega un enlace de una web de recetas o de un Reel de Instagram.",
         import_from_image: "Importar desde imagen",
         import_from_image_sub: "Sube una foto de una receta",
         import_from_file: "Importar desde archivo/app",
@@ -844,7 +869,20 @@ const resources = {
           "Si un proveedor de almacenamiento en la nube da error, descarga primero el archivo localmente y vuelve a intentarlo.",
         import_help_tip_4:
           "Si la importación falla, no se guardará ninguna receta, así que puedes volver a intentarlo con seguridad.",
-        paste_url: "Pega la URL de una receta.",
+        paste_url: "Pega la URL de una receta o de un Reel de Instagram.",
+        invalid_instagram_import:
+          "No pudimos crear un borrador de receta fiable a partir de este Reel de Instagram. Prueba con otro Reel o edita la receta manualmente.",
+        invalid_instagram_reel_url:
+          "Este enlace de Instagram no es una URL de Reel compatible.",
+        instagram_reel_import_inline_title: "Importación de Reel de Instagram",
+        instagram_reel_import_confirm_title:
+          "¿Usar Cookies para importar desde Instagram?",
+        instagram_reel_import_confirm_body:
+          "Importar una receta desde un Reel de Instagram cuesta {{count}} Cookies. Solo te las cobraremos si creamos un borrador de alta calidad.",
+        instagram_reel_import_button: "Continuar por {{count}} Cookies",
+        url_import_progress_fetching: "Obteniendo receta...",
+        url_import_progress_analyzing_reel: "Analizando Reel de Instagram...",
+        url_import_progress_opening_review: "Abriendo revisión de la receta...",
         import: "Importar",
         import_button: "Importar",
         importing: "Importando...",
@@ -903,6 +941,8 @@ const resources = {
         cookies_balance: "Saldo",
         learn_more: "Más información",
         get_more_cookies: "Conseguir más",
+        loading_balance: "Comprobando tus Cookies...",
+        current_balance_short: "Tienes {{count}} Cookies.",
         restore_purchases: "Restaurar compras",
         store_title: "Conseguir más cookies",
         cookies_what: "¿Qué son las cookies?",
@@ -929,6 +969,8 @@ const resources = {
         insufficient_title: "No tienes suficientes cookies",
         insufficient_full_recipe_body_short: "Necesitas 1 cookie para abrir la receta completa. Tienes {{remaining}}.",
         insufficient_suggestions_body_short: "Necesitas 1 cookie para generar sugerencias de recetas. Tienes {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "Necesitas {{count}} Cookies para importar una receta desde un Reel de Instagram. Tienes {{remaining}}.",
         offers_button: "Otras ofertas",
         full_recipe_cost_note: "Abrir una receta descuenta 1 Cookie de tu saldo. Puedes ver tu saldo de Cookies en el Perfil.",
         cookbook_pricing_note: "El primer recetario es gratis.\nLos recetarios extra descuentan 1 Cookie de tu saldo.",
@@ -1018,7 +1060,7 @@ const resources = {
           "Pode usar a app como convidado, mas criar uma conta permite sincronizar as suas receitas e preferências entre dispositivos.",
         free_or_paid: "💰 O MyCookbook AI é gratuito?",
         free_or_paid_answer:
-          "A app base é gratuita. No futuro, algumas funcionalidades avançadas poderão exigir um plano pago.",
+          "Sim, a experiência principal é gratuita. Algumas ações premium usam Cookies, como a geração com IA, a importação de Reels do Instagram e livros extra acima do limite gratuito. Mostramos sempre o custo antes de cobrar.",
         guest_mode: "🕓 O que é o modo convidado?",
         guest_mode_answer:
           "O modo convidado guarda os seus dados apenas neste dispositivo. Criar uma conta mantém tudo com backup.",
@@ -1033,7 +1075,7 @@ const resources = {
           "As receitas guardadas funcionam offline, mas as funcionalidades de IA e os uploads exigem ligação à internet.",
         privacy: "🔒 As minhas fotos e receitas são privadas?",
         privacy_answer:
-          "Sim. O conteúdo das suas receitas é privado para a sua conta.",
+          "Sim. Se usar a app como convidado, os seus dados ficam neste dispositivo. Se iniciar sessão, as suas receitas e fotos ficam ligadas à sua conta para sincronização. Não tornamos as suas receitas públicas nem pesquisáveis por outros utilizadores.",
         report_bug: "🐞 Como posso reportar um bug ou sugerir uma funcionalidade?",
         report_bug_answer:
           "Use a opção Contactar Suporte na secção Ajuda e Suporte.",
@@ -1050,10 +1092,16 @@ const resources = {
           "Com uma conta, as suas receitas são guardadas de forma segura na cloud. Como convidado, ficam guardadas localmente no seu dispositivo.",
         cookies_what: "🍪 O que são Cookies e para que servem?",
         cookies_what_answer:
-          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA e criar livros de receitas adicionais para além do limite gratuito. O seu saldo de Cookies é mostrado no seu Perfil.",
+          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA, importar receitas de Reels do Instagram e criar livros de receitas adicionais para além do limite gratuito. O seu saldo de Cookies é mostrado no seu Perfil.",
         cookies_charged: "🔖 Quando é que os Cookies são deduzidos e como posso obter mais?",
         cookies_charged_answer:
-          "O primeiro livro de receitas que criar é grátis. Criar livros adicionais deduz 1 Cookie do seu saldo. A geração de receitas com IA também usa Cookies. Pode obter mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies extra grátis através de promoções.",
+          "O primeiro livro de receitas que criar é grátis. Os livros adicionais deduzem 1 Cookie. As importações de Reels do Instagram deduzem 2 Cookies apenas quando criamos um rascunho válido. A geração de receitas com IA também usa Cookies. Pode obter mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies de bónus através de promoções.",
+        import_file_app: "📁 Como funciona o Importar de ficheiro/app?",
+        import_file_app_answer:
+          "Pode importar receitas a partir de ficheiros de backup ou exportação suportados, incluindo My Recipe Box (.rtk), Paprika (.paprikarecipes), exportações ZIP suportadas, HTML e CSV. Vá a As Minhas Receitas, toque em Nova Receita e escolha Importar de ficheiro/app. Se o ficheiro for inválido, nenhuma receita será importada.",
+        instagram_reel_import: "🎞️ Como funciona a importação de Reels do Instagram?",
+        instagram_reel_import_answer:
+          "Cole um link público de um Reel do Instagram em Importar de URL. Analisamos o Reel e criamos um rascunho de receita para rever antes de guardar. Esta importação custa 2 Cookies apenas quando é criado um rascunho válido.",
       },
       common: {
         done: "Concluir",
@@ -1253,8 +1301,8 @@ const resources = {
         validation_name: "Por favor, insira um nome.",
         success_import: "Receita importada com sucesso!",
         import_from_url: "Importar de URL",
-        import_from_url_sub: "Cole o link de um site de receitas.",
-        import_desc: "Cole o link de um site de receitas.",
+        import_from_url_sub: "Cole o link de um site de receitas ou de um Reel do Instagram.",
+        import_desc: "Cole o link de um site de receitas ou de um Reel do Instagram.",
         import_from_image: "Importar de imagem",
         import_from_image_sub: "Carregue uma foto de uma receita",
         import_from_file: "Importar de ficheiro/app",
@@ -1318,7 +1366,20 @@ const resources = {
           "Se um fornecedor de armazenamento em nuvem der erro, transfira primeiro o ficheiro para o dispositivo e tente novamente.",
         import_help_tip_4:
           "Se a importação falhar, nenhuma receita será guardada, por isso pode tentar novamente com segurança.",
-        paste_url: "Cole o URL de uma receita.",
+        paste_url: "Cole o URL de uma receita ou de um Reel do Instagram.",
+        invalid_instagram_import:
+          "Não foi possível criar um rascunho de receita fiável a partir deste Reel do Instagram. Tente outro Reel ou edite a receita manualmente.",
+        invalid_instagram_reel_url:
+          "Este link do Instagram não é um URL de Reel suportado.",
+        instagram_reel_import_inline_title: "Importação de Reel do Instagram",
+        instagram_reel_import_confirm_title:
+          "Usar Cookies para importar do Instagram?",
+        instagram_reel_import_confirm_body:
+          "Importar uma receita de um Reel do Instagram custa {{count}} Cookies. Só lhe cobramos se criarmos um rascunho de alta qualidade.",
+        instagram_reel_import_button: "Continuar por {{count}} Cookies",
+        url_import_progress_fetching: "A obter receita...",
+        url_import_progress_analyzing_reel: "A analisar Reel do Instagram...",
+        url_import_progress_opening_review: "A abrir revisão da receita...",
         import: "Importar",
         import_button: "Importar",
         importing: "A importar...",
@@ -1378,6 +1439,8 @@ const resources = {
         c_cookies_balance1: "Saldo",
         learn_more: "Saber mais",
         get_more_cookies: "Obter mais",
+        loading_balance: "A verificar os seus Cookies...",
+        current_balance_short: "Tem {{count}} Cookies.",
         restore_purchases: "Restaurar compras",
         store_title: "Obter mais cookies",
         cookies_what: "¿Qué son las cookies?",
@@ -1405,6 +1468,8 @@ const resources = {
         insufficient_title: "Cookies insuficientes",
         insufficient_full_recipe_body_short: "Precisas de 1 cookie para abrir a receita completa. Tens {{remaining}}.",
         insufficient_suggestions_body_short: "Precisas de 1 cookie para gerar sugestões de receitas. Tens {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "Precisas de {{count}} Cookies para importar uma receita de um Reel do Instagram. Tens {{remaining}}.",
         offers_button: "Outras ofertas",
         full_recipe_cost_note: "Abrir uma receita desconta 1 Cookie do teu saldo. Podes ver o teu saldo de Cookies no Perfil.",
         cookbook_pricing_note: "O primeiro livro de receitas é grátis.\nOs livros de receitas extra deduzem 1 Cookie do teu saldo.",
@@ -1494,7 +1559,7 @@ const resources = {
           "Você pode usar como convidado, mas criar uma conta permite sincronizar suas receitas e preferências entre dispositivos.",
         free_or_paid: "💰 O MyCookbook AI é gratuito?",
         free_or_paid_answer:
-          "O app base é gratuito. No futuro, alguns recursos avançados podem exigir um plano pago.",
+          "Sim, a experiência principal é gratuita. Algumas ações premium usam Cookies, como a geração com IA, a importação de Reels do Instagram e livros extras acima do limite gratuito. Sempre mostramos o custo antes de cobrar.",
         guest_mode: "🕓 O que é o modo convidado?",
         guest_mode_answer:
           "O modo convidado guarda seus dados apenas neste dispositivo. Criar uma conta mantém tudo com backup.",
@@ -1509,7 +1574,7 @@ const resources = {
           "Receitas salvas funcionam offline, mas recursos de IA e uploads precisam de internet.",
         privacy: "🔒 Minhas fotos e receitas são privadas?",
         privacy_answer:
-          "Sim. O conteúdo das suas receitas é privado para a sua conta.",
+          "Sim. Se você usar o app como convidado, seus dados ficam neste dispositivo. Se fizer login, suas receitas e fotos ficam vinculadas à sua conta para sincronização. Não tornamos suas receitas públicas nem pesquisáveis por outros usuários.",
         report_bug: "🐞 Como posso reportar um bug ou sugerir um recurso?",
         report_bug_answer:
           "Use a opção Contatar Suporte dentro da seção Ajuda e Suporte.",
@@ -1526,10 +1591,16 @@ const resources = {
           "Com uma conta, suas receitas ficam armazenadas com segurança na nuvem. Como convidado, elas ficam salvas localmente no seu dispositivo.",
         cookies_what: "🍪 O que são Cookies e para que servem?",
         cookies_what_answer:
-          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA e criar livros de receitas adicionais além do limite grátis. Seu saldo de Cookies aparece no seu Perfil.",
+          "Cookies são créditos usados para ações premium no MyCookbook AI, como gerar receitas com IA, importar receitas de Reels do Instagram e criar livros de receitas adicionais além do limite grátis. Seu saldo de Cookies aparece no seu Perfil.",
         cookies_charged: "🔖 Quando os Cookies são descontados e como consigo mais?",
         cookies_charged_answer:
-          "O primeiro livro de receitas que você criar é grátis. Criar livros adicionais desconta 1 Cookie do seu saldo. A geração de receitas com IA também usa Cookies. Você pode conseguir mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies bônus grátis em promoções.",
+          "O primeiro livro de receitas que você criar é grátis. Livros adicionais descontam 1 Cookie. As importações de Reels do Instagram descontam 2 Cookies apenas quando criamos um rascunho válido. A geração de receitas com IA também usa Cookies. Você pode conseguir mais Cookies na Loja e, ocasionalmente, podemos oferecer Cookies bônus em promoções.",
+        import_file_app: "📁 Como funciona Importar de arquivo/app?",
+        import_file_app_answer:
+          "Você pode importar receitas de arquivos de backup ou exportação compatíveis, incluindo My Recipe Box (.rtk), Paprika (.paprikarecipes), exportações ZIP compatíveis, HTML e CSV. Vá em Minhas Receitas, toque em Nova Receita e escolha Importar de arquivo/app. Se o arquivo for inválido, nenhuma receita será importada.",
+        instagram_reel_import: "🎞️ Como funciona a importação de Reels do Instagram?",
+        instagram_reel_import_answer:
+          "Cole um link público de um Reel do Instagram em Importar de URL. Nós analisamos o Reel e criamos um rascunho de receita para você revisar antes de salvar. Essa importação custa 2 Cookies apenas quando um rascunho válido é criado.",
       },
       common: {
         done: "Concluir",
@@ -1729,8 +1800,8 @@ const resources = {
         validation_name: "Por favor, insira um nome.",
         success_import: "Receita importada com sucesso!",
         import_from_url: "Importar de URL",
-        import_from_url_sub: "Cole o link de um site de receitas.",
-        import_desc: "Cole o link de um site de receitas.",
+        import_from_url_sub: "Cole o link de um site de receitas ou de um Reel do Instagram.",
+        import_desc: "Cole o link de um site de receitas ou de um Reel do Instagram.",
         import_from_image: "Importar de imagem",
         import_from_image_sub: "Envie uma foto de uma receita",
         import_from_file: "Importar de arquivo/app",
@@ -1794,7 +1865,20 @@ const resources = {
           "Se um provedor de armazenamento em nuvem apresentar erro, baixe primeiro o arquivo localmente e tente novamente.",
         import_help_tip_4:
           "Se a importação falhar, nenhuma receita será salva, então você pode tentar novamente com segurança.",
-        paste_url: "Cole a URL de uma receita.",
+        paste_url: "Cole a URL de uma receita ou de um Reel do Instagram.",
+        invalid_instagram_import:
+          "Não conseguimos criar um rascunho de receita confiável a partir deste Reel do Instagram. Tente outro Reel ou edite a receita manualmente.",
+        invalid_instagram_reel_url:
+          "Este link do Instagram não é uma URL de Reel compatível.",
+        instagram_reel_import_inline_title: "Importação de Reel do Instagram",
+        instagram_reel_import_confirm_title:
+          "Usar Cookies para importar do Instagram?",
+        instagram_reel_import_confirm_body:
+          "Importar uma receita de um Reel do Instagram custa {{count}} Cookies. Só cobraremos se criarmos um rascunho de alta qualidade.",
+        instagram_reel_import_button: "Continuar por {{count}} Cookies",
+        url_import_progress_fetching: "Buscando receita...",
+        url_import_progress_analyzing_reel: "Analisando Reel do Instagram...",
+        url_import_progress_opening_review: "Abrindo revisão da receita...",
         import: "Importar",
         import_button: "Importar",
         importing: "Importando...",
@@ -1853,6 +1937,8 @@ const resources = {
         cookies_balance: "Saldo",
         learn_more: "Saiba mais",
         get_more_cookies: "Obter mais",
+        loading_balance: "Verificando seus Cookies...",
+        current_balance_short: "Você tem {{count}} Cookies.",
         restore_purchases: "Restaurar compras",
         store_title: "Obter mais cookies",
         cookies_what: "O que são cookies?",
@@ -1879,6 +1965,8 @@ const resources = {
         insufficient_title: "Cookies insuficientes",
         insufficient_full_recipe_body_short: "Você precisa de 1 cookie para abrir a receita completa. Você tem {{remaining}}.",
         insufficient_suggestions_body_short: "Você precisa de 1 cookie para gerar sugestões de receitas. Você tem {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "Você precisa de {{count}} Cookies para importar uma receita de um Reel do Instagram. Você tem {{remaining}}.",
         offers_button: "Outras ofertas",
         full_recipe_cost_note: "Abrir uma receita desconta 1 Cookie do seu saldo. Você pode ver seu saldo de Cookies no Perfil.",
         cookbook_pricing_note: "O primeiro livro de receitas é grátis.\nLivros de receitas extras descontam 1 Cookie do seu saldo.",
@@ -1968,7 +2056,7 @@ const resources = {
           "Vous pouvez utiliser l’application en invité, mais créer un compte vous permet de synchroniser vos recettes et préférences entre appareils.",
         free_or_paid: "💰 MyCookbook AI est-il gratuit ?",
         free_or_paid_answer:
-          "L’application de base est gratuite. À l’avenir, certaines fonctionnalités avancées pourront nécessiter une offre payante.",
+          "Oui, l’expérience principale est gratuite. Certaines actions premium utilisent des Cookies, comme la génération par IA, l’import depuis des Reels Instagram et les livres supplémentaires au-delà de la limite gratuite. Nous affichons toujours le coût avant de facturer.",
         guest_mode: "🕓 Qu’est-ce que le mode invité ?",
         guest_mode_answer:
           "Le mode invité stocke vos données uniquement sur cet appareil. Créer un compte permet de tout sauvegarder.",
@@ -1983,7 +2071,7 @@ const resources = {
           "Les recettes enregistrées fonctionnent hors ligne, mais les fonctionnalités IA et les envois nécessitent une connexion internet.",
         privacy: "🔒 Mes photos et recettes sont-elles privées ?",
         privacy_answer:
-          "Oui. Le contenu de vos recettes est privé et lié à votre compte.",
+          "Oui. Si vous utilisez l’application en invité, vos données restent sur cet appareil. Si vous êtes connecté, vos recettes et photos sont liées à votre compte pour la synchronisation. Nous ne rendons pas vos recettes publiques ni consultables par d’autres utilisateurs.",
         report_bug: "🐞 Comment signaler un bug ou suggérer une fonctionnalité ?",
         report_bug_answer:
           "Utilisez l’option Contacter le support dans la section Aide & Support.",
@@ -2000,10 +2088,16 @@ const resources = {
           "Avec un compte, vos recettes sont stockées de façon sécurisée dans le cloud. En invité, elles restent stockées localement sur votre appareil.",
         cookies_what: "🍪 Que sont les Cookies et à quoi servent-ils ?",
         cookies_what_answer:
-          "Les Cookies sont des crédits utilisés pour des actions premium dans MyCookbook AI, comme générer des recettes avec l’IA et créer des livres de recettes supplémentaires au-delà de la limite gratuite. Votre solde de Cookies est affiché dans votre Profil.",
+          "Les Cookies sont des crédits utilisés pour des actions premium dans MyCookbook AI, comme générer des recettes avec l’IA, importer des recettes depuis des Reels Instagram et créer des livres de recettes supplémentaires au-delà de la limite gratuite. Votre solde de Cookies est affiché dans votre Profil.",
         cookies_charged: "🔖 Quand les Cookies sont-ils déduits et comment en obtenir plus ?",
         cookies_charged_answer:
-          "Le premier livre de recettes que vous créez est gratuit. La création de livres supplémentaires déduit 1 Cookie de votre solde. La génération de recettes par IA utilise aussi des Cookies. Vous pouvez obtenir plus de Cookies dans la Boutique, et nous pouvons parfois offrir des Cookies bonus gratuits via des promotions.",
+          "Le premier livre de recettes que vous créez est gratuit. Les livres supplémentaires déduisent 1 Cookie. Les imports depuis des Reels Instagram déduisent 2 Cookies uniquement lorsque nous créons un brouillon valide. La génération de recettes par IA utilise aussi des Cookies. Vous pouvez obtenir plus de Cookies dans la Boutique, et nous pouvons parfois offrir des Cookies bonus via des promotions.",
+        import_file_app: "📁 Comment fonctionne Importer depuis un fichier/app ?",
+        import_file_app_answer:
+          "Vous pouvez importer des recettes depuis des fichiers de sauvegarde ou d’export compatibles, notamment My Recipe Box (.rtk), Paprika (.paprikarecipes), des exports ZIP pris en charge, HTML et CSV. Allez dans Mes recettes, appuyez sur Nouvelle recette, puis choisissez Importer depuis un fichier/app. Si le fichier est invalide, aucune recette ne sera importée.",
+        instagram_reel_import: "🎞️ Comment fonctionne l’import depuis un Reel Instagram ?",
+        instagram_reel_import_answer:
+          "Collez un lien public de Reel Instagram dans Importer depuis une URL. Nous analysons le Reel et créons un brouillon de recette que vous pouvez vérifier avant d’enregistrer. Cet import coûte 2 Cookies uniquement lorsqu’un brouillon valide est créé.",
       },
       common: {
         done: "Terminer",
@@ -2203,8 +2297,8 @@ const resources = {
         validation_name: "Veuillez entrer un nom.",
         success_import: "Recette importée avec succès !",
         import_from_url: "Importer depuis une URL",
-        import_from_url_sub: "Collez un lien de site de recettes.",
-        import_desc: "Collez un lien de site de recettes.",
+        import_from_url_sub: "Collez un lien de site de recettes ou de Reel Instagram.",
+        import_desc: "Collez un lien de site de recettes ou de Reel Instagram.",
         import_from_image: "Importer depuis une image",
         import_from_image_sub: "Téléchargez une photo d'une recette",
         import_from_file: "Importer depuis un fichier/app",
@@ -2268,7 +2362,20 @@ const resources = {
           "Si un service de stockage cloud renvoie une erreur, téléchargez d’abord le fichier localement puis réessayez.",
         import_help_tip_4:
           "Si l’importation échoue, aucune recette n’est enregistrée, vous pouvez donc réessayer en toute sécurité.",
-        paste_url: "Collez l’URL d’une recette.",
+        paste_url: "Collez l’URL d’une recette ou d’un Reel Instagram.",
+        invalid_instagram_import:
+          "Nous n’avons pas pu créer un brouillon de recette fiable à partir de ce Reel Instagram. Essayez un autre Reel ou modifiez la recette manuellement.",
+        invalid_instagram_reel_url:
+          "Ce lien Instagram n’est pas une URL de Reel prise en charge.",
+        instagram_reel_import_inline_title: "Import de Reel Instagram",
+        instagram_reel_import_confirm_title:
+          "Utiliser des Cookies pour l’import Instagram ?",
+        instagram_reel_import_confirm_body:
+          "Importer une recette depuis un Reel Instagram coûte {{count}} Cookies. Nous ne vous les déduirons que si nous créons un brouillon de haute qualité.",
+        instagram_reel_import_button: "Continuer pour {{count}} Cookies",
+        url_import_progress_fetching: "Récupération de la recette...",
+        url_import_progress_analyzing_reel: "Analyse du Reel Instagram...",
+        url_import_progress_opening_review: "Ouverture de la révision de la recette...",
         import: "Importer",
         import_button: "Importer",
         importing: "Importation...",
@@ -2327,6 +2434,8 @@ const resources = {
         cookies_balance: "Solde",
         learn_more: "En savoir plus",
         get_more_cookies: "Recharger",
+        loading_balance: "Vérification de vos Cookies...",
+        current_balance_short: "Vous avez {{count}} Cookies.",
         restore_purchases: "Restaurer les achats",
         store_title: "Recharger des cookies",
         cookies_what: "Que sont les cookies ?",
@@ -2353,6 +2462,8 @@ const resources = {
         insufficient_title: "Cookies insuffisants",
         insufficient_full_recipe_body_short: "Vous avez besoin d’1 cookie pour ouvrir la recette complète. Vous en avez {{remaining}}.",
         insufficient_suggestions_body_short: "Vous avez besoin d’1 cookie pour générer des suggestions de recettes. Vous en avez {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "Vous avez besoin de {{count}} Cookies pour importer une recette depuis un Reel Instagram. Vous en avez {{remaining}}.",
         offers_button: "Autres offres",
         full_recipe_cost_note: "Ouvrir une recette déduit 1 Cookie de votre solde. Vous pouvez voir votre solde de Cookies dans le Profil.",
         cookbook_pricing_note: "Le premier livre de recettes est gratuit.\nLes livres de recettes supplémentaires déduisent 1 Cookie de votre solde.",
@@ -2442,7 +2553,7 @@ const resources = {
           "Du kannst die App als Gast nutzen, aber mit einem Konto kannst du Rezepte und Einstellungen zwischen Geräten synchronisieren.",
         free_or_paid: "💰 Ist MyCookbook AI kostenlos?",
         free_or_paid_answer:
-          "Die Basis-App ist kostenlos. In Zukunft können einige erweiterte Funktionen ein kostenpflichtiges Angebot erfordern.",
+          "Ja, das Kernerlebnis ist kostenlos. Einige Premium-Aktionen nutzen Cookies, zum Beispiel KI-Generierung, Instagram-Reel-Importe und zusätzliche Kochbücher über das Gratislimit hinaus. Wir zeigen die Kosten immer vor der Abbuchung an.",
         guest_mode: "🕓 Was ist der Gastmodus?",
         guest_mode_answer:
           "Im Gastmodus werden deine Daten nur auf diesem Gerät gespeichert. Mit einem Konto bleibt alles gesichert und gesichert.",
@@ -2457,7 +2568,7 @@ const resources = {
           "Gespeicherte Rezepte funktionieren offline, aber KI-Funktionen und Uploads benötigen eine Internetverbindung.",
         privacy: "🔒 Sind meine Fotos und Rezepte privat?",
         privacy_answer:
-          "Ja. Deine Rezeptinhalte sind privat und an dein Konto gebunden.",
+          "Ja. Wenn du die App als Gast nutzt, bleiben deine Daten auf diesem Gerät. Wenn du angemeldet bist, sind deine Rezepte und Fotos für die Synchronisierung mit deinem Konto verknüpft. Wir machen deine Rezepte nicht öffentlich oder für andere Nutzer durchsuchbar.",
         report_bug: "🐞 Wie kann ich einen Bug melden oder eine Funktion vorschlagen?",
         report_bug_answer:
           "Nutze die Option Support kontaktieren im Bereich Hilfe & Support.",
@@ -2474,10 +2585,16 @@ const resources = {
           "Mit einem Konto werden deine Rezepte sicher in der Cloud gespeichert. Als Gast bleiben sie lokal auf deinem Gerät gespeichert.",
         cookies_what: "🍪 Was sind Cookies und wofür werden sie verwendet?",
         cookies_what_answer:
-          "Cookies sind Guthaben für Premium-Aktionen in MyCookbook AI, z. B. das Generieren von Rezepten mit KI und das Erstellen zusätzlicher Kochbücher über das kostenlose Limit hinaus. Dein Cookie-Saldo wird in deinem Profil angezeigt.",
+          "Cookies sind Guthaben für Premium-Aktionen in MyCookbook AI, z. B. das Generieren von Rezepten mit KI, das Importieren von Rezepten aus Instagram-Reels und das Erstellen zusätzlicher Kochbücher über das kostenlose Limit hinaus. Dein Cookie-Saldo wird in deinem Profil angezeigt.",
         cookies_charged: "🔖 Wann werden Cookies abgezogen und wie bekomme ich mehr?",
         cookies_charged_answer:
-          "Das erste Kochbuch, das du erstellst, ist kostenlos. Für weitere Kochbücher wird 1 Cookie von deinem Guthaben abgezogen. Auch die KI-Rezeptgenerierung nutzt Cookies. Du kannst Cookies im Store nachkaufen, und gelegentlich gibt es kostenlose Bonus-Cookies durch Aktionen.",
+          "Das erste Kochbuch, das du erstellst, ist kostenlos. Weitere Kochbücher kosten 1 Cookie. Instagram-Reel-Importe kosten 2 Cookies, aber nur dann, wenn wir einen gültigen Entwurf erstellen. Auch die KI-Rezeptgenerierung nutzt Cookies. Du kannst Cookies im Store nachkaufen, und gelegentlich gibt es Bonus-Cookies durch Aktionen.",
+        import_file_app: "📁 Wie funktioniert Import aus Datei/App?",
+        import_file_app_answer:
+          "Du kannst Rezepte aus unterstützten Backup- oder Exportdateien importieren, darunter My Recipe Box (.rtk), Paprika (.paprikarecipes), unterstützte ZIP-Exporte, HTML und CSV. Gehe zu Meine Rezepte, tippe auf Neues Rezept und wähle dann Import aus Datei/App. Wenn die Datei ungültig ist, werden keine Rezepte importiert.",
+        instagram_reel_import: "🎞️ Wie funktioniert der Import aus Instagram-Reels?",
+        instagram_reel_import_answer:
+          "Füge einen öffentlichen Instagram-Reel-Link in Import von URL ein. Wir analysieren das Reel und erstellen einen Rezeptentwurf, den du vor dem Speichern prüfen kannst. Dieser Import kostet 2 Cookies nur dann, wenn ein gültiger Entwurf erstellt wird.",
       },
       common: {
         done: "Fertig",
@@ -2677,8 +2794,8 @@ const resources = {
         validation_name: "Bitte geben Sie einen Namen ein.",
         success_import: "Rezept erfolgreich importiert!",
         import_from_url: "Von URL importieren",
-        import_from_url_sub: "Fügen Sie einen Link zu einer Rezept-Website ein.",
-        import_desc: "Fügen Sie einen Link zu einer Rezept-Website ein.",
+        import_from_url_sub: "Fügen Sie einen Link zu einer Rezept-Website oder einem Instagram-Reel ein.",
+        import_desc: "Fügen Sie einen Link zu einer Rezept-Website oder einem Instagram-Reel ein.",
         import_from_image: "Aus Bild importieren",
         import_from_image_sub: "Laden Sie ein Foto eines Rezepts hoch",
         import_from_file: "Aus Datei/App importieren",
@@ -2742,7 +2859,20 @@ const resources = {
           "Wenn ein Cloud-Speicheranbieter einen Fehler meldet, laden Sie die Datei zuerst lokal herunter und versuchen Sie es erneut.",
         import_help_tip_4:
           "Wenn der Import fehlschlägt, werden keine Rezepte gespeichert, sodass Sie es sicher erneut versuchen können.",
-        paste_url: "Fügen Sie die URL eines Rezepts ein.",
+        paste_url: "Fügen Sie die URL eines Rezepts oder Instagram-Reels ein.",
+        invalid_instagram_import:
+          "Wir konnten aus diesem Instagram-Reel keinen verlässlichen Rezeptentwurf erstellen. Versuchen Sie ein anderes Reel oder bearbeiten Sie das Rezept manuell.",
+        invalid_instagram_reel_url:
+          "Dieser Instagram-Link ist keine unterstützte Reel-URL.",
+        instagram_reel_import_inline_title: "Instagram-Reel-Import",
+        instagram_reel_import_confirm_title:
+          "Cookies für Instagram-Import verwenden?",
+        instagram_reel_import_confirm_body:
+          "Das Importieren eines Rezepts aus einem Instagram-Reel kostet {{count}} Cookies. Wir berechnen sie nur, wenn wir einen hochwertigen Entwurf erstellen.",
+        instagram_reel_import_button: "Für {{count}} Cookies fortfahren",
+        url_import_progress_fetching: "Rezept wird abgerufen...",
+        url_import_progress_analyzing_reel: "Instagram-Reel wird analysiert...",
+        url_import_progress_opening_review: "Rezeptprüfung wird geöffnet...",
         import: "Importieren",
         import_button: "Importieren",
         importing: "Importiere...",
@@ -2801,6 +2931,8 @@ const resources = {
         cookies_balance: "Cookie-Saldo",
         learn_more: "Mehr erfahren",
         get_more_cookies: "Aufladen",
+        loading_balance: "Deine Cookies werden geprüft...",
+        current_balance_short: "Du hast {{count}} Cookies.",
         restore_purchases: "Käufe wiederherstellen",
         store_title: "Aufladen von Cookies",
         cookies_what: "Was sind Cookies?",
@@ -2827,6 +2959,8 @@ const resources = {
         insufficient_title: "Nicht genug Cookies",
         insufficient_full_recipe_body_short: "Du brauchst 1 Cookie, um das vollständige Rezept zu öffnen. Du hast {{remaining}}.",
         insufficient_suggestions_body_short: "Du brauchst 1 Cookie, um Rezeptvorschläge zu erstellen. Du hast {{remaining}}.",
+        insufficient_instagram_reel_body_short:
+          "Du brauchst {{count}} Cookies, um ein Rezept aus einem Instagram-Reel zu importieren. Du hast {{remaining}}.",
         offers_button: "Weitere Angebote",
         full_recipe_cost_note: "Das Öffnen eines Rezepts zieht 1 Cookie von deinem Guthaben ab. Deinen Cookie-Stand siehst du im Profil.",
         cookbook_pricing_note: "Das erste Kochbuch ist kostenlos.\nZusätzliche Kochbücher ziehen 1 Cookie von deinem Guthaben ab.",

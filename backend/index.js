@@ -28,7 +28,7 @@ import 'dotenv/config';
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import PDFDocument from "pdfkit";
 import scrapeRecipe from "recipe-scraper";
 import multer from "multer";
@@ -192,12 +192,17 @@ const ECONOMY_LIMITS = {
   // Cookie costs (Import from URL is FREE for now)
   COST_AI_RECIPE_SUGGESTIONS: 0,
   COST_AI_RECIPE_FULL: 1,
+  COST_IMPORT_INSTAGRAM_REEL: 2,
 
   // Cookbooks: (enforced later on sync endpoints)
   // Default cookbooks are free; user can create 1 custom cookbook for free.
   FREE_CUSTOM_COOKBOOKS: 1,
   COST_EXTRA_COOKBOOK: 1,
 };
+
+const INSTAGRAM_IMPORT_MIN_CONFIDENCE = 0.6;
+const INSTAGRAM_TRANSCRIPTION_MAX_BYTES = 15 * 1024 * 1024;
+
 
 // ---- Economy contract helpers (keep responses consistent + backward compatible) ----
 const ECONOMY_ERROR_CODES = {
@@ -764,6 +769,7 @@ app.get("/economy/config", async (req, res) => {
       costs: {
         aiSuggestions: ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
         aiFullRecipe: ECONOMY_LIMITS.COST_AI_RECIPE_FULL,
+        instagramReelImport: ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
         createCookbook: ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
       },
       freeRules: {
@@ -3044,6 +3050,450 @@ function normalizeMeasurementSystem(system) {
   return "Metric";
 }
 
+function isInstagramReelUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+    return host === "instagram.com" && /^\/reel\/[^/]+/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeSourceUrl(rawUrl) {
+  const parsed = new URL(rawUrl);
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function normalizeEnumValue(value, allowed, fallback) {
+  return allowed.includes(value) ? value : fallback;
+}
+
+function extractStructuredJson(rawText, fallback = null) {
+  const parsed = safeJSONParse(cleanJsonResponse(rawText), fallback);
+  return parsed ?? fallback;
+}
+
+function normalizeCaptionLine(line) {
+  return String(line || "")
+    .replace(/\u2022/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function expandCommonIngredientShorthand(line) {
+  let normalized = normalizeCaptionLine(line);
+  if (!normalized) return normalized;
+
+  // Common Portuguese shorthand: "q.b." / "qb" = "quanto baste" ("to taste"/"as needed")
+  normalized = normalized.replace(/\bq\.?\s*b\.?\b/gi, "quanto baste");
+
+  return normalized;
+}
+
+function looksLikeIngredientCaptionLine(line) {
+  const normalized = normalizeCaptionLine(line);
+  if (!normalized) return false;
+  if (normalized.startsWith("#")) return false;
+  if (/^(one pot|ingredients?|method|directions?|instructions?|recipe)$/i.test(normalized)) {
+    return false;
+  }
+  if (/^[\w\s!?.:'",()-]+$/.test(normalized) && normalized.split(" ").length <= 4) {
+    return /(\d|tbsp|tsp|cup|cups|oz|lb|g|kg|ml|l|clove|cloves|sprig|sprigs|large|small|fresh|pinch|half|¼|½|¾)/i.test(
+      normalized
+    );
+  }
+  return /(\d|tbsp|tsp|cup|cups|oz|lb|g|kg|ml|l|clove|cloves|sprig|sprigs|large|small|fresh|pinch|half|¼|½|¾)/i.test(
+    normalized
+  );
+}
+
+function extractIngredientCandidatesFromInstagramCaption(caption) {
+  const text = typeof caption === "string" ? caption : "";
+  if (!text.trim()) return [];
+
+  const lines = text
+    .split(/\n+/)
+    .map(normalizeCaptionLine)
+    .filter(Boolean);
+
+  const ingredientHeaderIndex = lines.findIndex((line) =>
+    /^(ingredients?|ingredientes?|ingredienti|zutaten|ingrédients?)$/i.test(line)
+  );
+  const processHeaderIndex = lines.findIndex(
+    (line, index) =>
+      index > ingredientHeaderIndex &&
+      /^(processo|method|directions?|instructions?|modo de preparo|preparação|preparo|steps?|modo de fazer|how to make)[:]?$/i.test(
+        line
+      )
+  );
+
+  const scopedLines =
+    ingredientHeaderIndex >= 0
+      ? lines.slice(
+          ingredientHeaderIndex + 1,
+          processHeaderIndex >= 0 ? processHeaderIndex : ingredientHeaderIndex + 1 + 40
+        )
+      : lines;
+
+  return scopedLines
+    .map((line) => expandCommonIngredientShorthand(line))
+    .filter(
+      (line) =>
+        !/^(ingredients?|ingredientes?|ingredienti|zutaten|ingrédients?|to assemble|assembly|for the filling|for serving)[:]?$/i.test(
+          line
+        )
+    )
+    .filter((line) => looksLikeIngredientCaptionLine(line))
+    .filter((line) => !/^#/.test(line))
+    .slice(0, 40);
+}
+
+function dedupeNormalizedLines(lines) {
+  const seen = new Set();
+  const result = [];
+  for (const rawLine of Array.isArray(lines) ? lines : []) {
+    if (typeof rawLine !== "string") continue;
+    const line = rawLine.trim();
+    if (!line) continue;
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(line);
+  }
+  return result;
+}
+
+async function fetchInstagramReelDataFromApify(url) {
+  const token = process.env.APIFY_TOKEN || process.env.APIFY_API_TOKEN;
+  if (!token) {
+    const err = new Error("Instagram extractor is not configured.");
+    err.statusCode = 500;
+    err.code = "INSTAGRAM_EXTRACTOR_NOT_CONFIGURED";
+    throw err;
+  }
+
+  const actorUrl =
+    "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items?timeout=120&maxItems=1&maxTotalChargeUsd=0.02";
+
+  const resp = await fetch(actorUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      username: [url],
+      resultsLimit: 1,
+    }),
+  });
+
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {
+    data = null;
+  }
+
+  if (!resp.ok) {
+    const message =
+      data?.error?.message ||
+      data?.message ||
+      "The Instagram Reel could not be accessed.";
+    const err = new Error(message);
+    err.statusCode = resp.status >= 400 && resp.status < 500 ? 400 : 502;
+    err.code = "INSTAGRAM_EXTRACTOR_FAILED";
+    throw err;
+  }
+
+  const item = Array.isArray(data) ? data[0] : null;
+  if (!item || typeof item !== "object") {
+    const err = new Error("No Instagram Reel data was returned.");
+    err.statusCode = 404;
+    err.code = "INSTAGRAM_REEL_NOT_FOUND";
+    throw err;
+  }
+
+  return item;
+}
+
+async function transcribeInstagramAudio(audioUrl) {
+  if (!audioUrl || typeof audioUrl !== "string") return "";
+
+  try {
+    const response = await fetch(audioUrl, {
+      method: "GET",
+      timeout: 20000,
+      headers: {
+        "User-Agent": "MyCookbookAI/1.0",
+      },
+    });
+
+    if (!response.ok) return "";
+
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (
+      Number.isFinite(contentLength) &&
+      contentLength > INSTAGRAM_TRANSCRIPTION_MAX_BYTES
+    ) {
+      return "";
+    }
+
+    const buffer = await response.buffer();
+    if (!buffer || buffer.length === 0) return "";
+    if (buffer.length > INSTAGRAM_TRANSCRIPTION_MAX_BYTES) return "";
+
+    const audioFile = await toFile(
+      buffer,
+      "instagram-reel-audio.mp4",
+      { type: response.headers.get("content-type") || "audio/mp4" }
+    );
+
+    const transcript = await client.audio.transcriptions.create({
+      file: audioFile,
+      model: "gpt-4o-mini-transcribe",
+    });
+
+    return typeof transcript?.text === "string" ? transcript.text.trim() : "";
+  } catch (err) {
+    console.warn("[Instagram Import] audio transcription skipped", {
+      message: err?.message || String(err),
+    });
+    return "";
+  }
+}
+
+async function buildInstagramRecipeDraft({ reel, measurementSystem }) {
+  const captionIngredientCandidates = extractIngredientCandidatesFromInstagramCaption(
+    reel?.caption || ""
+  );
+  const audioTranscript = await transcribeInstagramAudio(reel?.audioUrl || "");
+  const prompt = `
+You extract structured recipe drafts from Instagram Reels.
+
+Measurement system: ${measurementSystem}
+
+Rules:
+- Return ONLY valid JSON.
+- If this Reel is not clearly a recipe, set "status" to "failed".
+- If recipe information is incomplete but usable, set "status" to "partial".
+- If recipe information is sufficient, set "status" to "complete".
+- Keep "difficulty" as one of: "Easy", "Moderate", "Challenging".
+- Keep "cost" as one of: "Cheap", "Medium", "Expensive".
+- Keep title, ingredients, steps, notes, and warnings in the same language as the Reel caption/source content.
+- Do not translate the recipe into another language.
+- Respect the ${measurementSystem} measurement system and do not mix unit systems.
+- Do not invent very specific quantities unless the Reel strongly implies them.
+- Prefer returning partial with warnings instead of hallucinating.
+- If the caption already contains an ingredient list, preserve all clear ingredient lines instead of summarizing them.
+- Use the audio transcript to recover missing preparation steps when the caption only lists ingredients.
+
+Return exactly this JSON shape:
+{
+  "status": "complete" | "partial" | "failed",
+  "title": "string",
+  "cookingTime": 0,
+  "difficulty": "Easy" | "Moderate" | "Challenging",
+  "servings": 0,
+  "cost": "Cheap" | "Medium" | "Expensive",
+  "ingredients": ["string"],
+  "steps": ["string"],
+  "tags": ["string"],
+  "notes": "string",
+  "warnings": ["string"],
+  "failureReason": "string",
+  "confidence": 0
+}
+
+Instagram Reel data:
+${JSON.stringify(
+    {
+      url: reel.url || reel.inputUrl || "",
+      caption: reel.caption || "",
+      captionIngredientCandidates,
+      hashtags: Array.isArray(reel.hashtags) ? reel.hashtags : [],
+      ownerUsername: reel.ownerUsername || "",
+      ownerFullName: reel.ownerFullName || "",
+      firstComment: reel.firstComment || "",
+      audioTranscript,
+      displayUrl: reel.displayUrl || "",
+      videoDuration: reel.videoDuration || null,
+      audioUrl: reel.audioUrl || "",
+      videoUrl: reel.videoUrl || "",
+      productType: reel.productType || "",
+    },
+    null,
+    2
+  )}
+`;
+
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You turn social media recipe content into structured recipe drafts. Return JSON only.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+  });
+
+  const raw = completion.choices?.[0]?.message?.content || "";
+  const draft = extractStructuredJson(raw, null);
+
+  if (!draft || typeof draft !== "object") {
+    const err = new Error("Failed to extract a valid recipe draft.");
+    err.statusCode = 502;
+    err.code = "INSTAGRAM_DRAFT_PARSE_FAILED";
+    throw err;
+  }
+
+  if (captionIngredientCandidates.length > 0) {
+    const aiIngredients = Array.isArray(draft.ingredients) ? draft.ingredients : [];
+    const mergedIngredients = dedupeNormalizedLines([
+      ...captionIngredientCandidates,
+      ...aiIngredients,
+    ]);
+    draft.ingredients = mergedIngredients;
+  }
+
+  return draft;
+}
+
+function normalizeInstagramDraftResponse(draft, reel) {
+  const status = ["complete", "partial", "failed"].includes(draft?.status)
+    ? draft.status
+    : "failed";
+
+  const warnings = Array.isArray(draft?.warnings)
+    ? draft.warnings.filter((item) => typeof item === "string" && item.trim())
+    : [];
+
+  if (status === "failed") {
+    return {
+      status,
+      warnings,
+      failureReason:
+        typeof draft?.failureReason === "string" && draft.failureReason.trim()
+          ? draft.failureReason.trim()
+          : "We could not extract a reliable recipe from this Instagram Reel.",
+      recipe: null,
+    };
+  }
+
+  const ingredients = Array.isArray(draft?.ingredients)
+    ? draft.ingredients.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
+    : [];
+  const steps = Array.isArray(draft?.steps)
+    ? draft.steps.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
+    : [];
+  const tags = Array.isArray(draft?.tags)
+    ? draft.tags.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()).slice(0, 8)
+    : [];
+
+  if (!ingredients.length || !steps.length) {
+    return {
+      status: "failed",
+      warnings,
+      failureReason:
+        typeof draft?.failureReason === "string" && draft.failureReason.trim()
+          ? draft.failureReason.trim()
+          : "We could not extract enough recipe information from this Instagram Reel.",
+      recipe: null,
+    };
+  }
+
+  return {
+    status,
+    warnings,
+    failureReason: "",
+    recipe: {
+      id: `${Date.now()}`,
+      title:
+        typeof draft?.title === "string" && draft.title.trim()
+          ? draft.title.trim()
+          : "Imported Instagram Recipe",
+      cookingTime:
+        typeof draft?.cookingTime === "number" && Number.isFinite(draft.cookingTime)
+          ? Math.max(0, Math.round(draft.cookingTime))
+          : 0,
+      difficulty: normalizeEnumValue(
+        draft?.difficulty,
+        ["Easy", "Moderate", "Challenging"],
+        "Moderate"
+      ),
+      servings:
+        typeof draft?.servings === "number" && Number.isFinite(draft.servings)
+          ? Math.max(0, Math.round(draft.servings))
+          : 0,
+      cost: normalizeEnumValue(draft?.cost, ["Cheap", "Medium", "Expensive"], "Medium"),
+      ingredients,
+      steps,
+      tags,
+      createdAt: new Date().toISOString(),
+      image: typeof reel?.displayUrl === "string" && reel.displayUrl.trim() ? reel.displayUrl.trim() : undefined,
+      imageUrl:
+        typeof reel?.displayUrl === "string" && reel.displayUrl.trim() ? reel.displayUrl.trim() : undefined,
+      notes:
+        typeof draft?.notes === "string" && draft.notes.trim() ? draft.notes.trim() : "",
+      sourceUrl: reel?.inputUrl || reel?.url || "",
+      sourcePlatform: "instagram",
+      sourceType: "instagram_reel",
+      confidence:
+        typeof draft?.confidence === "number" && Number.isFinite(draft.confidence)
+          ? Math.max(0, Math.min(1, draft.confidence))
+          : status === "complete"
+          ? 0.75
+          : 0.5,
+    },
+  };
+}
+
+function isHighQualityInstagramDraft(normalized) {
+  if (!normalized?.recipe) return false;
+
+  const confidence =
+    typeof normalized.recipe.confidence === "number" &&
+    Number.isFinite(normalized.recipe.confidence)
+      ? normalized.recipe.confidence
+      : 0;
+
+  const ingredientCount = Array.isArray(normalized.recipe.ingredients)
+    ? normalized.recipe.ingredients.filter(
+        (item) => typeof item === "string" && item.trim()
+      ).length
+    : 0;
+  const stepCount = Array.isArray(normalized.recipe.steps)
+    ? normalized.recipe.steps.filter(
+        (item) => typeof item === "string" && item.trim()
+      ).length
+    : 0;
+  const hasTitle =
+    typeof normalized.recipe.title === "string" &&
+    normalized.recipe.title.trim().length >= 4;
+
+  if (!hasTitle || ingredientCount < 3 || stepCount < 2) {
+    return false;
+  }
+
+  if (normalized.status === "complete") {
+    return true;
+  }
+
+  if (confidence >= INSTAGRAM_IMPORT_MIN_CONFIDENCE) {
+    return true;
+  }
+
+  return ingredientCount >= 8 && stepCount >= 4;
+}
+
 // --- Helper: round numbers to a given number of decimals ---
 function roundTo(value, decimals = 1) {
   const factor = Math.pow(10, decimals);
@@ -3988,6 +4438,144 @@ app.post("/importRecipesFromFile", (req, res) => {
       return res.status(payload.statusCode).json(payload.body);
     }
   });
+});
+
+app.post("/extractRecipeDraftFromUrl", async (req, res) => {
+  const rawUrl = typeof req.body?.url === "string" ? req.body.url.trim() : "";
+  const language = normalizeLanguage(req.body?.language);
+  const measurementSystem = normalizeMeasurementSystem(req.body?.measurementSystem);
+
+  if (!rawUrl) {
+    return res.status(400).json({ ok: false, error: "URL is required" });
+  }
+
+  let normalizedUrl;
+  try {
+    normalizedUrl = normalizeSourceUrl(rawUrl);
+  } catch {
+    return res.status(400).json({ ok: false, error: "Invalid URL" });
+  }
+
+  if (!/^https?:\/\//i.test(normalizedUrl)) {
+    return res.status(400).json({ ok: false, error: "Only http:// or https:// URLs are supported" });
+  }
+
+  if (!isInstagramReelUrl(normalizedUrl)) {
+    return res.status(400).json({
+      ok: false,
+      error: "This URL is not a supported Instagram Reel link.",
+      code: "UNSUPPORTED_SOURCE_URL",
+    });
+  }
+
+  try {
+    const reel = await fetchInstagramReelDataFromApify(normalizedUrl);
+    const draft = await buildInstagramRecipeDraft({
+      reel,
+      measurementSystem,
+    });
+    const normalized = normalizeInstagramDraftResponse(draft, reel);
+    const recipeConfidence =
+      typeof normalized?.recipe?.confidence === "number" &&
+      Number.isFinite(normalized.recipe.confidence)
+        ? normalized.recipe.confidence
+        : 0;
+
+    const ctx = getEventContext(req);
+    trackEvent("extract_recipe_draft_from_url", {
+      userId: ctx.userId,
+      deviceId: ctx.deviceId,
+      metadata: {
+        sourceType: "instagram_reel",
+        status: normalized.status,
+        language,
+        hasRecipe: !!normalized.recipe,
+        confidence: recipeConfidence,
+        ownerUsername: reel?.ownerUsername || null,
+      },
+    });
+
+    if (!normalized.recipe) {
+      return res.status(422).json({
+        ok: false,
+        code: "INSTAGRAM_RECIPE_NOT_EXTRACTED",
+        message: normalized.failureReason,
+        status: normalized.status,
+        warnings: normalized.warnings,
+        source: {
+          platform: "instagram",
+          type: "instagram_reel",
+          url: normalizedUrl,
+          ownerUsername: reel?.ownerUsername || null,
+          ownerFullName: reel?.ownerFullName || null,
+        },
+      });
+    }
+
+    if (!isHighQualityInstagramDraft(normalized)) {
+      return res.status(422).json({
+        ok: false,
+        code: "INSTAGRAM_RECIPE_NOT_EXTRACTED",
+        message:
+          "We could not build a reliable enough recipe draft from this Instagram Reel. Try another Reel or create the recipe manually.",
+        status: normalized.status,
+        warnings: normalized.warnings,
+        source: {
+          platform: "instagram",
+          type: "instagram_reel",
+          url: normalizedUrl,
+          ownerUsername: reel?.ownerUsername || null,
+          ownerFullName: reel?.ownerFullName || null,
+        },
+      });
+    }
+
+    const economySpend = await spendCookies({
+      req,
+      amount: ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
+      reason: "import_instagram_reel",
+    });
+
+    if (!economySpend.ok) {
+      return respondNotEnoughCookies(res, {
+        action: "import_instagram_reel",
+        requiredCookies:
+          economySpend.requiredCookies ||
+          ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
+        balance: economySpend.remaining,
+        message: `You need ${ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL} Cookies to import a recipe from an Instagram Reel.`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      status: normalized.status,
+      recipe: normalized.recipe,
+      warnings: normalized.warnings,
+      chargedCookies:
+        economySpend.skipped === true
+          ? 0
+          : ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
+      remainingCookies:
+        typeof economySpend.remaining === "number" ? economySpend.remaining : null,
+      source: {
+        platform: "instagram",
+        type: "instagram_reel",
+        url: normalizedUrl,
+        ownerUsername: reel?.ownerUsername || null,
+        ownerFullName: reel?.ownerFullName || null,
+      },
+    });
+  } catch (err) {
+    console.error("❌ /extractRecipeDraftFromUrl error:", err?.message || err);
+    return res.status(err?.statusCode || 502).json({
+      ok: false,
+      code: err?.code || "INSTAGRAM_RECIPE_EXTRACTION_FAILED",
+      message:
+        err?.message ||
+        "This Instagram Reel could not be accessed. Make sure the link is public and still available.",
+    });
+  }
 });
 
 // Import recipe from URL with layered strategy

@@ -67,7 +67,12 @@ interface Cookbook {
 
 export default function AddRecipe() {
   const { t } = useTranslation();
-  const params = useLocalSearchParams<{ edit?: string; editId?: string; cookbookId?: string }>();
+  const params = useLocalSearchParams<{
+    edit?: string;
+    editId?: string;
+    cookbookId?: string;
+    draftKey?: string;
+  }>();
   const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
 
   const [title, setTitle] = useState("");
@@ -265,6 +270,36 @@ export default function AddRecipe() {
     setSelectedCookbooks(cookbookObjs.map(cb => cb.id));
   }
 
+  function applyDraftRecipe(raw: Partial<Recipe> & { notes?: string }) {
+    const allowedDifficulties = ["Easy", "Moderate", "Challenging"];
+    const allowedCosts = ["Cheap", "Medium", "Expensive"];
+
+    setEditingRecipe(null);
+    setTitle(typeof raw.title === "string" ? raw.title : "");
+    setCookingTime(
+      typeof raw.cookingTime === "number" && Number.isFinite(raw.cookingTime)
+        ? String(raw.cookingTime)
+        : ""
+    );
+    setDifficulty(
+      allowedDifficulties.includes(String(raw.difficulty))
+        ? (raw.difficulty as any)
+        : "Moderate"
+    );
+    setServings(
+      typeof raw.servings === "number" && Number.isFinite(raw.servings)
+        ? String(raw.servings)
+        : ""
+    );
+    setCost(
+      allowedCosts.includes(String(raw.cost)) ? (raw.cost as any) : "Medium"
+    );
+    setIngredients(Array.isArray(raw.ingredients) ? raw.ingredients.join("\n") : "");
+    setSteps(Array.isArray(raw.steps) ? raw.steps.join("\n") : "");
+    setTags(Array.isArray(raw.tags) ? raw.tags.filter(Boolean) : []);
+    setImage(raw.image || (raw as any).imageUrl);
+  }
+
   useEffect(() => {
     const loadForEdit = async () => {
       try {
@@ -294,12 +329,20 @@ export default function AddRecipe() {
           }
           normalizeAndApplyRecipe(recipeToUse);
         }
+        if (params.draftKey) {
+          const rawDraft = await AsyncStorage.getItem(String(params.draftKey));
+          if (rawDraft) {
+            const parsedDraft = JSON.parse(rawDraft);
+            applyDraftRecipe(parsedDraft);
+            await AsyncStorage.removeItem(String(params.draftKey));
+          }
+        }
       } catch (err) {
         console.error("❌ Failed to initialize edit recipe", err);
       }
     };
     loadForEdit();
-  }, [params.editId, params.edit]);
+  }, [params.editId, params.edit, params.draftKey]);
 
   // Load cookbooks from AsyncStorage
   useEffect(() => {

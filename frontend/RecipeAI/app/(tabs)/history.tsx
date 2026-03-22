@@ -28,6 +28,7 @@ import { Ionicons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
 import ImportFileModal from "../../components/ImportFileModal";
 import { useTranslation } from "react-i18next";
+import i18n from "../../i18n";
 import { useAuth } from "../../context/AuthContext";
 import { syncEngine as globalSyncEngine } from "../../lib/sync/SyncEngine";
 import { importRecipesFromFile } from "../../utils/importFromFile";
@@ -150,6 +151,9 @@ export default function History() {
   const [importUrlVisible, setImportUrlVisible] = useState(false);
   const [importUrl, setImportUrl] = useState("");
   const [importing, setImporting] = useState(false);
+  const [importUrlLoadingText, setImportUrlLoadingText] = useState<string | null>(null);
+  const [instagramImportBalance, setInstagramImportBalance] = useState<number | null>(null);
+  const [instagramImportBalanceLoading, setInstagramImportBalanceLoading] = useState(false);
   const [successVisible, setSuccessVisible] = useState(false);
   const [importedRecipe, setImportedRecipe] = useState<Recipe | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -164,10 +168,11 @@ export default function History() {
   const auth = useAuth();
   // Prefer the singleton engine (always available). AuthContext may expose one too.
   const syncEngine = (auth as any)?.syncEngine ?? globalSyncEngine;
+  const INSTAGRAM_REEL_IMPORT_COST = 2;
   // --- Insufficient cookies modal (reuse from AI Kitchen) ---
   const [insufficientModal, setInsufficientModal] = useState<{
     visible: boolean;
-    context: "cookbook";
+    context: "cookbook" | "instagram_reel";
     remaining: number;
   }>({ visible: false, context: "cookbook", remaining: 0 });
 
@@ -213,6 +218,39 @@ export default function History() {
   const openImportFileHelp = useCallback(() => {
     router.push("/import-help" as any);
   }, [router]);
+
+  const isInstagramReelUrl = useCallback((value: string) => {
+    try {
+      const parsed = new URL(value.trim());
+      const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+      return host === "instagram.com" && /^\/reel\/[^/]+/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const getMeasurementSystemForImport = useCallback(async (): Promise<"Metric" | "US"> => {
+    const stored =
+      (await AsyncStorage.getItem("measurement")) ||
+      (await AsyncStorage.getItem("measureSystem"));
+    return stored === "US" ? "US" : "Metric";
+  }, []);
+
+  const buildBackendAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    const currentUser = firebaseAuth.currentUser;
+    const idToken = currentUser ? await currentUser.getIdToken() : null;
+    const deviceId = await getDeviceId().catch(() => null);
+    const userId = currentUser?.uid ?? null;
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-app-env": appEnv,
+    };
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    if (deviceId) headers["x-device-id"] = deviceId;
+    if (userId) headers["x-user-id"] = userId;
+    return headers;
+  }, [appEnv, firebaseAuth.currentUser]);
 
   const handleImportFromFile = useCallback(async () => {
     if (!backendUrl) {
@@ -285,7 +323,10 @@ export default function History() {
     }
   }, [appEnv, backendUrl, syncEngine, t]);
 
-  const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
+  const openInsufficientCookiesModal = async (
+    remaining: number | null | undefined,
+    context: "cookbook" | "instagram_reel" = "cookbook"
+  ) => {
     const rem = typeof remaining === "number" ? remaining : 0;
 
     // Try to fetch catalog offer cookies_5 so we can render it in the same style as Store.
@@ -341,24 +382,12 @@ export default function History() {
       }
     }
 
-    setInsufficientModal({ visible: true, context: "cookbook", remaining: rem });
+    setInsufficientModal({ visible: true, context, remaining: rem });
   };
 
-  const fetchCookieBalanceSafe = async (): Promise<number | null> => {
+  const fetchCookieBalanceSafe = useCallback(async (): Promise<number | null> => {
     try {
-      const currentUser = firebaseAuth.currentUser;
-      const idToken = currentUser ? await currentUser.getIdToken() : null;
-      const deviceId = await getDeviceId().catch(() => null);
-      const userId = currentUser?.uid ?? null;
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "x-app-env": appEnv,
-      };
-      if (idToken) headers.Authorization = `Bearer ${idToken}`;
-      if (deviceId) headers["x-device-id"] = deviceId;
-      if (userId) headers["x-user-id"] = userId;
-
+      const headers = await buildBackendAuthHeaders();
       const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
       if (!res.ok) return null;
       const data = await res.json().catch(() => null);
@@ -367,14 +396,48 @@ export default function History() {
     } catch {
       return null;
     }
-  };
+  }, [backendUrl, buildBackendAuthHeaders]);
 
-  const ensureHasCookiesOrPrompt = async (required: number): Promise<boolean> => {
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadInstagramBalance = async () => {
+      if (!importUrlVisible) {
+        setInstagramImportBalance(null);
+        setInstagramImportBalanceLoading(false);
+        return;
+      }
+
+      const trimmedUrl = importUrl.trim();
+      if (!isInstagramReelUrl(trimmedUrl)) {
+        setInstagramImportBalance(null);
+        setInstagramImportBalanceLoading(false);
+        return;
+      }
+
+      setInstagramImportBalanceLoading(true);
+      const balance = await fetchCookieBalanceSafe();
+      if (!cancelled) {
+        setInstagramImportBalance(balance);
+        setInstagramImportBalanceLoading(false);
+      }
+    };
+
+    loadInstagramBalance();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchCookieBalanceSafe, importUrl, importUrlVisible, isInstagramReelUrl]);
+
+  const ensureHasCookiesOrPrompt = async (
+    required: number,
+    context: "cookbook" | "instagram_reel" = "cookbook"
+  ): Promise<boolean> => {
     const bal = await fetchCookieBalanceSafe();
     // If we can't pre-check (endpoint missing, etc.), don't block the action.
     if (typeof bal !== "number") return true;
     if (bal >= required) return true;
-    await openInsufficientCookiesModal(bal);
+    await openInsufficientCookiesModal(bal, context);
     return false;
   };
   // Use translations for difficulty and cost maps (matching i18n.ts structure)
@@ -1085,6 +1148,11 @@ export default function History() {
                 />
               </TouchableOpacity>
             </View>
+            <Text style={{ color: subText, marginBottom: 10, fontSize: 14, lineHeight: 20 }}>
+              {t("recipes.import_desc", {
+                defaultValue: "Paste a recipe website or Instagram Reel link.",
+              })}
+            </Text>
             <TextInput
               style={[
                 styles.input,
@@ -1097,11 +1165,49 @@ export default function History() {
               placeholder={t("recipes.paste_url")}
               placeholderTextColor={subText}
               value={importUrl}
-              onChangeText={setImportUrl}
+              onChangeText={(value) => {
+                setImportUrl(value);
+                setImportError(null);
+              }}
               editable={!importing}
               autoCapitalize="none"
               autoCorrect={false}
             />
+            {isInstagramReelUrl(importUrl.trim()) ? (
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: border,
+                  borderRadius: 10,
+                  padding: 12,
+                  marginBottom: 10,
+                  backgroundColor: bg !== "#fff" ? "#ffffff10" : "#F8F5F1",
+                }}
+              >
+                <Text style={{ color: text, fontWeight: "700", marginBottom: 4 }}>
+                  {t("recipes.instagram_reel_import_inline_title", {
+                    defaultValue: "Instagram Reel import",
+                  })}
+                </Text>
+                <Text style={{ color: subText, lineHeight: 19 }}>
+                  {t("recipes.instagram_reel_import_confirm_body", {
+                    count: INSTAGRAM_REEL_IMPORT_COST,
+                    defaultValue:
+                      "Importing a recipe from an Instagram Reel costs {{count}} Cookies. We will only charge you if we create a high-quality draft.",
+                  })}
+                </Text>
+                <Text style={{ color: subText, marginTop: 8, fontWeight: "600" }}>
+                  {instagramImportBalanceLoading
+                    ? t("economy.loading_balance", {
+                        defaultValue: "Checking your Cookies...",
+                      })
+                    : t("economy.current_balance_short", {
+                        count: instagramImportBalance ?? 0,
+                        defaultValue: "You have {{count}} Cookies.",
+                      })}
+                </Text>
+              </View>
+            ) : null}
             {importError ? (
               <Text style={{ color: "#E27D60", marginBottom: 6, fontSize: 13 }}>
                 {importError}
@@ -1120,28 +1226,105 @@ export default function History() {
               onPress={async () => {
                 setImportError(null);
                 setImporting(true);
+                setImportUrlLoadingText(
+                  t("recipes.url_import_progress_fetching", {
+                    defaultValue: "Fetching recipe...",
+                  })
+                );
                 const baseUrl = API_BASE_URL;
                 if (!baseUrl) {
                   setImportError("Backend URL is not configured.");
                   setImporting(false);
+                  setImportUrlLoadingText(null);
                   return;
                 }
                 try {
-                  const res = await fetch(`${baseUrl}/importRecipeFromUrl`, {
+                  const trimmedUrl = importUrl.trim();
+                  const isInstagram = isInstagramReelUrl(trimmedUrl);
+                  const language = i18n.language || "en";
+                  const measurementSystem = await getMeasurementSystemForImport();
+                  const headers = await buildBackendAuthHeaders();
+
+                  if (isInstagram) {
+                    const hasCookies = await ensureHasCookiesOrPrompt(
+                      INSTAGRAM_REEL_IMPORT_COST,
+                      "instagram_reel"
+                    );
+                    if (!hasCookies) {
+                      setImporting(false);
+                      setImportUrlLoadingText(null);
+                      return;
+                    }
+                  }
+
+                  if (isInstagram) {
+                    setImportUrlLoadingText(
+                      t("recipes.url_import_progress_analyzing_reel", {
+                        defaultValue: "Analyzing Instagram Reel...",
+                      })
+                    );
+                  }
+
+                  const endpoint = isInstagram
+                    ? `${baseUrl}/extractRecipeDraftFromUrl`
+                    : `${baseUrl}/importRecipeFromUrl`;
+
+                  const res = await fetch(endpoint, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: importUrl }),
+                    headers,
+                    body: JSON.stringify(
+                      isInstagram
+                        ? { url: trimmedUrl, language, measurementSystem }
+                        : { url: trimmedUrl }
+                    ),
                   });
                   if (!res.ok) {
                     let errMsg = t("recipes.invalid_import"); // default translated message
                     try {
                       const errData = await res.json();
-                      if (errData && errData.errorCode) {
-                        if (errData.errorCode === "INVALID_RECIPE_STRUCTURE") {
-                          errMsg = t("recipes.invalid_import");
+                      if (
+                        isInstagram &&
+                        res.status === 402 &&
+                        (errData?.code === "ECON_NOT_ENOUGH_COOKIES" ||
+                          errData?.error === "insufficient_cookies")
+                      ) {
+                        setInstagramImportBalance(
+                          typeof errData?.remaining === "number"
+                            ? errData.remaining
+                            : 0
+                        );
+                        await openInsufficientCookiesModal(
+                          typeof errData?.remaining === "number"
+                            ? errData.remaining
+                            : null,
+                          "instagram_reel"
+                        );
+                        setImporting(false);
+                        setImportUrlLoadingText(null);
+                        return;
+                      }
+                      if (errData && (errData.errorCode || errData.code)) {
+                        if (
+                          errData.errorCode === "INVALID_RECIPE_STRUCTURE" ||
+                          errData.code === "INSTAGRAM_RECIPE_NOT_EXTRACTED"
+                        ) {
+                          errMsg =
+                            errData.code === "INSTAGRAM_RECIPE_NOT_EXTRACTED"
+                              ? t("recipes.invalid_instagram_import", {
+                                  defaultValue:
+                                    "We could not build a reliable recipe draft from this Instagram Reel. Try another Reel or edit the recipe manually.",
+                                })
+                              : t("recipes.invalid_import");
+                        } else if (errData.code === "UNSUPPORTED_SOURCE_URL") {
+                          errMsg = t("recipes.invalid_instagram_reel_url", {
+                            defaultValue:
+                              "This Instagram link is not a supported Reel URL.",
+                          });
                         }
                       } else if (errData && errData.error) {
                         errMsg = errData.error; // fallback to any raw message
+                      } else if (errData && errData.message) {
+                        errMsg = errData.message;
                       }
                     } catch (_) {
                       // ignore JSON parse errors
@@ -1152,6 +1335,20 @@ export default function History() {
                   }
                   const data = await res.json();
                   const recipe = data.recipe;
+
+                  if (isInstagram) {
+                    setImportUrlLoadingText(
+                      t("recipes.url_import_progress_opening_review", {
+                        defaultValue: "Opening recipe review...",
+                      })
+                    );
+                    const draftKey = "pending_import_recipe_draft";
+                    await AsyncStorage.setItem(draftKey, JSON.stringify(recipe));
+                    setImportUrl("");
+                    setImportUrlVisible(false);
+                    router.push({ pathname: "/add-recipe", params: { draftKey } } as any);
+                    return;
+                  }
 
                   const stored = await AsyncStorage.getItem("recipes");
                   let parsed = stored ? JSON.parse(stored) : [];
@@ -1206,6 +1403,7 @@ export default function History() {
                   setImportUrl("");
                 } finally {
                   setImporting(false);
+                  setImportUrlLoadingText(null);
                 }
               }}
             >
@@ -1213,12 +1411,18 @@ export default function History() {
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
                   <Ionicons name="reload" size={18} color="#fff" style={{ marginRight: 8 }} />
                   <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 15 }}>
-                    Importing...
+                    {importUrlLoadingText ||
+                      t("recipes.importing", { defaultValue: "Importing..." })}
                   </Text>
                 </View>
               ) : (
                 <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 16 }}>
-                  {t("recipes.import_button")}
+                  {isInstagramReelUrl(importUrl.trim())
+                    ? t("recipes.instagram_reel_import_button", {
+                        count: INSTAGRAM_REEL_IMPORT_COST,
+                        defaultValue: "Proceed for {{count}} Cookies",
+                      })
+                    : t("recipes.import_button")}
                 </Text>
               )}
             </TouchableOpacity>
@@ -1488,10 +1692,16 @@ export default function History() {
             </Text>
 
             <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}> 
-              {t("economy.insufficient_cookbook_body_short", {
-                remaining: insufficientModal.remaining,
-                defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
-              })}
+              {insufficientModal.context === "instagram_reel"
+                ? t("economy.insufficient_instagram_reel_body_short", {
+                    count: INSTAGRAM_REEL_IMPORT_COST,
+                    remaining: insufficientModal.remaining,
+                    defaultValue: `You need ${INSTAGRAM_REEL_IMPORT_COST} Cookies to import a recipe from an Instagram Reel. You have ${insufficientModal.remaining}.`,
+                  })
+                : t("economy.insufficient_cookbook_body_short", {
+                    remaining: insufficientModal.remaining,
+                    defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
+                  })}
             </Text>
 
             {/* Offer card (cookies_5) in Store-like style */}
