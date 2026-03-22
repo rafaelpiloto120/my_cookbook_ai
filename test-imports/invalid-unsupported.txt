@@ -1,0 +1,2 @@
+This is not a supported import format.
+It should fail before parsing because the extension is not allowed.

@@ -18,6 +18,7 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
 import AppButton from "../../components/AppButton";
+import ImportFileModal from "../../components/ImportFileModal";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
 
@@ -27,6 +28,7 @@ import { storage } from "../../firebaseConfig";
 import { ref, deleteObject } from "firebase/storage";
 import { useAuth } from "../../context/AuthContext";
 import { syncEngine as syncEngineSingleton } from "../../lib/sync/SyncEngine";
+import { importRecipesFromFile } from "../../utils/importFromFile";
 
 
 const difficultyMap = (t: any) => ({
@@ -81,6 +83,9 @@ export default function CookbookDetail() {
   const [importUrl, setImportUrl] = useState("");
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState("");
+  const [importFileVisible, setImportFileVisible] = useState(false);
+  const [importFileLoading, setImportFileLoading] = useState(false);
+  const [importFileError, setImportFileError] = useState("");
 
   // Success Modal for import
   const [successVisible, setSuccessVisible] = useState(false);
@@ -117,6 +122,66 @@ export default function CookbookDetail() {
     };
     load();
   }, [id, editVisible]); // reload if edited
+
+  const openImportFileHelp = () => {
+    router.push("/import-help" as any);
+  };
+
+  const handleImportFromFile = async () => {
+    if (!backendUrl) {
+      setImportFileError(
+        t("recipes.file_import_error_backend_missing", {
+          defaultValue: "Backend URL is not configured.",
+        })
+      );
+      return;
+    }
+
+    setImportFileError("");
+    setImportFileLoading(true);
+    try {
+      const result = await importRecipesFromFile({
+        backendUrl,
+        appEnv,
+        cookbook: {
+          id: String(id),
+          name: cookbookName,
+        },
+        syncEngine,
+      });
+
+      const storedRecipes = await AsyncStorage.getItem("recipes");
+      const parsedRecipes = storedRecipes ? JSON.parse(storedRecipes) : [];
+      const filtered = parsedRecipes.filter((r: any) => {
+        if (r?.isDeleted) return false;
+        if (!Array.isArray(r.cookbooks)) return false;
+        return r.cookbooks.some(
+          (cb: any) =>
+            (typeof cb === "string" && cb === id) ||
+            (typeof cb === "object" && cb.id === id)
+        );
+      });
+      setRecipes(filtered);
+      setImportFileVisible(false);
+
+      Alert.alert(
+        t("recipes.import_from_file", { defaultValue: "Import from File / App" }),
+        t("recipes.file_import_success", {
+          defaultValue: "Imported {{count}} recipes successfully.",
+          count: result.count,
+        })
+      );
+    } catch (err: any) {
+      setImportFileError(
+        err?.message ||
+          t("recipes.file_import_failed", {
+            defaultValue: "The selected file could not be imported.",
+          })
+      );
+    } finally {
+      setImportFileLoading(false);
+    }
+  };
 
   // Ensure we have a Firebase auth user (real or anonymous) and return uid + ID token
   const ensureAuthUid = async (): Promise<{ uid: string; token: string } | null> => {
@@ -820,8 +885,9 @@ export default function CookbookDetail() {
                 style={styles.addOptionRow}
                 onPress={() => {
                   setAddVisible(false);
+                  setImportFileError("");
                   setTimeout(() => {
-                    Alert.alert(t("common.coming_soon"), t("common.coming_soon_desc") || "Import from file or app is not yet available.");
+                    setImportFileVisible(true);
                   }, 200);
                 }}
                 activeOpacity={0.8}
@@ -839,6 +905,24 @@ export default function CookbookDetail() {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <ImportFileModal
+        visible={importFileVisible}
+        onClose={() => {
+          if (!importFileLoading) {
+            setImportFileVisible(false);
+            setImportFileError("");
+          }
+        }}
+        onImport={handleImportFromFile}
+        onHelpPress={openImportFileHelp}
+        loading={importFileLoading}
+        error={importFileError || null}
+        cardColor={card}
+        textColor={text}
+        subTextColor={subText}
+        borderColor={border}
+      />
 
       {/* Import from URL Modal */}
       <Modal visible={importUrlVisible} transparent animationType="fade">

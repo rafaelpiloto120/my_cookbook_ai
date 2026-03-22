@@ -653,7 +653,10 @@ const scaleIngredient = (ingredient: string) => {
   // This helper attempts to find numbers in the ingredient string and scale them
   // For example: "2 cups flour" with servings 4 and base servings 2 => "4 cups flour"
   if (!currentRecipe) return ingredient;
-  const baseServings = currentRecipe.servings;
+  const baseServings =
+    typeof currentRecipe.servings === "number" && currentRecipe.servings > 0
+      ? currentRecipe.servings
+      : 1;
   if (baseServings === servings) return ingredient;
 
   return ingredient.replace(/(\d+(\.\d+)?)/g, (match) => {

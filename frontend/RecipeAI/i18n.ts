@@ -314,6 +314,61 @@ const resources = {
         import_from_image_sub: "Upload a photo of a recipe",
         import_from_file: "Import from File/App",
         import_from_file_sub: "Upload from file or another app",
+        file_import_description:
+          "Import recipes from a supported backup or export file. Choose one file from your device. If the file is invalid, no recipes will be imported.",
+        file_import_help_link: "How to export from supported apps",
+        file_import_success: "Imported {{count}} recipes successfully.",
+        file_import_failed: "The selected file could not be imported.",
+        file_import_error_backend_missing: "Backend URL is not configured.",
+        file_import_error_no_file: "No file was selected.",
+        file_import_error_unsupported:
+          "Unsupported file type. Supported formats are .rtk, .paprikarecipes, .zip, .html, and .csv.",
+        file_import_error_too_large:
+          "This file is too large. The maximum supported size is 25 MB.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Recipe Backup (.zip)",
+        file_import_format_html: "HTML Export (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Import Help",
+        import_help_intro:
+          "Use this guide to export recipes from supported apps and file types, then import the file into MyCookbook AI.",
+        import_help_step_note:
+          "Import one file at a time. If the file is invalid, no recipes will be imported.",
+        import_help_recipe_box_step_1: "Open your application The Recipe Box.",
+        import_help_recipe_box_step_2: "Open the Sync area.",
+        import_help_recipe_box_step_3:
+          'Find the Backup section and press "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Save the exported file to your device or cloud storage.",
+        import_help_recipe_box_step_5:
+          "In MyCookbook AI, open Import from File / App and choose the exported .rtk file.",
+        import_help_paprika_step_1: "Open your application Paprika.",
+        import_help_paprika_step_2: "Open the Settings area.",
+        import_help_paprika_step_3:
+          'Find the Backup & Sync section and press "Export Recipes".',
+        import_help_paprika_step_4:
+          'Keep the option "Unicode names" active and press "Export".',
+        import_help_paprika_step_5:
+          "Save the exported .paprikarecipes file and then choose it in MyCookbook AI.",
+        import_help_zip_body:
+          "Supported ZIP files must be recipe export archives, not generic ZIP files. If you exported a recipe app backup as a ZIP, choose that file directly.",
+        import_help_zip_note:
+          "If the ZIP file is not a recognized recipe export format, import will fail without saving any recipes.",
+        import_help_csv_body_1:
+          "CSV files should include at least these columns: title, ingredients, and steps.",
+        import_help_csv_body_2:
+          "Optional columns: servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "HTML recipe exports work best when they include a clear title, ingredient list, and numbered steps. Standard recipe pages with schema.org recipe markup are also supported.",
+        import_help_tips_title: "Helpful Tips",
+        import_help_tip_1: "Import one file at a time.",
+        import_help_tip_2:
+          "Keep backup filenames and extensions unchanged whenever possible.",
+        import_help_tip_3:
+          "If a cloud storage provider gives an error, download the file locally first and try again.",
+        import_help_tip_4:
+          "If import fails, no recipes are saved, so you can safely try again.",
         paste_url: "Paste the URL of a recipe.",
         import: "Import",
         import_button: "Import",
@@ -726,6 +781,61 @@ const resources = {
         import_from_image_sub: "Sube una foto de una receta",
         import_from_file: "Importar desde archivo/app",
         import_from_file_sub: "Sube desde archivo u otra app",
+        file_import_description:
+          "Importa recetas desde un archivo de copia de seguridad o exportación compatible. Elige un archivo de tu dispositivo. Si el archivo no es válido, no se importará ninguna receta.",
+        file_import_help_link: "Cómo exportar desde las apps compatibles",
+        file_import_success: "Se importaron {{count}} recetas correctamente.",
+        file_import_failed: "No se pudo importar el archivo seleccionado.",
+        file_import_error_backend_missing: "La URL del backend no está configurada.",
+        file_import_error_no_file: "No se seleccionó ningún archivo.",
+        file_import_error_unsupported:
+          "Tipo de archivo no compatible. Los formatos admitidos son .rtk, .paprikarecipes, .zip, .html y .csv.",
+        file_import_error_too_large:
+          "Este archivo es demasiado grande. El tamaño máximo permitido es de 25 MB.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Copia de seguridad de recetas (.zip)",
+        file_import_format_html: "Exportación HTML (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Ayuda de importación",
+        import_help_intro:
+          "Usa esta guía para exportar recetas desde apps y tipos de archivo compatibles, y luego importar el archivo en MyCookbook AI.",
+        import_help_step_note:
+          "Importa un archivo cada vez. Si el archivo no es válido, no se importará ninguna receta.",
+        import_help_recipe_box_step_1: "Abre la aplicación The Recipe Box.",
+        import_help_recipe_box_step_2: "Abre el área Sync.",
+        import_help_recipe_box_step_3:
+          'Busca la sección Backup y pulsa "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Guarda el archivo exportado en tu dispositivo o en el almacenamiento en la nube.",
+        import_help_recipe_box_step_5:
+          "En MyCookbook AI, abre Importar desde archivo/app y elige el archivo .rtk exportado.",
+        import_help_paprika_step_1: "Abre la aplicación Paprika.",
+        import_help_paprika_step_2: "Abre el área Settings.",
+        import_help_paprika_step_3:
+          'Busca la sección Backup & Sync y pulsa "Export Recipes".',
+        import_help_paprika_step_4:
+          'Mantén activada la opción "Unicode names" y pulsa "Export".',
+        import_help_paprika_step_5:
+          "Guarda el archivo .paprikarecipes exportado y luego selecciónalo en MyCookbook AI.",
+        import_help_zip_body:
+          "Los archivos ZIP compatibles deben ser exportaciones de recetas, no archivos ZIP genéricos. Si exportaste una copia de seguridad de una app de recetas como ZIP, elige ese archivo directamente.",
+        import_help_zip_note:
+          "Si el archivo ZIP no es un formato de exportación de recetas reconocido, la importación fallará sin guardar recetas.",
+        import_help_csv_body_1:
+          "Los archivos CSV deben incluir al menos estas columnas: title, ingredients y steps.",
+        import_help_csv_body_2:
+          "Columnas opcionales: servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "Las exportaciones HTML funcionan mejor cuando incluyen un título claro, una lista de ingredientes y pasos numerados. También se admiten páginas de recetas estándar con marcado schema.org.",
+        import_help_tips_title: "Consejos útiles",
+        import_help_tip_1: "Importa un archivo cada vez.",
+        import_help_tip_2:
+          "Mantén los nombres y extensiones de los archivos de copia de seguridad sin cambios siempre que sea posible.",
+        import_help_tip_3:
+          "Si un proveedor de almacenamiento en la nube da error, descarga primero el archivo localmente y vuelve a intentarlo.",
+        import_help_tip_4:
+          "Si la importación falla, no se guardará ninguna receta, así que puedes volver a intentarlo con seguridad.",
         paste_url: "Pega la URL de una receta.",
         import: "Importar",
         import_button: "Importar",
@@ -1141,6 +1251,61 @@ const resources = {
         import_from_image_sub: "Carregue uma foto de uma receita",
         import_from_file: "Importar de ficheiro/app",
         import_from_file_sub: "Carregue de ficheiro ou de outra app",
+        file_import_description:
+          "Importe receitas de um ficheiro de cópia de segurança ou exportação suportado. Escolha um ficheiro do seu dispositivo. Se o ficheiro for inválido, nenhuma receita será importada.",
+        file_import_help_link: "Como exportar a partir das apps suportadas",
+        file_import_success: "{{count}} receitas importadas com sucesso.",
+        file_import_failed: "Não foi possível importar o ficheiro selecionado.",
+        file_import_error_backend_missing: "O URL do backend não está configurado.",
+        file_import_error_no_file: "Nenhum ficheiro foi selecionado.",
+        file_import_error_unsupported:
+          "Tipo de ficheiro não suportado. Os formatos suportados são .rtk, .paprikarecipes, .zip, .html e .csv.",
+        file_import_error_too_large:
+          "Este ficheiro é demasiado grande. O tamanho máximo suportado é 25 MB.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Cópia de segurança de receitas (.zip)",
+        file_import_format_html: "Exportação HTML (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Ajuda de importação",
+        import_help_intro:
+          "Use este guia para exportar receitas de apps e tipos de ficheiro suportados e, depois, importar o ficheiro para o MyCookbook AI.",
+        import_help_step_note:
+          "Importe um ficheiro de cada vez. Se o ficheiro for inválido, nenhuma receita será importada.",
+        import_help_recipe_box_step_1: "Abra a aplicação The Recipe Box.",
+        import_help_recipe_box_step_2: "Abra a área Sync.",
+        import_help_recipe_box_step_3:
+          'Encontre a secção Backup e prima "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Guarde o ficheiro exportado no seu dispositivo ou no armazenamento em nuvem.",
+        import_help_recipe_box_step_5:
+          "No MyCookbook AI, abra Importar de ficheiro/app e escolha o ficheiro .rtk exportado.",
+        import_help_paprika_step_1: "Abra a aplicação Paprika.",
+        import_help_paprika_step_2: "Abra a área Settings.",
+        import_help_paprika_step_3:
+          'Encontre a secção Backup & Sync e prima "Export Recipes".',
+        import_help_paprika_step_4:
+          'Mantenha a opção "Unicode names" ativa e prima "Export".',
+        import_help_paprika_step_5:
+          "Guarde o ficheiro .paprikarecipes exportado e depois selecione-o no MyCookbook AI.",
+        import_help_zip_body:
+          "Os ficheiros ZIP suportados devem ser exportações de receitas, e não ficheiros ZIP genéricos. Se exportou uma cópia de segurança de uma app de receitas em ZIP, escolha esse ficheiro diretamente.",
+        import_help_zip_note:
+          "Se o ficheiro ZIP não for um formato de exportação de receitas reconhecido, a importação falhará sem guardar receitas.",
+        import_help_csv_body_1:
+          "Os ficheiros CSV devem incluir pelo menos estas colunas: title, ingredients e steps.",
+        import_help_csv_body_2:
+          "Colunas opcionais: servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "As exportações HTML funcionam melhor quando incluem um título claro, uma lista de ingredientes e passos numerados. As páginas de receitas padrão com marcação schema.org também são suportadas.",
+        import_help_tips_title: "Sugestões úteis",
+        import_help_tip_1: "Importe um ficheiro de cada vez.",
+        import_help_tip_2:
+          "Mantenha os nomes e extensões dos ficheiros de cópia de segurança inalterados sempre que possível.",
+        import_help_tip_3:
+          "Se um fornecedor de armazenamento em nuvem der erro, transfira primeiro o ficheiro para o dispositivo e tente novamente.",
+        import_help_tip_4:
+          "Se a importação falhar, nenhuma receita será guardada, por isso pode tentar novamente com segurança.",
         paste_url: "Cole o URL de uma receita.",
         import: "Importar",
         import_button: "Importar",
@@ -1558,6 +1723,61 @@ const resources = {
         import_from_image_sub: "Envie uma foto de uma receita",
         import_from_file: "Importar de arquivo/app",
         import_from_file_sub: "Envie de arquivo ou de outro app",
+        file_import_description:
+          "Importe receitas de um arquivo de backup ou exportação compatível. Escolha um arquivo do seu dispositivo. Se o arquivo for inválido, nenhuma receita será importada.",
+        file_import_help_link: "Como exportar dos apps compatíveis",
+        file_import_success: "{{count}} receitas importadas com sucesso.",
+        file_import_failed: "Não foi possível importar o arquivo selecionado.",
+        file_import_error_backend_missing: "A URL do backend não está configurada.",
+        file_import_error_no_file: "Nenhum arquivo foi selecionado.",
+        file_import_error_unsupported:
+          "Tipo de arquivo não suportado. Os formatos compatíveis são .rtk, .paprikarecipes, .zip, .html e .csv.",
+        file_import_error_too_large:
+          "Este arquivo é muito grande. O tamanho máximo suportado é 25 MB.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Backup de receitas (.zip)",
+        file_import_format_html: "Exportação HTML (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Ajuda de importação",
+        import_help_intro:
+          "Use este guia para exportar receitas de apps e tipos de arquivo compatíveis e depois importar o arquivo para o MyCookbook AI.",
+        import_help_step_note:
+          "Importe um arquivo por vez. Se o arquivo for inválido, nenhuma receita será importada.",
+        import_help_recipe_box_step_1: "Abra o aplicativo The Recipe Box.",
+        import_help_recipe_box_step_2: "Abra a área Sync.",
+        import_help_recipe_box_step_3:
+          'Encontre a seção Backup e toque em "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Salve o arquivo exportado no seu dispositivo ou no armazenamento em nuvem.",
+        import_help_recipe_box_step_5:
+          "No MyCookbook AI, abra Importar de arquivo/app e escolha o arquivo .rtk exportado.",
+        import_help_paprika_step_1: "Abra o aplicativo Paprika.",
+        import_help_paprika_step_2: "Abra a área Settings.",
+        import_help_paprika_step_3:
+          'Encontre a seção Backup & Sync e toque em "Export Recipes".',
+        import_help_paprika_step_4:
+          'Mantenha a opção "Unicode names" ativa e toque em "Export".',
+        import_help_paprika_step_5:
+          "Salve o arquivo .paprikarecipes exportado e depois selecione-o no MyCookbook AI.",
+        import_help_zip_body:
+          "Os arquivos ZIP compatíveis devem ser exportações de receitas, e não arquivos ZIP genéricos. Se você exportou um backup de um app de receitas em ZIP, escolha esse arquivo diretamente.",
+        import_help_zip_note:
+          "Se o arquivo ZIP não for um formato de exportação de receitas reconhecido, a importação falhará sem salvar nenhuma receita.",
+        import_help_csv_body_1:
+          "Os arquivos CSV devem incluir pelo menos estas colunas: title, ingredients e steps.",
+        import_help_csv_body_2:
+          "Colunas opcionais: servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "As exportações HTML funcionam melhor quando incluem um título claro, uma lista de ingredientes e passos numerados. Páginas de receitas padrão com marcação schema.org também são suportadas.",
+        import_help_tips_title: "Dicas úteis",
+        import_help_tip_1: "Importe um arquivo por vez.",
+        import_help_tip_2:
+          "Mantenha os nomes e extensões dos arquivos de backup inalterados sempre que possível.",
+        import_help_tip_3:
+          "Se um provedor de armazenamento em nuvem apresentar erro, baixe primeiro o arquivo localmente e tente novamente.",
+        import_help_tip_4:
+          "Se a importação falhar, nenhuma receita será salva, então você pode tentar novamente com segurança.",
         paste_url: "Cole a URL de uma receita.",
         import: "Importar",
         import_button: "Importar",
@@ -1973,6 +2193,61 @@ const resources = {
         import_from_image_sub: "Téléchargez une photo d'une recette",
         import_from_file: "Importer depuis un fichier/app",
         import_from_file_sub: "Téléchargez depuis un fichier ou une autre app",
+        file_import_description:
+          "Importez des recettes depuis un fichier de sauvegarde ou d’export compatible. Choisissez un fichier sur votre appareil. Si le fichier est invalide, aucune recette ne sera importée.",
+        file_import_help_link: "Comment exporter depuis les apps prises en charge",
+        file_import_success: "{{count}} recettes importées avec succès.",
+        file_import_failed: "Le fichier sélectionné n’a pas pu être importé.",
+        file_import_error_backend_missing: "L’URL du backend n’est pas configurée.",
+        file_import_error_no_file: "Aucun fichier n’a été sélectionné.",
+        file_import_error_unsupported:
+          "Type de fichier non pris en charge. Les formats pris en charge sont .rtk, .paprikarecipes, .zip, .html et .csv.",
+        file_import_error_too_large:
+          "Ce fichier est trop volumineux. La taille maximale prise en charge est de 25 Mo.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Sauvegarde de recettes (.zip)",
+        file_import_format_html: "Export HTML (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Aide à l’importation",
+        import_help_intro:
+          "Utilisez ce guide pour exporter des recettes depuis les apps et formats de fichier pris en charge, puis importez le fichier dans MyCookbook AI.",
+        import_help_step_note:
+          "Importez un seul fichier à la fois. Si le fichier est invalide, aucune recette ne sera importée.",
+        import_help_recipe_box_step_1: "Ouvrez l’application The Recipe Box.",
+        import_help_recipe_box_step_2: "Ouvrez la zone Sync.",
+        import_help_recipe_box_step_3:
+          'Trouvez la section Backup et appuyez sur "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Enregistrez le fichier exporté sur votre appareil ou dans un service de stockage cloud.",
+        import_help_recipe_box_step_5:
+          "Dans MyCookbook AI, ouvrez Importer depuis un fichier/app et choisissez le fichier .rtk exporté.",
+        import_help_paprika_step_1: "Ouvrez l’application Paprika.",
+        import_help_paprika_step_2: "Ouvrez la zone Settings.",
+        import_help_paprika_step_3:
+          'Trouvez la section Backup & Sync et appuyez sur "Export Recipes".',
+        import_help_paprika_step_4:
+          'Gardez l’option "Unicode names" activée et appuyez sur "Export".',
+        import_help_paprika_step_5:
+          "Enregistrez le fichier .paprikarecipes exporté puis sélectionnez-le dans MyCookbook AI.",
+        import_help_zip_body:
+          "Les fichiers ZIP pris en charge doivent être des archives d’export de recettes, et non des fichiers ZIP génériques. Si vous avez exporté une sauvegarde d’une app de recettes en ZIP, choisissez directement ce fichier.",
+        import_help_zip_note:
+          "Si le fichier ZIP n’est pas un format d’export de recettes reconnu, l’importation échouera sans enregistrer de recettes.",
+        import_help_csv_body_1:
+          "Les fichiers CSV doivent inclure au minimum ces colonnes : title, ingredients et steps.",
+        import_help_csv_body_2:
+          "Colonnes facultatives : servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "Les exports HTML fonctionnent mieux lorsqu’ils contiennent un titre clair, une liste d’ingrédients et des étapes numérotées. Les pages de recettes standard avec balisage schema.org sont également prises en charge.",
+        import_help_tips_title: "Conseils utiles",
+        import_help_tip_1: "Importez un seul fichier à la fois.",
+        import_help_tip_2:
+          "Conservez les noms et extensions des fichiers de sauvegarde inchangés autant que possible.",
+        import_help_tip_3:
+          "Si un service de stockage cloud renvoie une erreur, téléchargez d’abord le fichier localement puis réessayez.",
+        import_help_tip_4:
+          "Si l’importation échoue, aucune recette n’est enregistrée, vous pouvez donc réessayer en toute sécurité.",
         paste_url: "Collez l’URL d’une recette.",
         import: "Importer",
         import_button: "Importer",
@@ -2388,6 +2663,61 @@ const resources = {
         import_from_image_sub: "Laden Sie ein Foto eines Rezepts hoch",
         import_from_file: "Aus Datei/App importieren",
         import_from_file_sub: "Aus Datei oder einer anderen App hochladen",
+        file_import_description:
+          "Importieren Sie Rezepte aus einer unterstützten Sicherungs- oder Exportdatei. Wählen Sie eine Datei von Ihrem Gerät. Wenn die Datei ungültig ist, werden keine Rezepte importiert.",
+        file_import_help_link: "So exportieren Sie aus unterstützten Apps",
+        file_import_success: "{{count}} Rezepte erfolgreich importiert.",
+        file_import_failed: "Die ausgewählte Datei konnte nicht importiert werden.",
+        file_import_error_backend_missing: "Die Backend-URL ist nicht konfiguriert.",
+        file_import_error_no_file: "Es wurde keine Datei ausgewählt.",
+        file_import_error_unsupported:
+          "Nicht unterstützter Dateityp. Unterstützte Formate sind .rtk, .paprikarecipes, .zip, .html und .csv.",
+        file_import_error_too_large:
+          "Diese Datei ist zu groß. Die maximal unterstützte Größe beträgt 25 MB.",
+        file_import_format_recipe_box: "My Recipe Box (.rtk)",
+        file_import_format_paprika: "Paprika (.paprikarecipes)",
+        file_import_format_backup_zip: "Rezept-Backup (.zip)",
+        file_import_format_html: "HTML-Export (.html, .htm)",
+        file_import_format_csv: "CSV (.csv)",
+        import_help_title: "Importhilfe",
+        import_help_intro:
+          "Verwenden Sie diese Anleitung, um Rezepte aus unterstützten Apps und Dateitypen zu exportieren und die Datei dann in MyCookbook AI zu importieren.",
+        import_help_step_note:
+          "Importieren Sie jeweils nur eine Datei. Wenn die Datei ungültig ist, werden keine Rezepte importiert.",
+        import_help_recipe_box_step_1: "Öffnen Sie die App The Recipe Box.",
+        import_help_recipe_box_step_2: "Öffnen Sie den Bereich Sync.",
+        import_help_recipe_box_step_3:
+          'Suchen Sie den Bereich Backup und tippen Sie auf "Export your backup (.rtk)".',
+        import_help_recipe_box_step_4:
+          "Speichern Sie die exportierte Datei auf Ihrem Gerät oder in einem Cloud-Speicher.",
+        import_help_recipe_box_step_5:
+          "Öffnen Sie in MyCookbook AI Aus Datei/App importieren und wählen Sie die exportierte .rtk-Datei aus.",
+        import_help_paprika_step_1: "Öffnen Sie die App Paprika.",
+        import_help_paprika_step_2: "Öffnen Sie den Bereich Settings.",
+        import_help_paprika_step_3:
+          'Suchen Sie den Bereich Backup & Sync und tippen Sie auf "Export Recipes".',
+        import_help_paprika_step_4:
+          'Lassen Sie die Option "Unicode names" aktiviert und tippen Sie auf "Export".',
+        import_help_paprika_step_5:
+          "Speichern Sie die exportierte .paprikarecipes-Datei und wählen Sie sie dann in MyCookbook AI aus.",
+        import_help_zip_body:
+          "Unterstützte ZIP-Dateien müssen Rezept-Exportarchive sein, keine allgemeinen ZIP-Dateien. Wenn Sie ein Backup einer Rezept-App als ZIP exportiert haben, wählen Sie diese Datei direkt aus.",
+        import_help_zip_note:
+          "Wenn die ZIP-Datei kein erkanntes Rezept-Exportformat ist, schlägt der Import fehl, ohne Rezepte zu speichern.",
+        import_help_csv_body_1:
+          "CSV-Dateien sollten mindestens diese Spalten enthalten: title, ingredients und steps.",
+        import_help_csv_body_2:
+          "Optionale Spalten: servings, cookingTime, difficulty, cost, tags.",
+        import_help_html_body:
+          "HTML-Exporte funktionieren am besten, wenn sie einen klaren Titel, eine Zutatenliste und nummerierte Schritte enthalten. Standard-Rezeptseiten mit schema.org-Markup werden ebenfalls unterstützt.",
+        import_help_tips_title: "Hilfreiche Tipps",
+        import_help_tip_1: "Importieren Sie jeweils nur eine Datei.",
+        import_help_tip_2:
+          "Lassen Sie Dateinamen und Erweiterungen von Sicherungsdateien möglichst unverändert.",
+        import_help_tip_3:
+          "Wenn ein Cloud-Speicheranbieter einen Fehler meldet, laden Sie die Datei zuerst lokal herunter und versuchen Sie es erneut.",
+        import_help_tip_4:
+          "Wenn der Import fehlschlägt, werden keine Rezepte gespeichert, sodass Sie es sicher erneut versuchen können.",
         paste_url: "Fügen Sie die URL eines Rezepts ein.",
         import: "Importieren",
         import_button: "Importieren",

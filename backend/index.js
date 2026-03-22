@@ -40,6 +40,11 @@ import path from "path";
 import he from "he";
 import fs from "fs";
 import { google } from "googleapis";
+import {
+  getSupportedImportFormats,
+  parseImportedRecipes,
+  toImportErrorResponse,
+} from "./importers/index.js";
 
 import admin from "firebase-admin";
 import { Firestore } from "@google-cloud/firestore";
@@ -2499,6 +2504,13 @@ app.post("/sync/recipes", async (req, res) => {
 app.use("/assets", express.static(path.resolve(__dirname, "../frontend/RecipeAI/assets")));
 
 const upload = multer({ storage: multer.memoryStorage() });
+const importUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: getSupportedImportFormats().maxFileSizeBytes,
+    files: 1,
+  },
+});
 
 // ---- Image validation and rate limiting helpers ----
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3 MB
@@ -3918,6 +3930,65 @@ async function handleContactSupport(req, res) {
 // Expose both routes so the frontend can call either
 app.post("/contact-support", handleContactSupport);
 app.post("/support/contact", handleContactSupport);
+
+app.get("/importRecipesFromFile/formats", (req, res) => {
+  return res.json({
+    ok: true,
+    ...getSupportedImportFormats(),
+  });
+});
+
+app.post("/importRecipesFromFile", (req, res) => {
+  importUpload.single("file")(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      console.error("❌ /importRecipesFromFile upload error:", {
+        code: uploadErr?.code ?? null,
+        message: uploadErr?.message ?? String(uploadErr),
+      });
+      const statusCode = uploadErr?.code === "LIMIT_FILE_SIZE" ? 400 : 400;
+      const message =
+        uploadErr?.code === "LIMIT_FILE_SIZE"
+          ? `This file is too large. The maximum supported size is ${Math.round(
+              getSupportedImportFormats().maxFileSizeBytes / (1024 * 1024)
+            )} MB.`
+          : "The selected file could not be uploaded.";
+      return res.status(statusCode).json({
+        ok: false,
+        code: uploadErr?.code === "LIMIT_FILE_SIZE" ? "IMPORT_FILE_TOO_LARGE" : "IMPORT_UPLOAD_FAILED",
+        message,
+      });
+    }
+
+    try {
+      console.log("[/importRecipesFromFile] received file", {
+        originalname: req.file?.originalname ?? null,
+        mimetype: req.file?.mimetype ?? null,
+        size: req.file?.size ?? null,
+      });
+      const result = await parseImportedRecipes(req.file);
+
+      const ctx = getEventContext(req);
+      trackEvent("import_recipes_from_file", {
+        userId: ctx.userId,
+        deviceId: ctx.deviceId,
+        metadata: {
+          format: result.format,
+          count: result.count,
+          filename: req.file?.originalname ?? null,
+        },
+      });
+
+      return res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (err) {
+      const payload = toImportErrorResponse(err);
+      console.error("❌ /importRecipesFromFile error:", err?.message || err);
+      return res.status(payload.statusCode).json(payload.body);
+    }
+  });
+});
 
 // Import recipe from URL with layered strategy
 app.post("/importRecipeFromUrl", async (req, res) => {

@@ -26,9 +26,11 @@ import { useThemeColors } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
 import { Ionicons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
+import ImportFileModal from "../../components/ImportFileModal";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../../context/AuthContext";
 import { syncEngine as globalSyncEngine } from "../../lib/sync/SyncEngine";
+import { importRecipesFromFile } from "../../utils/importFromFile";
 
 const defaultImage = require("../../assets/default_recipe.png");
 
@@ -151,6 +153,9 @@ export default function History() {
   const [successVisible, setSuccessVisible] = useState(false);
   const [importedRecipe, setImportedRecipe] = useState<Recipe | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importFileVisible, setImportFileVisible] = useState(false);
+  const [importFileLoading, setImportFileLoading] = useState(false);
+  const [importFileError, setImportFileError] = useState<string | null>(null);
 
   const router = useRouter();
   const { bg, text, subText, card, border, isDark } = useThemeColors();
@@ -203,6 +208,54 @@ export default function History() {
       router.push("/economy/store" as any);
     }
   };
+
+  const openImportFileHelp = useCallback(() => {
+    router.push("/import-help" as any);
+  }, [router]);
+
+  const handleImportFromFile = useCallback(async () => {
+    if (!backendUrl) {
+      setImportFileError(
+        t("recipes.file_import_error_backend_missing", {
+          defaultValue: "Backend URL is not configured.",
+        })
+      );
+      return;
+    }
+
+    setImportFileError(null);
+    setImportFileLoading(true);
+    try {
+      const result = await importRecipesFromFile({
+        backendUrl,
+        appEnv,
+        syncEngine,
+      });
+
+      const stored = await AsyncStorage.getItem("recipes");
+      const nextRecipes: Recipe[] = stored ? JSON.parse(stored) : [];
+      setRecipes(nextRecipes);
+      setImportFileVisible(false);
+      setImportFileError(null);
+
+      Alert.alert(
+        t("recipes.import_from_file", { defaultValue: "Import from File / App" }),
+        t("recipes.file_import_success", {
+          defaultValue: "Imported {{count}} recipes successfully.",
+          count: result.count,
+        })
+      );
+    } catch (err: any) {
+      setImportFileError(
+        err?.message ||
+          t("recipes.file_import_failed", {
+            defaultValue: "The selected file could not be imported.",
+          })
+      );
+    } finally {
+      setImportFileLoading(false);
+    }
+  }, [appEnv, backendUrl, syncEngine, t]);
 
   const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
     const rem = typeof remaining === "number" ? remaining : 0;
@@ -936,7 +989,8 @@ export default function History() {
               style={styles.addOptionRow}
               onPress={() => {
                 setNewRecipeVisible(false);
-                Alert.alert(t("common.coming_soon"), t("common.coming_soon_desc"));
+                setImportFileError(null);
+                setImportFileVisible(true);
               }}
             >
               <Text style={styles.addOptionEmoji}>📁</Text>
@@ -949,6 +1003,24 @@ export default function History() {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      <ImportFileModal
+        visible={importFileVisible}
+        onClose={() => {
+          if (!importFileLoading) {
+            setImportFileVisible(false);
+            setImportFileError(null);
+          }
+        }}
+        onImport={handleImportFromFile}
+        onHelpPress={openImportFileHelp}
+        loading={importFileLoading}
+        error={importFileError}
+        cardColor={card}
+        textColor={text}
+        subTextColor={subText}
+        borderColor={border}
+      />
 
       {/* Import from URL modal */}
       <Modal visible={importUrlVisible} transparent animationType="fade">
