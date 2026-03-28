@@ -46,6 +46,7 @@ interface Recipe {
   steps: string[];
   tags: string[];
   createdAt: string;
+  updatedAt?: number | string;
   image?: string;
   imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
@@ -71,6 +72,13 @@ const defaultCookbookImagesById: Record<string, string> = {
 
 let difficultyMap: Record<string, string>;
 let costMap: Record<string, string>;
+
+type RecipeSortOption =
+  | "title_asc"
+  | "title_desc"
+  | "updated_desc"
+  | "created_desc"
+  | "created_asc";
 
 function getApiBaseUrl(): string | null {
   const v = process.env.EXPO_PUBLIC_API_URL;
@@ -135,6 +143,8 @@ export default function History() {
 
   // filter modal
   const [filterVisible, setFilterVisible] = useState(false);
+  const [sortVisible, setSortVisible] = useState(false);
+  const [sortBy, setSortBy] = useState<RecipeSortOption>("title_asc");
   const [selectedDifficulties, setSelectedDifficulties] = useState<string[]>([]);
   const [selectedCosts, setSelectedCosts] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -456,6 +466,56 @@ export default function History() {
   // Key for AsyncStorage for scroll position
   const RECIPES_SCROLL_Y_KEY = "recipesScrollY";
 
+  const getRecipeTimestamp = useCallback((value: unknown) => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric;
+      const parsed = new Date(value).getTime();
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return 0;
+  }, []);
+
+  const compareRecipeTitles = useCallback((a: Recipe, b: Recipe) => {
+    return (a.title || "").localeCompare(b.title || "", undefined, {
+      sensitivity: "base",
+    });
+  }, []);
+
+  const sortRecipes = useCallback(
+    (list: Recipe[]) => {
+      const sorted = [...list];
+      sorted.sort((a, b) => {
+        switch (sortBy) {
+          case "title_desc":
+            return compareRecipeTitles(b, a);
+          case "updated_desc":
+            return (
+              getRecipeTimestamp(b.updatedAt ?? b.createdAt) -
+                getRecipeTimestamp(a.updatedAt ?? a.createdAt) ||
+              compareRecipeTitles(a, b)
+            );
+          case "created_desc":
+            return (
+              getRecipeTimestamp(b.createdAt) - getRecipeTimestamp(a.createdAt) ||
+              compareRecipeTitles(a, b)
+            );
+          case "created_asc":
+            return (
+              getRecipeTimestamp(a.createdAt) - getRecipeTimestamp(b.createdAt) ||
+              compareRecipeTitles(a, b)
+            );
+          case "title_asc":
+          default:
+            return compareRecipeTitles(a, b);
+        }
+      });
+      return sorted;
+    },
+    [compareRecipeTitles, getRecipeTimestamp, sortBy]
+  );
+
   // // Clear "recipes" key in AsyncStorage once
   // useEffect(() => {
   //   const clearRecipes = async () => {
@@ -486,9 +546,6 @@ export default function History() {
       const stored = await AsyncStorage.getItem("recipes");
       let parsed = stored ? JSON.parse(stored) : [];
       if (Array.isArray(parsed)) {
-        parsed = parsed.sort(
-          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
         // Normalize each recipe's image property, also supporting legacy keys like imageUrl
         parsed = parsed
           .map((recipe: any) => {
@@ -806,6 +863,35 @@ export default function History() {
     return matchesSearch && matchesDiff && matchesCost && matchesTags;
   });
 
+  const visibleRecipes = sortRecipes(filteredRecipes);
+
+  const sortOptions: { value: RecipeSortOption; label: string }[] = [
+    {
+      value: "title_asc",
+      label: t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" }),
+    },
+    {
+      value: "title_desc",
+      label: t("recipes.sort_alphabetical_desc", { defaultValue: "Alphabetical (Z-A)" }),
+    },
+    {
+      value: "updated_desc",
+      label: t("recipes.sort_recently_updated", { defaultValue: "Recently Updated" }),
+    },
+    {
+      value: "created_desc",
+      label: t("recipes.sort_recently_added", { defaultValue: "Recently Added" }),
+    },
+    {
+      value: "created_asc",
+      label: t("recipes.sort_oldest_added", { defaultValue: "Oldest Added" }),
+    },
+  ];
+
+  const selectedSortLabel =
+    sortOptions.find((option) => option.value === sortBy)?.label ??
+    t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" });
+
   // --- Toggle filter chip
   const toggleFilter = (
     arr: string[],
@@ -875,9 +961,22 @@ export default function History() {
             </TouchableOpacity>
           </View>
 
+          <TouchableOpacity
+            onPress={() => setSortVisible(true)}
+            accessibilityLabel={t("recipes.sort_by", { defaultValue: "Sort by" })}
+            style={styles.sortSummaryButton}
+          >
+            <Text style={[styles.resultMetaText, { color: text }]}>
+              {t("recipes.sort_by_label", {
+                defaultValue: "Sort by: {{value}}",
+                value: selectedSortLabel,
+              })}
+            </Text>
+          </TouchableOpacity>
+
           <FlatList
             ref={listRef}
-            data={filteredRecipes}
+            data={visibleRecipes}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
               <TouchableOpacity
@@ -1612,6 +1711,56 @@ export default function History() {
         </TouchableOpacity>
       </Modal>
 
+      {/* Sort modal */}
+      <Modal visible={sortVisible} transparent animationType="fade">
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPressOut={() => setSortVisible(false)}
+        >
+          <TouchableWithoutFeedback>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>
+                  {t("recipes.sort_by", { defaultValue: "Sort by" })}
+                </Text>
+                <TouchableOpacity onPress={() => setSortVisible(false)}>
+                  <MaterialIcons name="close" size={24} color="#293a53" />
+                </TouchableOpacity>
+              </View>
+              {sortOptions.map((option) => {
+                const isSelected = sortBy === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[
+                      styles.sortOptionRow,
+                      isSelected ? styles.sortOptionRowSelected : null,
+                    ]}
+                    onPress={() => {
+                      setSortBy(option.value);
+                      setSortVisible(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.sortOptionText,
+                        isSelected ? styles.sortOptionTextSelected : null,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {isSelected ? (
+                      <MaterialIcons name="check" size={20} color="#293a53" />
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </TouchableWithoutFeedback>
+        </TouchableOpacity>
+      </Modal>
+
       {/* New Cookbook modal */}
       <Modal visible={newCookbookVisible} transparent animationType="fade">
         <TouchableOpacity
@@ -1965,12 +2114,39 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     marginBottom: 8,
   },
+  resultMetaText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  sortSummaryButton: {
+    alignSelf: "flex-start",
+    marginBottom: 10,
+    marginHorizontal: 16,
+  },
   filterOption: {
     borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 6,
     marginRight: 8,
     marginBottom: 8,
+  },
+  sortOptionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#EAEAEA",
+  },
+  sortOptionRowSelected: {
+    backgroundColor: "#F5F5F5",
+  },
+  sortOptionText: {
+    fontSize: 16,
+    color: "#293a53",
+  },
+  sortOptionTextSelected: {
+    fontWeight: "700",
   },
   input: {
     borderWidth: 1,
