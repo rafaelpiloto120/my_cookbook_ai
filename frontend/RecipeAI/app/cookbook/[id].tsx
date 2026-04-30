@@ -15,9 +15,10 @@ import {
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
-import { MaterialIcons, Ionicons } from "@expo/vector-icons";
+import { MaterialIcons, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
 import AppButton from "../../components/AppButton";
+import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
 import ImportFileModal from "../../components/ImportFileModal";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
@@ -31,17 +32,27 @@ import { useAuth } from "../../context/AuthContext";
 import { syncEngine as syncEngineSingleton } from "../../lib/sync/SyncEngine";
 import { importRecipesFromFile } from "../../utils/importFromFile";
 import { getDeviceId } from "../../utils/deviceId";
+import { getRecipeCaloriesPerServing } from "../../lib/recipes/nutrition";
+import {
+  claimEconomyReward,
+  fetchEconomyCatalogBundle,
+  fetchEconomySnapshot,
+  shouldHidePremiumPricing,
+  writeCachedEconomySnapshot,
+  type EconomyCatalogOffer,
+} from "../../lib/economy/client";
+import {
+  claimRewardKeysSequentially,
+  getRecipeRewardKeysForCount,
+} from "../../lib/economy/rewards";
+import { normalizeRecipeDifficulty } from "../../lib/recipes/difficulty";
+import { getApiBaseUrl } from "../../lib/config/api";
 
 
 const difficultyMap = (t: any) => ({
   Easy: t("difficulty.easy"),
   Moderate: t("difficulty.moderate"),
   Challenging: t("difficulty.challenging"),
-});
-const costMap = (t: any) => ({
-  Cheap: t("cost.cheap"),
-  Medium: t("cost.medium"),
-  Expensive: t("cost.expensive"),
 });
 const defaultImage = require("../../assets/default_recipe.png");
 
@@ -52,20 +63,38 @@ type RecipeSortOption =
   | "created_desc"
   | "created_asc";
 
+type CalorieFilterOption =
+  | "none"
+  | "low"
+  | "medium"
+  | "high";
+
+const FILTER_TAGS_INITIAL_VISIBLE = 12;
+
+function getRecipeCalorieBucket(recipe: any): CalorieFilterOption {
+  const calories = getRecipeCaloriesPerServing(recipe);
+  if (calories === null || !Number.isFinite(calories)) return "none";
+  if (calories < 300) return "low";
+  if (calories <= 600) return "medium";
+  return "high";
+}
+
 export default function CookbookDetail() {
   const { id } = useLocalSearchParams(); // cookbook id from route
   const router = useRouter();
-  const { bg, text, subText, card, border } = useThemeColors();
+  const { bg, text, subText, card, border, isDark } = useThemeColors();
   const { t } = useTranslation();
 
-  const { syncEngine: authSyncEngine } = useAuth();
-  // Some screens can render before AuthContext has finished wiring the engine.
-  // Fallback to the named singleton so we can always persist + sync.
-  const syncEngine = (authSyncEngine ?? syncEngineSingleton) as any;
+  const syncEngine = syncEngineSingleton as any;
 
-  const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
+  const backendUrl = getApiBaseUrl()!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   const INSTAGRAM_REEL_IMPORT_COST = 2;
+  const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
+  const [insufficientModalVisible, setInsufficientModalVisible] = useState(false);
+  const [insufficientCookiesRemaining, setInsufficientCookiesRemaining] = useState(0);
+  const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
+  const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
   console.log("Using backend URL:", backendUrl, "env:", appEnv);
 
   const [cookbookName, setCookbookName] = useState("");
@@ -85,8 +114,10 @@ export default function CookbookDetail() {
   const [sortVisible, setSortVisible] = useState(false);
   const [sortBy, setSortBy] = useState<RecipeSortOption>("title_asc");
   const [selectedDifficulties, setSelectedDifficulties] = useState<string[]>([]);
-  const [selectedCosts, setSelectedCosts] = useState<string[]>([]);
+  const [selectedCalories, setSelectedCalories] = useState<CalorieFilterOption[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [filterTagSearch, setFilterTagSearch] = useState("");
+  const [visibleFilterTagCount, setVisibleFilterTagCount] = useState(FILTER_TAGS_INITIAL_VISIBLE);
 
   // Add Recipe Modal
   const [addVisible, setAddVisible] = useState(false);
@@ -194,40 +225,47 @@ export default function CookbookDetail() {
 
   const fetchCookieBalanceSafe = useCallback(async (): Promise<number | null> => {
     try {
-      const headers = await buildBackendAuthHeaders();
-      const res = await fetch(`${backendUrl}/economy/balance`, {
-        method: "GET",
-        headers,
-      });
-      if (!res.ok) return null;
-      const data = await res.json().catch(() => null);
-      return typeof data?.balance === "number" ? data.balance : null;
+      const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth });
+      if (!snapshot) return null;
+      setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+      await writeCachedEconomySnapshot(auth.currentUser?.uid, snapshot);
+      if (shouldHidePremiumPricing(snapshot.freePremiumActionsRemaining)) return null;
+      return snapshot.balance;
     } catch {
       return null;
     }
-  }, [backendUrl]);
+  }, [backendUrl, appEnv]);
+
+  const openInsufficientCookiesModal = useCallback(
+    async (remaining: number | null | undefined) => {
+      const rem = typeof remaining === "number" ? remaining : 0;
+      if (!featuredOffer || availableRewardsCount === 0) {
+        try {
+          const catalog = await fetchEconomyCatalogBundle({ backendUrl, appEnv, auth });
+          const featured = catalog.offers.find((offer) => String(offer.id).trim() === "cookies_15");
+          if (featured) setFeaturedOffer(featured);
+          setAvailableRewardsCount(
+            Array.isArray(catalog.bonuses)
+              ? catalog.bonuses.filter((bonus) => bonus?.status === "available").length
+              : 0
+          );
+        } catch {
+          // ignore
+        }
+      }
+      setInsufficientCookiesRemaining(rem);
+      setInsufficientModalVisible(true);
+    },
+    [appEnv, auth, availableRewardsCount, backendUrl, featuredOffer]
+  );
 
   const promptInstagramReelCookies = async (): Promise<boolean> => {
     const remaining = await fetchCookieBalanceSafe();
+    if (shouldHidePremiumPricing(freePremiumActionsRemaining)) {
+      return true;
+    }
     if (typeof remaining === "number" && remaining < INSTAGRAM_REEL_IMPORT_COST) {
-      Alert.alert(
-        t("economy.insufficient_title", { defaultValue: "Not enough Cookies" }),
-        t("economy.insufficient_instagram_reel_body_short", {
-          count: INSTAGRAM_REEL_IMPORT_COST,
-          remaining,
-          defaultValue: `You need ${INSTAGRAM_REEL_IMPORT_COST} Cookies to import a recipe from an Instagram Reel. You have ${remaining}.`,
-        }),
-        [
-          {
-            text: t("common.cancel", { defaultValue: "Cancel" }),
-            style: "cancel",
-          },
-          {
-            text: t("economy.get_more_cookies", { defaultValue: "Get more Cookies" }),
-            onPress: () => router.push("/economy/store" as any),
-          },
-        ]
-      );
+      await openInsufficientCookiesModal(remaining);
       return false;
     }
     return true;
@@ -326,6 +364,24 @@ export default function CookbookDetail() {
       });
       setRecipes(filtered);
       setImportFileVisible(false);
+
+      try {
+        if (backendUrl && result.count > 0) {
+          const activeRecipeCount = Array.isArray(parsedRecipes)
+            ? parsedRecipes.filter((item: any) => !item?.isDeleted).length
+            : 0;
+          await claimRewardKeysSequentially(
+            {
+              backendUrl,
+              appEnv,
+              auth,
+            },
+            getRecipeRewardKeysForCount(activeRecipeCount)
+          );
+        }
+      } catch (rewardErr) {
+        console.warn("[Cookbook] file import reward claim failed", rewardErr);
+      }
 
       Alert.alert(
         t("recipes.import_from_file", { defaultValue: "Import from File / App" }),
@@ -457,7 +513,7 @@ export default function CookbookDetail() {
   // --- Save updated cookbook name and image
   const saveCookbookName = async () => {
     if (!newName.trim()) {
-      Alert.alert("Validation", "Please enter a name.");
+      Alert.alert(t("common.validation"), t("recipes.validation_name"));
       return;
     }
     try {
@@ -548,13 +604,16 @@ export default function CookbookDetail() {
   const filteredRecipes = recipes.filter((recipe) => {
     const titleMatch = recipe.title.toLowerCase().includes(search.toLowerCase());
     const difficultyMatch =
-      selectedDifficulties.length === 0 || selectedDifficulties.includes(recipe.difficulty);
-    const costMatch = selectedCosts.length === 0 || selectedCosts.includes(recipe.cost);
+      selectedDifficulties.length === 0 ||
+      selectedDifficulties.includes(normalizeRecipeDifficulty(recipe.difficulty));
+    const caloriesMatch =
+      selectedCalories.length === 0 ||
+      selectedCalories.includes(getRecipeCalorieBucket(recipe));
     const recipeTags = getNormalizedTags(recipe.tags);
     const tagsMatch =
       selectedTags.length === 0 ||
       selectedTags.every((tag) => recipeTags.includes(tag));
-    return titleMatch && difficultyMatch && costMatch && tagsMatch;
+    return titleMatch && difficultyMatch && caloriesMatch && tagsMatch;
   });
 
   const visibleRecipes = [...filteredRecipes].sort((a, b) => {
@@ -610,6 +669,33 @@ export default function CookbookDetail() {
     sortOptions.find((option) => option.value === sortBy)?.label ??
     t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" });
 
+  const calorieFilterOptions: { value: CalorieFilterOption; label: string }[] = [
+    {
+      value: "none",
+      label: t("recipes.calories_filter_none", {
+        defaultValue: "No calories",
+      }),
+    },
+    {
+      value: "low",
+      label: t("recipes.calories_filter_low", {
+        defaultValue: "Low (<300 kcal)",
+      }),
+    },
+    {
+      value: "medium",
+      label: t("recipes.calories_filter_medium", {
+        defaultValue: "Medium (300-600 kcal)",
+      }),
+    },
+    {
+      value: "high",
+      label: t("recipes.calories_filter_high", {
+        defaultValue: "High (>600 kcal)",
+      }),
+    },
+  ];
+
   // Collect all tags from recipes for filter chips
   const allTags = Array.from(
     new Set(
@@ -619,11 +705,19 @@ export default function CookbookDetail() {
       }, [])
     )
   ).sort();
+  const filteredTagOptions = allTags.filter((tag) =>
+    tag.toLowerCase().includes(filterTagSearch.trim().toLowerCase())
+  );
+  const visibleTagOptions =
+    filterTagSearch.trim().length > 0
+      ? filteredTagOptions
+      : filteredTagOptions.slice(0, visibleFilterTagCount);
 
-  const difficulties = ["Easy", "Medium", "Hard"];
-  const costs = ["Low", "Medium", "High"];
-
-  const toggleSelection = (item: string, selected: string[], setSelected: (v: string[]) => void) => {
+  const toggleSelection = <T extends string>(
+    item: T,
+    selected: T[],
+    setSelected: (v: T[]) => void
+  ) => {
     if (selected.includes(item)) {
       setSelected(selected.filter((i) => i !== item));
     } else {
@@ -765,7 +859,7 @@ export default function CookbookDetail() {
           <Text style={{ color: subText, marginBottom: 8 }}>
             {t("recipes.no_recipes")}
           </Text>
-          <TouchableOpacity onPress={() => router.push("/(tabs)/")}>
+          <TouchableOpacity onPress={() => router.push("/")}>
             <Text style={{ color: "#E27D60", fontWeight: "600" }}>
               {t("recipes.create_in_ai_kitchen")}
             </Text>
@@ -781,8 +875,8 @@ export default function CookbookDetail() {
               <TouchableOpacity
                 onPress={() =>
                   router.push({
-                    pathname: `/recipe/${item.id}`,
-                    params: { from: `cookbook:${id}` },
+                    pathname: "/recipe/[id]",
+                    params: { id: item.id, from: `cookbook:${id}` },
                   })
                 }
               >
@@ -808,9 +902,23 @@ export default function CookbookDetail() {
                         <MaterialIcons name="delete-outline" size={22} color={subText} />
                       </TouchableOpacity>
                     </View>
-                    <Text style={{ color: subText }}>
-                      ⏱ {item.cookingTime} min • {difficultyMap(t)[item.difficulty] || item.difficulty} • {costMap(t)[item.cost] || item.cost}
-                    </Text>
+                    <View style={styles.metaRow}>
+                      <Text style={[styles.metaText, { color: subText }]}>
+                        {`⏱ ${item.cookingTime} min`}
+                      </Text>
+                      <Text style={[styles.metaText, { color: subText }]}>
+                        {difficultyMap(t)[normalizeRecipeDifficulty(item.difficulty)] ||
+                          normalizeRecipeDifficulty(item.difficulty)}
+                      </Text>
+                      {getRecipeCaloriesPerServing(item) !== null ? (
+                        <View style={styles.metaCalories}>
+                          <MaterialCommunityIcons name="fire" size={14} color="#E27D60" />
+                          <Text style={[styles.metaText, { color: subText }]}>
+                            {`${Math.round(getRecipeCaloriesPerServing(item) as number)} kcal`}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
                     {recipeTags.length > 0 && (
                       <View style={styles.tagRow}>
                         {recipeTags.map((tag) => (
@@ -948,27 +1056,31 @@ export default function CookbookDetail() {
                   ))}
                 </View>
 
-                <Text style={styles.modalSubtitle}>{t("recipes.cost")}</Text>
+                <Text style={styles.modalSubtitle}>
+                  {t("recipes.calories", { defaultValue: "Calories" })}
+                </Text>
                 <View style={styles.filterRow}>
-                  {Object.entries(costMap(t)).map(([key, label]) => (
+                  {calorieFilterOptions.map((option) => (
                     <TouchableOpacity
-                      key={key}
+                      key={option.value}
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedCosts.includes(key)
+                          backgroundColor: selectedCalories.includes(option.value)
                             ? "#293a53"
                             : "#E0E0E0",
                         },
                       ]}
-                      onPress={() => toggleSelection(key, selectedCosts, setSelectedCosts)}
+                      onPress={() =>
+                        toggleSelection(option.value, selectedCalories, setSelectedCalories)
+                      }
                     >
                       <Text
                         style={{
-                          color: selectedCosts.includes(key) ? "#fff" : "#000",
+                          color: selectedCalories.includes(option.value) ? "#fff" : "#000",
                         }}
                       >
-                        {label}
+                        {option.label}
                       </Text>
                     </TouchableOpacity>
                   ))}
@@ -977,8 +1089,18 @@ export default function CookbookDetail() {
                 {allTags.length > 0 && (
                   <>
                     <Text style={styles.modalSubtitle}>{t("recipes.tags")}</Text>
+                    <TextInput
+                      style={[styles.input, styles.filterSearchInput, { borderColor: border, color: text }]}
+                      placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
+                      placeholderTextColor={subText}
+                      value={filterTagSearch}
+                      onChangeText={(value) => {
+                        setFilterTagSearch(value);
+                        setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
+                      }}
+                    />
                     <View style={styles.filterRow}>
-                      {allTags.map((tag) => (
+                      {visibleTagOptions.map((tag) => (
                         <TouchableOpacity
                           key={tag}
                           style={[
@@ -1001,6 +1123,24 @@ export default function CookbookDetail() {
                         </TouchableOpacity>
                       ))}
                     </View>
+                    {filteredTagOptions.length === 0 ? (
+                      <Text style={[styles.filterEmptyText, { color: subText }]}>
+                        {t("recipes.no_tag_matches", { defaultValue: "No matching tags" })}
+                      </Text>
+                    ) : null}
+                    {filterTagSearch.trim().length === 0 &&
+                    filteredTagOptions.length > visibleFilterTagCount ? (
+                      <TouchableOpacity
+                        style={styles.filterMoreButton}
+                        onPress={() =>
+                          setVisibleFilterTagCount((prev) => prev + FILTER_TAGS_INITIAL_VISIBLE)
+                        }
+                      >
+                        <Text style={[styles.filterMoreText, { color: text }]}>
+                          {t("recipes.show_more_tags", { defaultValue: "Show more tags" })}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </>
                 )}
 
@@ -1011,8 +1151,10 @@ export default function CookbookDetail() {
                   ]}
                   onPress={() => {
                     setSelectedDifficulties([]);
-                    setSelectedCosts([]);
+                    setSelectedCalories([]);
                     setSelectedTags([]);
+                    setFilterTagSearch("");
+                    setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
                   }}
                 >
                   <Text
@@ -1138,28 +1280,6 @@ export default function CookbookDetail() {
                 <MaterialIcons name="chevron-right" size={24} color={subText} />
               </TouchableOpacity>
 
-              {/* Import from Image */}
-              <TouchableOpacity
-                style={styles.addOptionRow}
-
-                onPress={() => {
-                  setAddVisible(false);
-                  setTimeout(() => {
-                    Alert.alert(t("common.coming_soon"), t("common.coming_soon_desc") || "Import from image is not yet available.");
-                  }, 200);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.addOptionEmoji}>📷</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.addOptionText, { color: text }]}>{t("recipes.import_from_image")}</Text>
-                  <Text style={[styles.addOptionSub, { color: subText }]}>
-                    {t("recipes.import_from_image_sub")}
-                  </Text>
-                </View>
-                <MaterialIcons name="chevron-right" size={24} color={subText} />
-              </TouchableOpacity>
-
               {/* Import from File/App */}
               <TouchableOpacity
                 style={styles.addOptionRow}
@@ -1280,23 +1400,34 @@ export default function CookbookDetail() {
                     defaultValue: "Instagram Reel import",
                   })}
                 </Text>
-                <Text style={{ color: subText, lineHeight: 19 }}>
-                  {t("recipes.instagram_reel_import_confirm_body", {
-                    count: INSTAGRAM_REEL_IMPORT_COST,
-                    defaultValue:
-                      "Importing a recipe from an Instagram Reel costs {{count}} Cookies. We will only charge you if we create a high-quality draft.",
-                  })}
-                </Text>
-                <Text style={{ color: subText, marginTop: 8, fontWeight: "600" }}>
-                  {instagramImportBalanceLoading
-                    ? t("economy.loading_balance", {
-                        defaultValue: "Checking your Cookies...",
-                      })
-                    : t("economy.current_balance_short", {
-                        count: instagramImportBalance ?? 0,
-                        defaultValue: "You have {{count}} Cookies.",
+                {shouldHidePremiumPricing(freePremiumActionsRemaining) ? (
+                  <Text style={{ color: subText, lineHeight: 19 }}>
+                    {t("recipes.instagram_reel_import_free_runway_body", {
+                      defaultValue:
+                        "We’ll turn this Reel into a recipe draft for you to review before saving.",
+                    })}
+                  </Text>
+                ) : (
+                  <>
+                    <Text style={{ color: subText, lineHeight: 19 }}>
+                      {t("recipes.instagram_reel_import_confirm_body", {
+                        count: INSTAGRAM_REEL_IMPORT_COST,
+                        defaultValue:
+                          "Importing a recipe from an Instagram Reel costs {{count}} Eggs. We will only charge you if we create a high-quality draft.",
                       })}
-                </Text>
+                    </Text>
+                    <Text style={{ color: subText, marginTop: 8 }}>
+                      {instagramImportBalanceLoading
+                        ? t("economy.loading_balance", {
+                            defaultValue: "Checking your Eggs...",
+                          })
+                        : t("economy.current_balance_short", {
+                            count: instagramImportBalance ?? 0,
+                            defaultValue: "You have {{count}} Eggs.",
+                          })}
+                    </Text>
+                  </>
+                )}
               </View>
             ) : null}
             {importError ? (
@@ -1384,30 +1515,8 @@ export default function CookbookDetail() {
                         setInstagramImportBalance(
                           typeof data?.remaining === "number" ? data.remaining : 0
                         );
-                        Alert.alert(
-                          t("economy.insufficient_title", {
-                            defaultValue: "Not enough Cookies",
-                          }),
-                          t("economy.insufficient_instagram_reel_body_short", {
-                            count: INSTAGRAM_REEL_IMPORT_COST,
-                            remaining:
-                              typeof data?.remaining === "number"
-                                ? data.remaining
-                                : 0,
-                            defaultValue: `You need ${INSTAGRAM_REEL_IMPORT_COST} Cookies to import a recipe from an Instagram Reel.`,
-                          }),
-                          [
-                            {
-                              text: t("common.cancel", { defaultValue: "Cancel" }),
-                              style: "cancel",
-                            },
-                            {
-                              text: t("economy.get_more_cookies", {
-                                defaultValue: "Get more Cookies",
-                              }),
-                              onPress: () => router.push("/economy/store" as any),
-                            },
-                          ]
+                        await openInsufficientCookiesModal(
+                          typeof data?.remaining === "number" ? data.remaining : 0
                         );
                         setImportLoading(false);
                         setImportUrlLoadingText(null);
@@ -1469,6 +1578,18 @@ export default function CookbookDetail() {
                     );
                     const draftKey = "pending_import_recipe_draft";
                     await AsyncStorage.setItem(draftKey, JSON.stringify(r));
+                    try {
+                      if (backendUrl) {
+                        await claimEconomyReward({
+                          backendUrl,
+                          appEnv,
+                          auth,
+                          rewardKey: "first_instagram_reel_import_v1",
+                        });
+                      }
+                    } catch (rewardErr) {
+                      console.warn("[Cookbook] Instagram Reel reward claim failed", rewardErr);
+                    }
                     setImportLoading(false);
                     setImportUrlVisible(false);
                     setImportUrl("");
@@ -1530,6 +1651,24 @@ export default function CookbookDetail() {
                     );
                   }
 
+                  try {
+                    if (backendUrl) {
+                      const activeRecipeCount = Array.isArray(recipesArr)
+                        ? recipesArr.filter((item: any) => !item?.isDeleted).length
+                        : 0;
+                      await claimRewardKeysSequentially(
+                        {
+                          backendUrl,
+                          appEnv,
+                          auth,
+                        },
+                        getRecipeRewardKeysForCount(activeRecipeCount)
+                      );
+                    }
+                  } catch (rewardErr) {
+                    console.warn("[Cookbook] imported recipe reward claim failed", rewardErr);
+                  }
+
                   setRecipes((prev) => [newRecipe, ...prev]);
                   setImportLoading(false);
                   setImportUrlVisible(false);
@@ -1561,10 +1700,7 @@ export default function CookbookDetail() {
               ) : (
                 <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 16 }}>
                   {isInstagramReelUrl(importUrl.trim())
-                    ? t("recipes.instagram_reel_import_button", {
-                        count: INSTAGRAM_REEL_IMPORT_COST,
-                        defaultValue: "Proceed for {{count}} Cookies",
-                      })
+                    ? t("common.proceed", { defaultValue: "Proceed" })
                     : t("recipes.import_button")}
                 </Text>
               )}
@@ -1572,6 +1708,33 @@ export default function CookbookDetail() {
           </View>
         </TouchableOpacity>
       </Modal>
+      <InsufficientCookiesModal
+        visible={insufficientModalVisible}
+        isDark={isDark}
+        title={t("economy.insufficient_title", "Not enough Eggs")}
+        body={`You need ${INSTAGRAM_REEL_IMPORT_COST} Eggs to import a recipe from Instagram Reel. Currently, you have ${insufficientCookiesRemaining} Eggs.`}
+        featuredOffer={featuredOffer}
+        availableRewardsCount={availableRewardsCount}
+        onClose={() => setInsufficientModalVisible(false)}
+        onBuyOffer={() => {
+          setInsufficientModalVisible(false);
+          router.push({
+            pathname: "/economy/store",
+            params: { highlight: "cookies_15", autoBuy: "1" },
+          } as any);
+        }}
+        onOpenStore={() => {
+          setInsufficientModalVisible(false);
+          router.push({
+            pathname: "/economy/store",
+            params: { highlight: "cookies_15" },
+          } as any);
+        }}
+        onOpenRewards={() => {
+          setInsufficientModalVisible(false);
+          router.push("/economy/store" as any);
+        }}
+      />
       {/* Success Modal */}
       <Modal visible={successVisible} transparent animationType="fade">
         <TouchableOpacity
@@ -1595,8 +1758,8 @@ export default function CookbookDetail() {
                   setSuccessVisible(false);
                   if (importedRecipe) {
                     router.push({
-                      pathname: `/recipe/${importedRecipe.id}`,
-                      params: { from: `cookbook:${id}` },
+                      pathname: "/recipe/[id]",
+                      params: { id: importedRecipe.id, from: `cookbook:${id}` },
                     });
                   }
                 }}
@@ -1673,15 +1836,32 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 16,
     fontWeight: "600",
-    marginBottom: 4,
     flex: 1,
     flexShrink: 1,
+    marginBottom: 4,
     paddingRight: 10,
   },
   cardHeader: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: 10,
+  },
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    columnGap: 12,
+    rowGap: 4,
+    marginBottom: 8,
+  },
+  metaText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  metaCalories: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
   },
   deleteButton: {
     paddingLeft: 6,
@@ -1737,6 +1917,22 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     marginBottom: 8,
   },
+  filterSearchInput: {
+    marginBottom: 10,
+  },
+  filterEmptyText: {
+    fontSize: 13,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  filterMoreButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 6,
+  },
+  filterMoreText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
   filterOption: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -1788,7 +1984,6 @@ const styles = StyleSheet.create({
   },
   tagRow: {
     flexDirection: "row",
-    marginTop: 6,
     flexWrap: "wrap",
     paddingRight: 3, // small right padding so last tag doesn't touch the edge
   },

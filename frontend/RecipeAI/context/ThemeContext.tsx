@@ -1,13 +1,16 @@
-import React, { createContext, useState, useContext, useEffect } from "react";
+import React, { createContext, useState, useContext, useEffect, useCallback, useMemo } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { PREFS_UPDATED, prefsEvents } from "../lib/prefs";
 
 type Theme = "light" | "dark";
 
 const ThemeContext = createContext<{
   theme: Theme;
+  setThemeMode: (next: Theme) => Promise<void>;
   toggleTheme: () => void;
 }>({
   theme: "light",
+  setThemeMode: async () => {},
   toggleTheme: () => {},
 });
 
@@ -17,22 +20,49 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     (async () => {
       try {
-        const saved = await AsyncStorage.getItem("@theme");
+        const saved = (await AsyncStorage.getItem("@theme")) || (await AsyncStorage.getItem("theme"));
         if (saved === "light" || saved === "dark") setTheme(saved);
       } catch {}
     })();
+
+    const onPrefsUpdated = (changed: any) => {
+      const next =
+        changed?.themeMode === "dark"
+          ? "dark"
+          : changed?.themeMode === "light" || changed?.themeMode === "system"
+            ? "light"
+            : null;
+      if (next) {
+        setTheme(next);
+      }
+    };
+
+    prefsEvents.on(PREFS_UPDATED, onPrefsUpdated);
+    return () => {
+      prefsEvents.off(PREFS_UPDATED, onPrefsUpdated);
+    };
   }, []);
 
-  const toggleTheme = async () => {
-    const next = theme === "light" ? "dark" : "light";
+  const setThemeMode = useCallback(async (next: Theme) => {
     setTheme(next);
     try {
       await AsyncStorage.setItem("@theme", next);
+      await AsyncStorage.setItem("theme", next);
     } catch {}
-  };
+  }, []);
+
+  const toggleTheme = useCallback(async () => {
+    const next = theme === "light" ? "dark" : "light";
+    await setThemeMode(next);
+  }, [setThemeMode, theme]);
+
+  const value = useMemo(
+    () => ({ theme, setThemeMode, toggleTheme }),
+    [theme, setThemeMode, toggleTheme]
+  );
 
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );
@@ -69,5 +99,8 @@ export const useThemeColors = () => {
     primary: "#3A4454", // headers / botões primários
     secondary: "#C2B2B4", // botões secundários / tags suaves
     cta: "#E27D60", // botões de ação (CTA: gerar receita, salvar, etc.)
+
+    // Modal layers
+    modalBackdrop: isDark ? "rgba(0,0,0,0.56)" : "rgba(0,0,0,0.28)",
   };
 };

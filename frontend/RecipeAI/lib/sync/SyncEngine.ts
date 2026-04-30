@@ -2,6 +2,9 @@ import { runInitialMigrationIfNeeded } from "./migrations";
 import { CookbookSync } from "./CookbookSync";
 import { RecipeSync } from "./RecipeSync";
 import { PreferencesSync } from "./PreferencesSync";
+import { MyDayProfileSync } from "./MyDayProfileSync";
+import { MyDayMealsSync } from "./MyDayMealsSync";
+import { MyDayWeightSync } from "./MyDayWeightSync";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth } from "../../firebaseConfig";
 
@@ -134,6 +137,9 @@ export class SyncEngine {
     private cookbookSync: CookbookSync;
     private recipeSync: RecipeSync;
     private preferencesSync: PreferencesSync;
+    private myDayProfileSync: MyDayProfileSync;
+    private myDayMealsSync: MyDayMealsSync;
+    private myDayWeightSync: MyDayWeightSync;
 
     constructor() {
         console.log("[SyncEngine] created", {
@@ -142,6 +148,9 @@ export class SyncEngine {
         this.cookbookSync = new CookbookSync();
         this.recipeSync = new RecipeSync();
         this.preferencesSync = new PreferencesSync();
+        this.myDayProfileSync = new MyDayProfileSync();
+        this.myDayMealsSync = new MyDayMealsSync();
+        this.myDayWeightSync = new MyDayWeightSync();
     }
 
     /**
@@ -381,7 +390,7 @@ export class SyncEngine {
             // Preferences
             if (this.preferencesSync && typeof (this.preferencesSync as any).syncAll === "function") {
                 const prefStart = nowMs();
-                await this.preferencesSync.syncAll(uid);
+                await this.preferencesSync.syncAll(uid ?? undefined);
                 logSync("success", {
                     reason,
                     scope: "preferences",
@@ -392,6 +401,39 @@ export class SyncEngine {
                     reason,
                     scope: "preferences",
                     error: "PreferencesSync.syncAll is not available",
+                });
+            }
+
+            if (this.myDayProfileSync && typeof (this.myDayProfileSync as any).syncAll === "function") {
+                const start = nowMs();
+                await this.myDayProfileSync.syncAll(uid);
+                logSync("success", {
+                    reason,
+                    scope: "all",
+                    durationMs: nowMs() - start,
+                    details: { stage: "myday-profile" },
+                });
+            }
+
+            if (this.myDayMealsSync && typeof (this.myDayMealsSync as any).syncAll === "function") {
+                const start = nowMs();
+                await this.myDayMealsSync.syncAll(uid);
+                logSync("success", {
+                    reason,
+                    scope: "all",
+                    durationMs: nowMs() - start,
+                    details: { stage: "myday-meals" },
+                });
+            }
+
+            if (this.myDayWeightSync && typeof (this.myDayWeightSync as any).syncAll === "function") {
+                const start = nowMs();
+                await this.myDayWeightSync.syncAll(uid);
+                logSync("success", {
+                    reason,
+                    scope: "all",
+                    durationMs: nowMs() - start,
+                    details: { stage: "myday-weights" },
                 });
             }
 
@@ -651,6 +693,51 @@ export class SyncEngine {
       }
     } catch (err) {
       console.warn("[SyncEngine] markPreferencesDirty failed", err);
+    }
+  }
+
+  public async markMyDayProfileDirty(profile: any): Promise<void> {
+    try {
+      await this.myDayProfileSync.upsertLocalProfile(profile);
+      this.forceSyncNow("manual");
+    } catch (err) {
+      console.warn("[SyncEngine] markMyDayProfileDirty failed", err);
+    }
+  }
+
+  public async markMyDayMealDirty(meal: any): Promise<void> {
+    try {
+      await this.myDayMealsSync.upsertLocalMeal(meal);
+      this.forceSyncNow("manual");
+    } catch (err) {
+      console.warn("[SyncEngine] markMyDayMealDirty failed", err);
+    }
+  }
+
+  public async markMyDayMealDeleted(mealId: string): Promise<void> {
+    try {
+      await this.myDayMealsSync.markLocalMealDeleted(mealId);
+      this.forceSyncNow("manual");
+    } catch (err) {
+      console.warn("[SyncEngine] markMyDayMealDeleted failed", err);
+    }
+  }
+
+  public async markMyDayWeightDirty(weightLog: any): Promise<void> {
+    try {
+      await this.myDayWeightSync.upsertLocalWeight(weightLog);
+      this.forceSyncNow("manual");
+    } catch (err) {
+      console.warn("[SyncEngine] markMyDayWeightDirty failed", err);
+    }
+  }
+
+  public async markMyDayWeightDeleted(weightId: string): Promise<void> {
+    try {
+      await this.myDayWeightSync.markLocalWeightDeleted(weightId);
+      this.forceSyncNow("manual");
+    } catch (err) {
+      console.warn("[SyncEngine] markMyDayWeightDeleted failed", err);
     }
   }
 }

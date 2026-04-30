@@ -13,7 +13,7 @@ export default function FooterNav() {
     <View style={[styles.footer, { backgroundColor: bg }]}>
       <TouchableOpacity
         style={styles.tab}
-        onPress={() => router.push("/(tabs)/index")}
+        onPress={() => router.push("/")}
       >
         <MaterialIcons
           name="psychology"
@@ -32,7 +32,7 @@ export default function FooterNav() {
 
       <TouchableOpacity
         style={styles.tab}
-        onPress={() => router.push("/(tabs)/history")}
+        onPress={() => router.push("/history")}
       >
         <MaterialIcons
           name="book"

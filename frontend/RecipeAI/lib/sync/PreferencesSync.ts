@@ -1,7 +1,9 @@
 // lib/sync/PreferencesSync.ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth } from "../../firebaseConfig";
+import { getApiBaseUrl } from "../config/api";
 import type { PreferencesDoc } from "./types";
+import { applyPrefsToLegacyStorage, PREFS_UPDATED, prefsEvents } from "../prefs";
 
 // Canonical AsyncStorage key for locally cached preferences used by the sync engine.
 // Legacy keys (dietary, avoid, theme, language, etc.) are migrated into this structure
@@ -35,6 +37,8 @@ export class PreferencesSync {
 
   async setLocalPrefs(prefs: PreferencesDoc): Promise<void> {
     await AsyncStorage.setItem(AS_KEY_PREFS, JSON.stringify(prefs));
+    await applyPrefsToLegacyStorage(prefs);
+    prefsEvents.emit(PREFS_UPDATED, prefs);
     // Dirtiness is handled elsewhere.
   }
 
@@ -79,7 +83,7 @@ export class PreferencesSync {
 
     console.log("[PreferencesSync] pullFromRemote for uid", uid);
 
-    const apiBase = process.env.EXPO_PUBLIC_API_URL;
+    const apiBase = getApiBaseUrl();
     if (!apiBase) {
       console.log("[PreferencesSync] pullFromRemote skipped: EXPO_PUBLIC_API_URL not set");
       return;
@@ -147,8 +151,10 @@ export class PreferencesSync {
 
       const local = await this.getLocalPrefs();
 
-      // If no local prefs, or remote is newer, override
-      if (!local || remote.updatedAt >= (local.updatedAt ?? 0)) {
+      // If no local prefs, or remote is newer, override.
+      // Use strict comparison so equal timestamps do not re-emit the same remote
+      // document and fight with a just-made local language/theme change.
+      if (!local || remote.updatedAt > (local.updatedAt ?? 0)) {
         await this.setLocalPrefs(remote);
         // Remote won – ensure we don't immediately re-push the same data.
         await this.setMeta({ dirty: false });
@@ -190,7 +196,7 @@ export class PreferencesSync {
       return;
     }
 
-    const apiBase = process.env.EXPO_PUBLIC_API_URL;
+    const apiBase = getApiBaseUrl();
     if (!apiBase) {
       console.log("[PreferencesSync] pushToRemote skipped: EXPO_PUBLIC_API_URL not set");
       return;

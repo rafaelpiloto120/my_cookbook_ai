@@ -78,7 +78,7 @@ export default function SignInScreen() {
 
   const [request, response, promptAsync] = Google.useAuthRequest({
     androidClientId: androidClientId || undefined,
-    expoClientId: expoClientId || undefined,
+    clientId: expoClientId || undefined,
     responseType: "id_token",
     scopes: ["openid", "email", "profile"],
   });
@@ -170,10 +170,7 @@ export default function SignInScreen() {
 
     try {
       setGoogleLoading(true);
-      const isExpoGo = Constants.appOwnership === "expo";
-      // In Expo Go we use the Expo proxy (web redirect via auth.expo.io),
-      // in standalone/preview builds we use the native scheme
-      await promptAsync({ useProxy: isExpoGo });
+      await promptAsync();
     } catch (err) {
       console.error("Google prompt error:", err);
     } finally {
@@ -193,7 +190,6 @@ export default function SignInScreen() {
           headerTitleAlign: "center",
           headerBackVisible: true,
           headerRight: () => null,
-          headerTopInsetEnabled: true,
         }}
       />
       <KeyboardAwareScrollView contentContainerStyle={{ flexGrow: 1 }} enableOnAndroid keyboardShouldPersistTaps="handled">

@@ -188,9 +188,12 @@ export default function StartCooking() {
               <MaterialIcons name="close" size={26} color="#fff" />
             </TouchableOpacity>
           ),
-          tabBarStyle: { display: "none" },
         }}
       />
+
+      <Text style={[styles.recipeTitle, { color: text }]} numberOfLines={2}>
+        {parsedRecipe.title}
+      </Text>
 
       {/* Progress Bar */}
       <View style={styles.progressContainer}>
@@ -250,6 +253,12 @@ export default function StartCooking() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, justifyContent: "center" },
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  recipeTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    textAlign: "center",
+    marginBottom: 14,
+  },
 
   progressContainer: {
     height: 8,

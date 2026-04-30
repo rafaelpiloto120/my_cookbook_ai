@@ -19,29 +19,44 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, Stack, useFocusEffect } from "expo-router";
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useThemeColors } from "../../context/ThemeContext";
+import { getApiBaseUrl } from "../../lib/config/api";
+import {
+  fetchEconomyCatalogBundle,
+  fetchEconomySnapshot,
+  shouldHidePremiumPricing,
+  writeCachedEconomySnapshot,
+  type EconomyCatalogOffer,
+} from "../../lib/economy/client";
 import AppButton from "../../components/AppButton";
+import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
+import EggIcon from "../../components/EggIcon";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import i18n from "../../i18n";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
 import { prefsEvents, PREFS_UPDATED } from "../../lib/prefs";
+import { RecipeNutritionInfo } from "../../lib/recipes/nutrition";
 
 // --- Types ---
 interface Recipe {
   id: string;
   title: string;
   cookingTime: number;
-  difficulty: "Easy" | "Medium" | "Hard";
+  difficulty: "Easy" | "Moderate" | "Challenging";
   servings: number;
-  cost: "Cheap" | "Medium" | "Expensive";
   ingredients: string[];
   steps: string[];
   tags: string[];
   createdAt: string;
   updatedAt: string;
+  nutritionInfo?: RecipeNutritionInfo | null;
 }
+
+const AI_KITCHEN_SUGGESTIONS_KEY = "aiKitchenSuggestions";
+const AI_KITCHEN_SUGGESTION_HISTORY_KEY = "aiKitchenSuggestionHistory";
+const AI_KITCHEN_RECIPE_CACHE_KEY = "aiKitchenRecipeCache";
 
 function validateRecipe(raw: any): Recipe {
   return {
@@ -50,12 +65,12 @@ function validateRecipe(raw: any): Recipe {
     cookingTime: raw.cookingTime || 30,
     difficulty: raw.difficulty || "Easy",
     servings: raw.servings || 2,
-    cost: raw.cost || "Medium",
     ingredients: raw.ingredients || [],
     steps: raw.steps || [],
     tags: raw.tags || [],
     createdAt: raw.createdAt || new Date().toISOString(),
     updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
+    nutritionInfo: raw.nutritionInfo || null,
   };
 }
 
@@ -64,7 +79,7 @@ const mealOptions = [
   { labelKey: "meal.breakfast", icon: "🍳" },
   { labelKey: "meal.lunch", icon: "🥪" },
   { labelKey: "meal.dinner", icon: "🍝" },
-  { labelKey: "meal.snack", icon: "🍪" },
+  { labelKey: "meal.snack", icon: "🍎" },
   { labelKey: "meal.just_hungry", icon: "🤔" },
 ];
 
@@ -86,32 +101,7 @@ const cuisineOptions = [
 // --- Main component ---
 export default function Index() {
   const { t } = useTranslation();
-
-  // Track language state, always synced with i18n.language
-  const [language, setLanguage] = useState(i18n.language || "en");
-  // Load stored language from AsyncStorage on mount and set i18n language
-  useEffect(() => {
-    (async () => {
-      try {
-        const storedLang = await AsyncStorage.getItem("language");
-        if (storedLang && storedLang !== i18n.language) {
-          await i18n.changeLanguage(storedLang);
-        }
-        setLanguage(i18n.language);
-        // Persist language to AsyncStorage (in case i18n.language changed)
-        await AsyncStorage.setItem("language", i18n.language);
-      } catch (err) {
-        console.error("Error loading stored language:", err);
-      }
-    })();
-    // We want to run only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // Keep language state and AsyncStorage in sync with i18n.language
-  useEffect(() => {
-    setLanguage(i18n.language);
-    AsyncStorage.setItem("language", i18n.language);
-  }, [i18n.language]);
+  const language = i18n.language || "en";
   const allDietaryOptions = t("dietary", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
   const allAvoidOptions = t("avoid", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
   const router = useRouter();
@@ -257,6 +247,8 @@ export default function Index() {
 
   // Suggestions
   const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [suggestionHistory, setSuggestionHistory] = useState<any[]>([]);
+  const [cachedRecipesBySuggestionId, setCachedRecipesBySuggestionId] = useState<Record<string, Recipe>>({});
 
   // --- Insufficient cookies modal ---
   const [insufficientModal, setInsufficientModal] = useState<{
@@ -264,26 +256,60 @@ export default function Index() {
     context: "suggestions" | "full-recipe";
     remaining: number;
   }>({ visible: false, context: "suggestions", remaining: 0 });
+  const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
+  const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
+  const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
 
-  const [offerCookies5, setOfferCookies5] = useState<
-    | null
-    | {
-        id: string;
-        title: string;
-        subtitle?: string | null;
-        price: number;
-        currency: string;
-        cookies: number;
-        badges?: string[];
-        isPromo?: boolean;
-        bonusCookies?: number;
-        mostPurchased?: boolean;
-      }
-  >(null);
-
-  const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
+  const backendUrl = getApiBaseUrl()!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   console.log("Using backend URL:", backendUrl, "env:", appEnv);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [storedSuggestions, storedHistory, storedRecipeCache] = await Promise.all([
+          AsyncStorage.getItem(AI_KITCHEN_SUGGESTIONS_KEY),
+          AsyncStorage.getItem(AI_KITCHEN_SUGGESTION_HISTORY_KEY),
+          AsyncStorage.getItem(AI_KITCHEN_RECIPE_CACHE_KEY),
+        ]);
+
+        if (storedSuggestions) {
+          const parsed = JSON.parse(storedSuggestions);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setSuggestions(parsed);
+          }
+        }
+
+        if (storedHistory) {
+          const parsed = JSON.parse(storedHistory);
+          if (Array.isArray(parsed)) {
+            setSuggestionHistory(parsed);
+          }
+        }
+
+        if (storedRecipeCache) {
+          const parsed = JSON.parse(storedRecipeCache);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            setCachedRecipesBySuggestionId(parsed);
+          }
+        }
+      } catch (err) {
+        console.warn("[AI Kitchen] Failed to restore session state", err);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.setItem(AI_KITCHEN_SUGGESTIONS_KEY, JSON.stringify(suggestions)).catch(() => {});
+  }, [suggestions]);
+
+  useEffect(() => {
+    AsyncStorage.setItem(AI_KITCHEN_SUGGESTION_HISTORY_KEY, JSON.stringify(suggestionHistory)).catch(() => {});
+  }, [suggestionHistory]);
+
+  useEffect(() => {
+    AsyncStorage.setItem(AI_KITCHEN_RECIPE_CACHE_KEY, JSON.stringify(cachedRecipesBySuggestionId)).catch(() => {});
+  }, [cachedRecipesBySuggestionId]);
 
   // --- Animation refs ---
   const contentAnim = useRef(new Animated.Value(0)).current;
@@ -431,11 +457,15 @@ export default function Index() {
     return null;
   };
 
-  const goToStore = (highlightOfferId?: string) => {
+  const goToStore = (highlightOfferId?: string, autoBuy = false) => {
     try {
       router.push({
         pathname: "/economy/store",
-        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+        params: highlightOfferId
+          ? autoBuy
+            ? { highlight: highlightOfferId, autoBuy: "1" }
+            : { highlight: highlightOfferId }
+          : undefined,
       } as any);
     } catch (e) {
       // Fallback in case params typing/routes differ
@@ -449,47 +479,16 @@ export default function Index() {
   ) => {
     const rem = typeof remaining === "number" ? remaining : 0;
 
-    // Try to fetch catalog offer cookies_5 so we can render it in the same style as Store.
-    // We do not hardcode offer details.
-    if (!offerCookies5) {
+    if (!featuredOffer || availableRewardsCount === 0) {
       try {
-        const currentUser = auth.currentUser;
-        const idToken = currentUser ? await currentUser.getIdToken() : null;
-        const deviceId = await getDeviceId().catch(() => null);
-        const userId = currentUser?.uid ?? null;
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "x-app-env": appEnv,
-        };
-        if (idToken) headers.Authorization = `Bearer ${idToken}`;
-        if (deviceId) headers["x-device-id"] = deviceId;
-        if (userId) headers["x-user-id"] = userId;
-
-        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
-        const data = await res.json().catch(() => null);
-        const root = (data as any)?.data ?? data;
-        const rawOffers: any[] =
-          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
-          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
-          [];
-
-        const o5 = rawOffers.find((o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5");
-        if (o5) {
-          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
-          setOfferCookies5({
-            id: "cookies_5",
-            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
-            subtitle: (typeof o5?.subtitle === "string" ? o5.subtitle : typeof o5?.description === "string" ? o5.description : null) ?? null,
-            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
-            currency,
-            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
-            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
-            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
-            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
-            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
-          });
-        }
+        const catalog = await fetchEconomyCatalogBundle({ backendUrl, appEnv, auth });
+        const featured = catalog.offers.find((offer) => String(offer.id).trim() === "cookies_15");
+        if (featured) setFeaturedOffer(featured);
+        setAvailableRewardsCount(
+          Array.isArray(catalog.bonuses)
+            ? catalog.bonuses.filter((bonus) => bonus?.status === "available").length
+            : 0
+        );
       } catch {
         // ignore - modal can still render without the offer card
       }
@@ -532,16 +531,34 @@ export default function Index() {
     return null;
   };
 
+  const mergeSuggestionHistory = useCallback((incoming: any[]) => {
+    setSuggestionHistory((prev) => {
+      const merged = [...prev];
+      const seen = new Set(
+        prev.map((item) =>
+          String(item?.title ?? "")
+            .trim()
+            .toLowerCase()
+        )
+      );
+
+      for (const item of incoming) {
+        const key = String(item?.title ?? "")
+          .trim()
+          .toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        merged.push(item);
+      }
+
+      return merged;
+    });
+  }, []);
+
   // --- Fetch recipe suggestions from backend ---
   const generateRecipe = async () => {
     setLoading(true);
     try {
-      // Pre-check cookie balance to avoid wasting AI resources.
-      const okToProceed = await ensureHasCookiesOrPrompt(1, "suggestions");
-      if (!okToProceed) {
-        setLoading(false);
-        return;
-      }
       const currentUser = auth.currentUser;
       const idToken = currentUser ? await currentUser.getIdToken() : null;
       const deviceId = await getDeviceId();
@@ -575,6 +592,10 @@ export default function Index() {
           avoid: avoid.includes("other") ? [...avoid, avoidOther] : avoid,
           language,
           measurementSystem,
+          excludeSuggestions: suggestionHistory.map((item) => ({
+            title: item?.title,
+            description: item?.description,
+          })),
         }),
       });
 
@@ -591,7 +612,9 @@ export default function Index() {
       }
 
       // Expecting array of suggestions: [{id, title, cookingTime, difficulty, description}]
-      setSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      const nextSuggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+      setSuggestions(nextSuggestions);
+      mergeSuggestionHistory(nextSuggestions);
     } catch (err) {
       console.error("Error generating suggestions:", err);
       Alert.alert(t("wizard.error_generate_title", "Error"), t("wizard.error_generate"));
@@ -601,6 +624,21 @@ export default function Index() {
 
   // Fetch full recipe for a suggestion from backend
   const fetchFullRecipe = async (suggestion: any) => {
+    const cachedRecipe = cachedRecipesBySuggestionId[String(suggestion?.id ?? "")];
+    if (cachedRecipe) {
+      const tempRecipeKey = `aiKitchenRecipe:${cachedRecipe.id}:${Date.now()}`;
+      await AsyncStorage.setItem(tempRecipeKey, JSON.stringify(cachedRecipe));
+      router.push({
+        pathname: "/recipe/[id]",
+        params: {
+          id: cachedRecipe.id,
+          tempRecipeKey,
+          from: "ai-kitchen",
+        },
+      });
+      return;
+    }
+
     setLoading(true);
     try {
       // Pre-check cookie balance to avoid wasting AI resources.
@@ -633,6 +671,12 @@ export default function Index() {
         method: "POST",
         headers,
         body: JSON.stringify({
+          note,
+          time,
+          dietary,
+          avoid: avoid.includes("other") ? [...avoid, avoidOther] : avoid,
+          mealType,
+          avoidOther,
           suggestionId: suggestion.id,
           suggestion,
           people,
@@ -654,19 +698,19 @@ export default function Index() {
       // Expecting structured recipe: {title, duration, difficulty, description, ingredients, steps, ...}
       let recipeRaw = data.recipe || {};
       let difficultyRaw = recipeRaw.difficulty || suggestion.difficulty || "";
-      let difficulty: "Easy" | "Medium" | "Hard" = "Easy";
+      let difficulty: "Easy" | "Moderate" | "Challenging" = "Easy";
       if (
         typeof difficultyRaw === "string" &&
         (difficultyRaw.toLowerCase() === "medium" ||
           difficultyRaw.toLowerCase() === "moderate")
       ) {
-        difficulty = "Medium";
+        difficulty = "Moderate";
       } else if (
         typeof difficultyRaw === "string" &&
         (difficultyRaw.toLowerCase() === "hard" ||
           difficultyRaw.toLowerCase() === "challenging")
       ) {
-        difficulty = "Hard";
+        difficulty = "Challenging";
       } else {
         difficulty = "Easy";
       }
@@ -677,10 +721,23 @@ export default function Index() {
         cookingTime: recipeRaw.cookingTime || recipeRaw.duration || suggestion.cookingTime,
         difficulty,
         description: recipeRaw.description || suggestion.description,
+        nutritionInfo: recipeRaw.nutritionInfo || null,
       });
+      const nextRecipeCache = {
+        ...cachedRecipesBySuggestionId,
+        [String(suggestion.id)]: safeRecipe,
+      };
+      setCachedRecipesBySuggestionId(nextRecipeCache);
+      await AsyncStorage.setItem(AI_KITCHEN_RECIPE_CACHE_KEY, JSON.stringify(nextRecipeCache));
+      const tempRecipeKey = `aiKitchenRecipe:${safeRecipe.id}:${Date.now()}`;
+      await AsyncStorage.setItem(tempRecipeKey, JSON.stringify(safeRecipe));
       router.push({
         pathname: "/recipe/[id]",
-        params: { id: safeRecipe.id, recipe: JSON.stringify(safeRecipe) },
+        params: {
+          id: safeRecipe.id,
+          tempRecipeKey,
+          from: "ai-kitchen",
+        },
       });
     } catch (err) {
       console.error("Error getting recipe:", err);
@@ -692,25 +749,12 @@ export default function Index() {
   // --- Helper to fetch cookie balance and pre-check before AI call ---
   const fetchCookieBalanceSafe = async (): Promise<number | null> => {
     try {
-      const currentUser = auth.currentUser;
-      const idToken = currentUser ? await currentUser.getIdToken() : null;
-      const deviceId = await getDeviceId();
-      const userId = currentUser?.uid ?? null;
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "x-app-env": appEnv,
-      };
-      if (idToken) headers.Authorization = `Bearer ${idToken}`;
-      if (deviceId) headers["x-device-id"] = deviceId;
-      if (userId) headers["x-user-id"] = userId;
-
-      // This endpoint is used by the Store; if it changes, we gracefully fall back.
-      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
-      if (!res.ok) return null;
-      const data = await res.json().catch(() => null);
-      const bal = data?.balance;
-      return typeof bal === "number" ? bal : null;
+      const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth });
+      if (!snapshot) return null;
+      setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+      await writeCachedEconomySnapshot(auth.currentUser?.uid, snapshot);
+      if (shouldHidePremiumPricing(snapshot.freePremiumActionsRemaining)) return null;
+      return snapshot.balance;
     } catch {
       return null;
     }
@@ -727,6 +771,25 @@ export default function Index() {
     await openInsufficientCookiesModal(bal, context);
     return false;
   };
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth });
+          if (!snapshot || cancelled) return;
+          setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+          await writeCachedEconomySnapshot(auth.currentUser?.uid, snapshot);
+        } catch {
+          // ignore
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [backendUrl, appEnv])
+  );
 
   // --- Navigation helpers ---
   const maxStep = 3;
@@ -791,137 +854,31 @@ export default function Index() {
       )}
 
       {/* Insufficient cookies modal */}
-      <Modal
+      <InsufficientCookiesModal
         visible={insufficientModal.visible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-      >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-        />
-        <View style={styles.modalCenter}>
-          <View
-            style={[
-              styles.modalCard,
-              {
-                backgroundColor: isDark ? "#1f2430" : "#fff",
-                borderColor: isDark ? "#ffffff22" : "#00000012",
-              },
-            ]}
-          >
-            <TouchableOpacity
-  onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-  style={styles.modalCloseBtn}
-  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
->
-  <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-    ✕
-  </Text>
-</TouchableOpacity>
-            <Text style={[styles.modalTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-              {t("economy.insufficient_title", "Not enough Cookies")}
-            </Text>
-
-            <Text style={[styles.modalBody, { color: isDark ? "#ddd" : "#444" }]}>
-              {insufficientModal.context === "full-recipe"
-                ? t("economy.insufficient_full_recipe_body_short", {
-                    remaining: insufficientModal.remaining,
-                    defaultValue: `You need 1 Cookie to open the full recipe. You have ${insufficientModal.remaining}.`,
-                  })
-                : t("economy.insufficient_suggestions_body_short", {
-                    remaining: insufficientModal.remaining,
-                    defaultValue: `You need 1 Cookie to generate recipe suggestions. You have ${insufficientModal.remaining}.`,
-                  })}
-            </Text>
-
-            {/* Offer card (cookies_5) in Store-like style */}
-            {offerCookies5 ? (
-              <Pressable
-                style={[
-                  styles.modalOfferCard,
-                  {
-                    backgroundColor: isDark ? "#171b24" : "#fff",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-                onPress={() => {
-                  setInsufficientModal((s) => ({ ...s, visible: false }));
-                  goToStore("cookies_5");
-                }}
-              >
-                <View style={styles.modalOfferLeft}>
-                  <View style={styles.modalOfferTopRow}>
-                    <View style={styles.modalOfferTopLeft}>
-                      <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                        🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}>
-                    {offerCookies5.subtitle
-                      ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(offerCookies5.currency || "USD").toUpperCase()}`
-                      : `${offerCookies5.price.toFixed(2)} ${String(offerCookies5.currency || "USD").toUpperCase()}`}
-                  </Text>
-                </View>
-
-                <View style={styles.modalOfferRight}>
-                  {/* Important: we do NOT initiate purchases here. We only route users to the Store screen. */}
-                  <TouchableOpacity
-                    style={styles.buyBtn}
-                    onPress={() => {
-                      setInsufficientModal((s) => ({ ...s, visible: false }));
-                      goToStore("cookies_5");
-                    }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.buyBtnText}>{t("economy.buy", "Buy")}</Text>
-                  </TouchableOpacity>
-                </View>
-              </Pressable>
-            ) : null}
-
-            {/* Bottom actions: only two buttons */}
-            <View style={styles.modalActionsRow}>
-              <TouchableOpacity
-                style={[
-                  styles.modalActionBtn,
-                  {
-                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-                onPress={() => {
-                  setInsufficientModal((s) => ({ ...s, visible: false }));
-                  goToStore();
-                }}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                  {t("economy.offers_button", "All offers")}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modalActionBtn,
-                  {
-                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                  {t("wizard.button_back", "Back")}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        isDark={isDark}
+        title={t("economy.insufficient_title", "Not enough Eggs")}
+        body={
+          insufficientModal.context === "full-recipe"
+            ? `You need 1 Egg to open the full recipe. Currently, you have ${insufficientModal.remaining} Eggs.`
+            : `You need 1 Egg to generate recipe suggestions. Currently, you have ${insufficientModal.remaining} Eggs.`
+        }
+        featuredOffer={featuredOffer}
+        availableRewardsCount={availableRewardsCount}
+        onClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+        onBuyOffer={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore("cookies_15", true);
+        }}
+        onOpenStore={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore("cookies_15");
+        }}
+        onOpenRewards={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore();
+        }}
+      />
 
       <KeyboardAwareScrollView
         style={styles.container}
@@ -947,7 +904,7 @@ export default function Index() {
                 fontWeight: "700",
                 color: isDark ? "#f5f5f5" : "#293a53",
                 marginTop: 20,
-                marginBottom: 0,
+                marginBottom: 8,
               }}
             >
               {t("wizard.recipe_suggestions_title")}
@@ -956,23 +913,40 @@ export default function Index() {
               style={{
                 fontSize: 15,
                 color: isDark ? "#ccc" : "#666",
-                marginBottom: 8,
+                marginBottom: 10,
               }}
             >
               {t("wizard.recipe_suggestions_subtitle")}
             </Text>
-            <Text
-              style={{
-                fontSize: 13,
-                color: isDark ? "#bbb" : "#666",
-                marginBottom: 10,
-              }}
-            >
-              {t("economy.full_recipe_cost_note", {
-                defaultValue: "Opening a recipe deducts 1 Cookie from your balance. You can see your Cookie balance in Profile.",
-              })}
-            </Text>
+            {shouldHidePremiumPricing(freePremiumActionsRemaining) ? null : (
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 4,
+                  marginBottom: 12,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 13,
+                    color: isDark ? "#bbb" : "#666",
+                  }}
+                >
+                  {t("wizard.open_recipe_cookie_hint", {
+                    defaultValue: "Open a recipe for 1",
+                  })}
+                </Text>
+                <EggIcon size={15} />
+              </View>
+            )}
             {suggestions.map((sugg, idx) => {
+              const suggestionCalories =
+                typeof sugg.calories === "number"
+                  ? sugg.calories
+                  : Number.isFinite(Number(sugg.calories))
+                  ? Number(sugg.calories)
+                  : null;
               // Sanitize and normalize difficulty for mapping
               const cleanDifficulty = (sugg.difficulty || "")
                 .toLowerCase()
@@ -1013,11 +987,38 @@ export default function Index() {
                   <Text style={{ fontSize: 18, fontWeight: "700", color: "#293a53" }}>
                     {sugg.title}
                   </Text>
-                  <Text style={{ color: "#666", marginTop: 4 }}>
-                    ⏱ {sugg.cookingTime || sugg.time || "?"} min
-                    {"   "}
-                    {diffLabel}
-                  </Text>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      columnGap: 12,
+                      rowGap: 4,
+                      marginTop: 6,
+                    }}
+                  >
+                    <Text style={{ color: "#666" }}>
+                      ⏱ {sugg.cookingTime || sugg.time || "?"} min
+                    </Text>
+                    <Text style={{ color: "#666" }}>{diffLabel}</Text>
+                    {typeof suggestionCalories === "number" &&
+                    Number.isFinite(suggestionCalories) ? (
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                        }}
+                      >
+                        <MaterialCommunityIcons
+                          name="fire"
+                          size={15}
+                          color="#E27D60"
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={{ color: "#666" }}>{`${Math.round(suggestionCalories)} kcal`}</Text>
+                      </View>
+                    ) : null}
+                  </View>
                   {sugg.description && (
                     <Text style={{ color: "#222", marginTop: 8 }}>
                       {sugg.description}
@@ -1034,8 +1035,15 @@ export default function Index() {
             />
             <AppButton
               label={t("wizard.button_back_wizard")}
-              onPress={() => {
+              onPress={async () => {
                 setSuggestions([]);
+                setSuggestionHistory([]);
+                setCachedRecipesBySuggestionId({});
+                await Promise.all([
+                  AsyncStorage.removeItem(AI_KITCHEN_SUGGESTIONS_KEY),
+                  AsyncStorage.removeItem(AI_KITCHEN_SUGGESTION_HISTORY_KEY),
+                  AsyncStorage.removeItem(AI_KITCHEN_RECIPE_CACHE_KEY),
+                ]).catch(() => {});
                 setStep(1);
               }}
               variant="secondary"

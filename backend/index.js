@@ -45,6 +45,20 @@ import {
   parseImportedRecipes,
   toImportErrorResponse,
 } from "./importers/index.js";
+import {
+  extractRecipeFromHtml,
+  recordUrlImportTelemetry,
+} from "./services/importUrl.js";
+import {
+  SUPPORTED_INGREDIENT_LOCALES,
+  normalizeAlias,
+  normalizeAliases,
+  shouldAutoPromoteCandidate,
+} from "./ingredientCatalog.js";
+import {
+  INGREDIENT_CATALOG_SEED_ITEMS,
+  INGREDIENT_CATALOG_SEED_MANIFEST,
+} from "./ingredientCatalogSeed.js";
 
 import admin from "firebase-admin";
 import { Firestore } from "@google-cloud/firestore";
@@ -52,6 +66,170 @@ import { Firestore } from "@google-cloud/firestore";
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const INGREDIENT_CATALOG_DOC_PATH = "ingredientCatalog/default";
+
+function ingredientCatalogDocRef(db) {
+  return db.doc(INGREDIENT_CATALOG_DOC_PATH);
+}
+
+function ingredientCatalogItemsCol(db) {
+  return ingredientCatalogDocRef(db).collection("items");
+}
+
+function ingredientCatalogCandidatesCol(db) {
+  return ingredientCatalogDocRef(db).collection("candidates");
+}
+
+function ingredientCatalogItemIdFromName(name) {
+  return normalizeAlias(name).replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "") || `ingredient_${Date.now()}`;
+}
+
+function mergeLocalizedAliases(existing = {}, incoming = {}) {
+  const merged = {};
+  for (const locale of SUPPORTED_INGREDIENT_LOCALES) {
+    merged[locale] = Array.from(
+      new Set([
+        ...(Array.isArray(existing[locale]) ? existing[locale] : []),
+        ...(Array.isArray(incoming[locale]) ? incoming[locale] : []),
+      ].map((value) => normalizeAlias(value)).filter(Boolean))
+    );
+  }
+  return merged;
+}
+
+function serializeIngredientCatalogItem(id, raw = {}) {
+  return {
+    id,
+    canonicalName: String(raw.canonicalName || "").trim(),
+    category: raw.category ?? null,
+    aliases: normalizeAliases(raw.aliases || {}),
+    nutritionPer100: raw.nutritionPer100 || null,
+    defaultServing: raw.defaultServing || null,
+    source: raw.source || "seed",
+    updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
+  };
+}
+
+function getSeedCatalogMap() {
+  return INGREDIENT_CATALOG_SEED_ITEMS.reduce((acc, item) => {
+    acc[item.id] = serializeIngredientCatalogItem(item.id, item);
+    return acc;
+  }, {});
+}
+
+async function getCombinedIngredientCatalogItems(db) {
+  const seedMap = getSeedCatalogMap();
+  if (!_adminInitialized || !db) {
+    return Object.values(seedMap);
+  }
+
+  const snap = await ingredientCatalogItemsCol(db).get();
+  for (const doc of snap.docs) {
+    seedMap[doc.id] = serializeIngredientCatalogItem(doc.id, doc.data() || {});
+  }
+  return Object.values(seedMap).sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id));
+}
+
+async function persistIngredientCatalogCandidate({
+  db,
+  candidate,
+  submittedByUid = null,
+}) {
+  const now = Date.now();
+  const scored = shouldAutoPromoteCandidate(candidate);
+  const candidateId = String(
+    candidate.id || `candidate_${now}_${Math.random().toString(36).slice(2, 8)}`
+  );
+
+  const candidatePayload = {
+    canonicalName: normalizeAlias(candidate.canonicalName || ""),
+    category: candidate.category ?? null,
+    aliases: scored.normalized.aliases,
+    nutritionPer100: scored.normalized.nutritionPer100,
+    defaultServing: scored.normalized.defaultServing,
+    sourceText: typeof candidate.sourceText === "string" ? candidate.sourceText : null,
+    confidence: Number.isFinite(Number(candidate.confidence))
+      ? Number(candidate.confidence)
+      : null,
+    suggestedBy: "ai",
+    createdAt: typeof candidate.createdAt === "number" ? candidate.createdAt : now,
+    submittedByUid: submittedByUid || null,
+    autoPromotion: {
+      shouldPromote: scored.shouldPromote,
+      score: scored.score,
+      reasons: scored.reasons,
+    },
+    status: scored.shouldPromote ? "promoted" : "candidate",
+    updatedAt: now,
+    _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
+  await ingredientCatalogCandidatesCol(db).doc(candidateId).set(candidatePayload, { merge: true });
+
+  let promotedItem = null;
+  let localEntry = serializeIngredientCatalogItem(candidateId, {
+    canonicalName: candidatePayload.canonicalName,
+    category: candidatePayload.category,
+    aliases: candidatePayload.aliases,
+    nutritionPer100: candidatePayload.nutritionPer100,
+    defaultServing: candidatePayload.defaultServing,
+    source: "ai_resolved",
+    updatedAt: now,
+  });
+
+  if (scored.shouldPromote && scored.normalized.nutritionPer100 && scored.normalized.defaultServing) {
+    const itemId = ingredientCatalogItemIdFromName(candidatePayload.canonicalName);
+    const itemRef = ingredientCatalogItemsCol(db).doc(itemId);
+    const existingSnap = await itemRef.get();
+    const existing = existingSnap.exists ? existingSnap.data() || {} : {};
+
+    const mergedItem = {
+      canonicalName: candidatePayload.canonicalName,
+      category: candidatePayload.category ?? existing.category ?? null,
+      aliases: mergeLocalizedAliases(existing.aliases || {}, candidatePayload.aliases || {}),
+      nutritionPer100: candidatePayload.nutritionPer100,
+      defaultServing: candidatePayload.defaultServing,
+      source: "ai_promoted",
+      updatedAt: now,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await itemRef.set(mergedItem, { merge: true });
+
+    const itemsSnap = await ingredientCatalogItemsCol(db).get();
+    await upsertIngredientCatalogManifest(db, {
+      version: String(now),
+      updatedAt: now,
+      itemCount: itemsSnap.size,
+    });
+
+    promotedItem = serializeIngredientCatalogItem(itemId, mergedItem);
+    localEntry = promotedItem;
+  }
+
+  return {
+    candidateId,
+    scored,
+    candidatePayload,
+    item: promotedItem,
+    localEntry,
+  };
+}
+
+async function upsertIngredientCatalogManifest(db, updates = {}) {
+  const now = Date.now();
+  await ingredientCatalogDocRef(db).set(
+    {
+      version: String(updates.version || now),
+      updatedAt: typeof updates.updatedAt === "number" ? updates.updatedAt : now,
+      locales: SUPPORTED_INGREDIENT_LOCALES,
+      itemCount: typeof updates.itemCount === "number" ? updates.itemCount : 0,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
 
 
 function loadGooglePlayServiceAccount() {
@@ -161,7 +339,7 @@ app.use(cors());
 app.use(bodyParser.json());
 
 app.get("/", (req, res) => {
-  res.send("MyCookbook AI backend is running ✅");
+  res.send("Cook N'Eat AI backend is running ✅");
 });
 
 app.get("/health", (req, res) => {
@@ -184,20 +362,33 @@ const ECONOMY_ENABLED =
 
 // MVP cookie economics
 const ECONOMY_LIMITS = {
+  // How many premium actions a brand-new user can use before cookies are needed
+  FREE_PREMIUM_ACTIONS_STARTING: 25,
   // How many cookies a brand-new user/device starts with
   STARTING_COOKIES: 10,
   // Extra cookies granted once, on the user's first non-anonymous login
   SIGNUP_BONUS_COOKIES: 10,
+  REWARD_PROFILE_HEALTH_GOALS_COOKIES: 3,
+  REWARD_FIRST_RECIPE_SAVED_COOKIES: 2,
+  REWARD_RECIPES_10_COOKIES: 3,
+  REWARD_RECIPES_25_COOKIES: 5,
+  REWARD_FIRST_MEAL_LOGGED_COOKIES: 2,
+  REWARD_MEALS_10_COOKIES: 3,
+  REWARD_MEALS_25_COOKIES: 5,
+  REWARD_FIRST_COOKBOOK_CREATED_COOKIES: 3,
+  REWARD_FIRST_INSTAGRAM_REEL_IMPORT_COOKIES: 3,
 
   // Cookie costs (Import from URL is FREE for now)
   COST_AI_RECIPE_SUGGESTIONS: 0,
   COST_AI_RECIPE_FULL: 1,
   COST_IMPORT_INSTAGRAM_REEL: 2,
+  COST_RECIPE_NUTRITION_ESTIMATE: 1,
+  COST_MEAL_PHOTO_LOG: 1,
+  COST_DESCRIBE_MEAL: 0,
 
-  // Cookbooks: (enforced later on sync endpoints)
-  // Default cookbooks are free; user can create 1 custom cookbook for free.
-  FREE_CUSTOM_COOKBOOKS: 1,
-  COST_EXTRA_COOKBOOK: 1,
+  // Cookbooks are a core feature and should always be free.
+  FREE_CUSTOM_COOKBOOKS: 0,
+  COST_EXTRA_COOKBOOK: 0,
 };
 
 const INSTAGRAM_IMPORT_MIN_CONFIDENCE = 0.6;
@@ -209,16 +400,117 @@ const ECONOMY_ERROR_CODES = {
   NOT_ENOUGH_COOKIES: "ECON_NOT_ENOUGH_COOKIES",
 };
 
+const PREMIUM_ACTION_COSTS = {
+  ai_recipe_full: ECONOMY_LIMITS.COST_AI_RECIPE_FULL,
+  recipe_nutrition_estimate: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
+  meal_photo_log: ECONOMY_LIMITS.COST_MEAL_PHOTO_LOG,
+  describe_meal: ECONOMY_LIMITS.COST_DESCRIBE_MEAL,
+  import_instagram_reel: ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
+};
+
+const ECONOMY_REWARD_DEFS = {
+  profile_health_goals_v1: {
+    amount: ECONOMY_LIMITS.REWARD_PROFILE_HEALTH_GOALS_COOKIES,
+    reason: "reward_profile_health_goals",
+    bonusId: "profile_health_goals_v1",
+    title: "Complete profile + Health & Goals",
+    description: "Complete your profile and Health & Goals.",
+    badges: ["✅ Setup reward"],
+    action: "open_my_day_health_goals",
+  },
+  first_recipe_saved_v1: {
+    amount: ECONOMY_LIMITS.REWARD_FIRST_RECIPE_SAVED_COOKIES,
+    reason: "reward_first_recipe_saved",
+    bonusId: "first_recipe_saved_v1",
+    title: "Save your first recipe",
+    description: "Save your first recipe.",
+    badges: ["📘 First recipe"],
+    action: "open_recipe_picker",
+  },
+  recipes_10_v1: {
+    amount: ECONOMY_LIMITS.REWARD_RECIPES_10_COOKIES,
+    reason: "reward_recipes_10",
+    bonusId: "recipes_10_v1",
+    title: "Save 10 recipes",
+    description: "Save 10 recipes.",
+    badges: [],
+    action: "open_recipe_picker",
+    prerequisiteRewardKey: "first_recipe_saved_v1",
+    sortOrder: 25,
+  },
+  recipes_25_v1: {
+    amount: ECONOMY_LIMITS.REWARD_RECIPES_25_COOKIES,
+    reason: "reward_recipes_25",
+    bonusId: "recipes_25_v1",
+    title: "Save 25 recipes",
+    description: "Save 25 recipes.",
+    badges: [],
+    action: "open_recipe_picker",
+    prerequisiteRewardKey: "recipes_10_v1",
+    sortOrder: 26,
+  },
+  first_meal_logged_v1: {
+    amount: ECONOMY_LIMITS.REWARD_FIRST_MEAL_LOGGED_COOKIES,
+    reason: "reward_first_meal_logged",
+    bonusId: "first_meal_logged_v1",
+    title: "Log your first meal",
+    description: "Log your first meal in My Day.",
+    badges: ["🍽️ First meal"],
+    action: "open_my_day",
+  },
+  meals_10_v1: {
+    amount: ECONOMY_LIMITS.REWARD_MEALS_10_COOKIES,
+    reason: "reward_meals_10",
+    bonusId: "meals_10_v1",
+    title: "Log 10 meals",
+    description: "Log 10 meals in My Day.",
+    badges: [],
+    action: "open_my_day",
+    prerequisiteRewardKey: "first_meal_logged_v1",
+    sortOrder: 35,
+  },
+  meals_25_v1: {
+    amount: ECONOMY_LIMITS.REWARD_MEALS_25_COOKIES,
+    reason: "reward_meals_25",
+    bonusId: "meals_25_v1",
+    title: "Log 25 meals",
+    description: "Log 25 meals in My Day.",
+    badges: [],
+    action: "open_my_day",
+    prerequisiteRewardKey: "meals_10_v1",
+    sortOrder: 36,
+  },
+  first_cookbook_created_v1: {
+    amount: ECONOMY_LIMITS.REWARD_FIRST_COOKBOOK_CREATED_COOKIES,
+    reason: "reward_first_cookbook_created",
+    bonusId: "first_cookbook_created_v1",
+    title: "Create your first cookbook",
+    description: "Create your first cookbook.",
+    badges: ["📚 First cookbook"],
+    action: "open_history_cookbooks",
+  },
+  first_instagram_reel_import_v1: {
+    amount: ECONOMY_LIMITS.REWARD_FIRST_INSTAGRAM_REEL_IMPORT_COOKIES,
+    reason: "reward_first_instagram_reel_import",
+    bonusId: "first_instagram_reel_import_v1",
+    title: "Import your first Instagram Reel",
+    description: "Import your first recipe from an Instagram Reel.",
+    badges: [],
+    action: "open_recipe_picker",
+    sortOrder: 50,
+  },
+};
+
 const ECONOMY_OFFERS = [
   {
-    id: "cookies_5",
-    sku: "cookies_5",
-    productId: "cookies_5",
-    title: "5 Cookies",
+    id: "cookies_15",
+    sku: "cookies_15",
+    productId: "cookies_15",
+    title: "15 Eggs",
     subtitle: null,
     price: 0.99,
     currency: "USD",
-    cookies: 5,
+    cookies: 15,
     bonusCookies: 0,
     badges: [],
     isPromo: false,
@@ -226,45 +518,45 @@ const ECONOMY_OFFERS = [
     mostPurchased: false,
   },
   {
-    id: "cookies_15",
-    sku: "cookies_15",
-    productId: "cookies_15",
-    title: "15 Cookies",
-    subtitle: "",
-    price: 2.99,
-    currency: "USD",
-    cookies: 15,
-    bonusCookies: 3, // 20%
-    badges: ["🎁 +20% bonus"],
-    isPromo: true,
-    sortOrder: 20,
-    mostPurchased: false,
-  },
-  {
     id: "cookies_50",
     sku: "cookies_50",
     productId: "cookies_50",
-    title: "50 Cookies",
+    title: "40 Eggs",
     subtitle: "",
-    price: 6.99,
+    price: 2.99,
     currency: "USD",
-    cookies: 50,
-    bonusCookies: 12, // 24% (close) — use 13 for 26%
+    cookies: 40,
+    bonusCookies: 10, // 25%
     badges: ["⭐ Bestseller", "🎁 +25% bonus"],
     isPromo: true,
-    sortOrder: 30,
+    sortOrder: 20,
     mostPurchased: false,
   },
   {
     id: "cookies_120",
     sku: "cookies_120",
     productId: "cookies_120",
-    title: "120 Cookies",
+    title: "100 Eggs",
     subtitle: "",
-    price: 14.99,
+    price: 5.99,
     currency: "USD",
-    cookies: 120,
-    bonusCookies: 30, // 25%
+    cookies: 100,
+    bonusCookies: 25, // 25%
+    badges: ["🎁 +25% bonus"],
+    isPromo: true,
+    sortOrder: 30,
+    mostPurchased: false,
+  },
+  {
+    id: "cookies_300",
+    sku: "cookies_300",
+    productId: "cookies_300",
+    title: "240 Eggs",
+    subtitle: "",
+    price: 11.99,
+    currency: "USD",
+    cookies: 240,
+    bonusCookies: 60, // 25%
     badges: ["🔥 Biggest pack", "🎁 +25% bonus"],
     isPromo: true,
     sortOrder: 40,
@@ -289,6 +581,7 @@ function respondNotEnoughCookies(res, {
   action,
   requiredCookies,
   balance,
+  remainingFreePremiumActions,
   message,
   offerId,
 } = {}) {
@@ -312,11 +605,16 @@ function respondNotEnoughCookies(res, {
     requiredCookies: required,
     remaining,
     balance: remaining,
+    remainingFreePremiumActions:
+      typeof remainingFreePremiumActions === "number" &&
+      Number.isFinite(remainingFreePremiumActions)
+        ? Math.max(0, Math.floor(remainingFreePremiumActions))
+        : 0,
     offerId: typeof offerId === "string" ? offerId : ECONOMY_OFFERS[0]?.id,
     message:
       typeof message === "string" && message.trim()
         ? message
-        : "You do not have enough cookies.",
+        : "You do not have enough Eggs.",
   });
 }
 
@@ -414,28 +712,171 @@ async function getEconomyUidFromRequest(req) {
   return ctx.uid;
 }
 
+async function resolveLegacySyncUid(req) {
+  const verified = await getVerifiedIdTokenCached(req);
+  const bodyUid =
+    typeof req.body?.uid === "string" && req.body.uid.trim()
+      ? req.body.uid.trim()
+      : null;
+
+  if (verified?.uid) {
+    const verifiedUid = String(verified.uid);
+    if (bodyUid && bodyUid !== verifiedUid) {
+      return {
+        ok: false,
+        status: 403,
+        error: "uid_mismatch",
+        uid: null,
+        source: "verified_token",
+      };
+    }
+
+    return {
+      ok: true,
+      uid: verifiedUid,
+      source: "verified_token",
+      fallbackUsed: false,
+    };
+  }
+
+  if (bodyUid) {
+    console.warn("[SyncAuth] Falling back to body uid for legacy sync endpoint", {
+      path: req.path,
+      uid: bodyUid,
+    });
+    return {
+      ok: true,
+      uid: bodyUid,
+      source: "body_uid_fallback",
+      fallbackUsed: true,
+    };
+  }
+
+  return {
+    ok: false,
+    status: 401,
+    error: "missing_uid",
+    uid: null,
+    source: "none",
+  };
+}
+
+function stripUndefinedDeep(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => stripUndefinedDeep(item))
+      .filter((item) => item !== undefined);
+  }
+
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      const normalized = stripUndefinedDeep(child);
+      if (normalized !== undefined) {
+        out[key] = normalized;
+      }
+    }
+    return out;
+  }
+
+  return value === undefined ? undefined : value;
+}
+
 function getEconomyDocRef(db, uid) {
   // Economy is always stored under users/{uid}/economy/default (per-uid only)
   return db.doc(`users/${uid}/economy/default`);
+}
+
+function getEconomyLedgerCol(db, uid) {
+  return db.collection(`users/${uid}/economy/default/ledger`);
+}
+
+function normalizeEconomyData(raw = {}) {
+  const cookies =
+    typeof raw.cookies === "number" && Number.isFinite(raw.cookies)
+      ? raw.cookies
+      : 0;
+  const freePremiumActionsRemaining =
+    typeof raw.freePremiumActionsRemaining === "number" &&
+    Number.isFinite(raw.freePremiumActionsRemaining)
+      ? Math.max(0, Math.floor(raw.freePremiumActionsRemaining))
+      : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING;
+
+  return {
+    ...raw,
+    cookies,
+    freePremiumActionsRemaining,
+    grants:
+      raw.grants && typeof raw.grants === "object"
+        ? raw.grants
+        : {},
+  };
+}
+
+function addEconomyLedgerEntryTx(tx, db, uid, entry = {}) {
+  if (!uid) return;
+  const createdAt =
+    typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt)
+      ? entry.createdAt
+      : Date.now();
+  const customId =
+    typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : null;
+  const ref = customId
+    ? getEconomyLedgerCol(db, uid).doc(customId)
+    : getEconomyLedgerCol(db, uid).doc();
+
+  tx.set(
+    ref,
+    {
+      uid,
+      delta:
+        typeof entry.delta === "number" && Number.isFinite(entry.delta)
+          ? entry.delta
+          : 0,
+      balanceAfter:
+        typeof entry.balanceAfter === "number" && Number.isFinite(entry.balanceAfter)
+          ? entry.balanceAfter
+          : null,
+      freePremiumActionsAfter:
+        typeof entry.freePremiumActionsAfter === "number" &&
+        Number.isFinite(entry.freePremiumActionsAfter)
+          ? entry.freePremiumActionsAfter
+          : null,
+      kind: typeof entry.kind === "string" ? entry.kind : "adjustment",
+      reason: typeof entry.reason === "string" ? entry.reason : "unknown",
+      actionKey:
+        typeof entry.actionKey === "string" && entry.actionKey.trim()
+          ? entry.actionKey.trim()
+          : null,
+      source:
+        typeof entry.source === "string" && entry.source.trim()
+          ? entry.source.trim()
+          : null,
+      metadata:
+        entry.metadata && typeof entry.metadata === "object"
+          ? entry.metadata
+          : {},
+      createdAt,
+      _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 async function getOrInitEconomyDocTx(tx, db, uid) {
   const ref = getEconomyDocRef(db, uid);
   const snap = await tx.get(ref);
   if (snap.exists) {
-    const data = snap.data() || {};
-    const cookies =
-      typeof data.cookies === "number" && Number.isFinite(data.cookies)
-        ? data.cookies
-        : 0;
+    const data = normalizeEconomyData(snap.data() || {});
 
     // Backfill economy contract markers for older docs (do NOT re-grant cookies).
     // This helps future-proof the economy without changing current balances.
-    if (!data.grantVersion) {
+    if (!data.grantVersion || typeof data.freePremiumActionsRemaining !== "number") {
       tx.set(
         ref,
         {
           grantVersion: "v1",
+          freePremiumActionsRemaining: data.freePremiumActionsRemaining,
           // Preserve any existing grants object if it exists; otherwise initialize empty.
           grants: (data.grants && typeof data.grants === "object") ? data.grants : {},
           updatedAt: Date.now(),
@@ -445,12 +886,13 @@ async function getOrInitEconomyDocTx(tx, db, uid) {
       );
     }
 
-    return { ref, data: { ...data, cookies } };
+    return { ref, data };
   }
 
   const now = Date.now();
   const initial = {
     cookies: ECONOMY_LIMITS.STARTING_COOKIES,
+    freePremiumActionsRemaining: ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
     createdAt: now,
     updatedAt: now,
 
@@ -467,6 +909,17 @@ async function getOrInitEconomyDocTx(tx, db, uid) {
     _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
   tx.set(ref, initial, { merge: true });
+  addEconomyLedgerEntryTx(tx, db, uid, {
+    id: "grant_starting_cookies_v1",
+    delta: ECONOMY_LIMITS.STARTING_COOKIES,
+    balanceAfter: ECONOMY_LIMITS.STARTING_COOKIES,
+    freePremiumActionsAfter: ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
+    kind: "grant",
+    reason: "starting_cookies",
+    source: "system",
+    metadata: { grantKey: "starting_v1" },
+    createdAt: now,
+  });
   return { ref, data: initial };
 }
 
@@ -511,16 +964,32 @@ function getSignupBonusStatus(economyData, authCtx) {
 
 function maybeGrantSignupBonusTx(tx, economyRef, economyData, decoded) {
   // Only grant when this request is authenticated (decoded token present)
-  if (!decoded || !decoded.uid) return { changed: false, cookies: economyData.cookies };
+  if (!decoded || !decoded.uid) {
+    return {
+      changed: false,
+      cookies: economyData.cookies,
+      freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    };
+  }
 
   // Do not grant for anonymous sessions
-  if (isAnonymousProviderFromDecoded(decoded)) return { changed: false, cookies: economyData.cookies };
+  if (isAnonymousProviderFromDecoded(decoded)) {
+    return {
+      changed: false,
+      cookies: economyData.cookies,
+      freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    };
+  }
 
   const grants = (economyData.grants && typeof economyData.grants === "object") ? economyData.grants : {};
 
   // Marker key for the one-time signup/login bonus
   if (grants.signup_bonus_v1) {
-    return { changed: false, cookies: economyData.cookies };
+    return {
+      changed: false,
+      cookies: economyData.cookies,
+      freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    };
   }
 
   const now = Date.now();
@@ -549,29 +1018,173 @@ function maybeGrantSignupBonusTx(tx, economyRef, economyData, decoded) {
     { merge: true }
   );
 
-  return { changed: true, cookies: nextCookies };
+  return {
+    changed: true,
+    cookies: nextCookies,
+    freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    ledger: {
+      id: "grant_signup_bonus_v1",
+      delta: bonus,
+      balanceAfter: nextCookies,
+      freePremiumActionsAfter: economyData.freePremiumActionsRemaining,
+      kind: "grant",
+      reason: "signup_bonus",
+      source: "system",
+      metadata: { grantKey: "signup_bonus_v1" },
+      createdAt: now,
+    },
+  };
 }
 
-async function spendCookies({ req, amount, reason }) {
+function getRewardBonusStatus(economyData, rewardKey) {
+  const def = ECONOMY_REWARD_DEFS[rewardKey];
+  const grants =
+    economyData && economyData.grants && typeof economyData.grants === "object"
+      ? economyData.grants
+      : {};
+
+  if (grants[rewardKey]) {
+    return { status: "redeemed", reason: "already_redeemed" };
+  }
+
+  const prerequisiteRewardKey =
+    def && typeof def.prerequisiteRewardKey === "string" && def.prerequisiteRewardKey.trim()
+      ? def.prerequisiteRewardKey.trim()
+      : null;
+
+  if (prerequisiteRewardKey && !grants[prerequisiteRewardKey]) {
+    return { status: "hidden", reason: "prerequisite_incomplete" };
+  }
+
+  return { status: "available", reason: "eligible" };
+}
+
+function claimEconomyRewardTx(tx, db, uid, economyRef, economyData, rewardKey) {
+  const def = ECONOMY_REWARD_DEFS[rewardKey];
+  if (!def || !uid) {
+    return {
+      changed: false,
+      cookies: economyData.cookies,
+      freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    };
+  }
+
+  const grants =
+    economyData && economyData.grants && typeof economyData.grants === "object"
+      ? economyData.grants
+      : {};
+
+  if (grants[rewardKey]) {
+    return {
+      changed: false,
+      cookies: economyData.cookies,
+      freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+      alreadyGranted: true,
+    };
+  }
+
+  const now = Date.now();
+  const amount = typeof def.amount === "number" && Number.isFinite(def.amount) ? def.amount : 0;
+  const currentCookies =
+    typeof economyData.cookies === "number" && Number.isFinite(economyData.cookies)
+      ? economyData.cookies
+      : 0;
+  const nextCookies = currentCookies + amount;
+
+  tx.set(
+    economyRef,
+    {
+      cookies: nextCookies,
+      updatedAt: now,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      grants: {
+        ...grants,
+        [rewardKey]: {
+          amount,
+          at: now,
+        },
+      },
+      lastGrant: {
+        amount,
+        reason: def.reason,
+        at: now,
+      },
+    },
+    { merge: true }
+  );
+
+  addEconomyLedgerEntryTx(tx, db, uid, {
+    id: `grant_${rewardKey}`,
+    delta: amount,
+    balanceAfter: nextCookies,
+    freePremiumActionsAfter: economyData.freePremiumActionsRemaining,
+    kind: "grant",
+    reason: def.reason,
+    source: "system",
+    metadata: { grantKey: rewardKey },
+    createdAt: now,
+  });
+
+  return {
+    changed: true,
+    cookies: nextCookies,
+    freePremiumActionsRemaining: economyData.freePremiumActionsRemaining,
+    rewardKey,
+    reason: def.reason,
+    amount,
+  };
+}
+
+async function consumePremiumAction({ req, amount, reason, allowFreePremiumActions = true }) {
   // Fail open if economy disabled or Firestore/Admin unavailable.
   if (!ECONOMY_ENABLED) {
-    return { ok: true, skipped: true, remaining: null };
+    return {
+      ok: true,
+      skipped: true,
+      source: null,
+      charged: 0,
+      remaining: null,
+      remainingFreePremiumActions: null,
+    };
   }
   if (!_adminInitialized) {
-    console.warn("[Economy] Admin SDK not initialized; skipping cookie enforcement");
-    return { ok: true, skipped: true, remaining: null };
+    console.warn("[Economy] Admin SDK not initialized; skipping egg enforcement");
+    return {
+      ok: true,
+      skipped: true,
+      source: null,
+      charged: 0,
+      remaining: null,
+      remainingFreePremiumActions: null,
+    };
   }
 
   const authCtx = await getEconomyAuthContext(req);
   const uid = authCtx.uid;
   if (!uid) {
     // Option A requires uid. If missing, fail open (MVP) to avoid breaking flows.
-    console.warn("[Economy] Missing uid (Authorization Bearer token or x-user-id); skipping cookie enforcement");
-    return { ok: true, skipped: true, remaining: null };
+    console.warn("[Economy] Missing uid (Authorization Bearer token or x-user-id); skipping egg enforcement");
+    return {
+      ok: true,
+      skipped: true,
+      source: null,
+      charged: 0,
+      remaining: null,
+      remainingFreePremiumActions: null,
+    };
   }
 
   const amt = typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
-  if (amt <= 0) return { ok: true, skipped: true, remaining: null };
+  if (amt <= 0) {
+    return {
+      ok: true,
+      skipped: true,
+      source: null,
+      charged: 0,
+      remaining: null,
+      remainingFreePremiumActions: null,
+    };
+  }
 
   const db = getAnalyticsDb();
 
@@ -581,14 +1194,56 @@ async function spendCookies({ req, amount, reason }) {
       // One-time signup bonus: only when we have a VERIFIED non-anonymous token.
       // This runs before spend checks so the first post-signup action can benefit from the bonus.
       const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+      if (grantRes?.ledger) {
+        addEconomyLedgerEntryTx(tx, db, uid, grantRes.ledger);
+      }
 
       // Use the possibly-updated cookie balance for spend validation.
       const effectiveCookies =
         typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
           ? grantRes.cookies
           : (typeof data.cookies === "number" && Number.isFinite(data.cookies) ? data.cookies : 0);
+      const effectiveFreePremiumActions =
+        typeof grantRes.freePremiumActionsRemaining === "number" &&
+        Number.isFinite(grantRes.freePremiumActionsRemaining)
+          ? Math.max(0, Math.floor(grantRes.freePremiumActionsRemaining))
+          : typeof data.freePremiumActionsRemaining === "number" &&
+              Number.isFinite(data.freePremiumActionsRemaining)
+            ? Math.max(0, Math.floor(data.freePremiumActionsRemaining))
+            : 0;
 
       const current = effectiveCookies;
+      const currentFree = effectiveFreePremiumActions;
+
+      if (allowFreePremiumActions && currentFree > 0) {
+        const now = Date.now();
+        const nextFree = currentFree - 1;
+
+        tx.set(
+          ref,
+          {
+            freePremiumActionsRemaining: nextFree,
+            updatedAt: now,
+            _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastSpend: {
+              amount: 1,
+              reason: reason || "unknown",
+              source: "free_premium_action",
+              at: now,
+            },
+          },
+          { merge: true }
+        );
+
+        return {
+          ok: true,
+          source: "free_premium_action",
+          charged: 0,
+          remaining: current,
+          remainingFreePremiumActions: nextFree,
+          uid,
+        };
+      }
 
       if (current < amt) {
         return {
@@ -597,6 +1252,7 @@ async function spendCookies({ req, amount, reason }) {
           action: reason || "unknown",
           requiredCookies: amt,
           remaining: current,
+          remainingFreePremiumActions: currentFree,
           uid,
         };
       }
@@ -614,15 +1270,29 @@ async function spendCookies({ req, amount, reason }) {
           lastSpend: {
             amount: amt,
             reason: reason || "unknown",
+            source: "cookies",
             at: now,
           },
         },
         { merge: true }
       );
+      addEconomyLedgerEntryTx(tx, db, uid, {
+        delta: -amt,
+        balanceAfter: next,
+        freePremiumActionsAfter: currentFree,
+        kind: "spend",
+        reason: reason || "unknown",
+        actionKey: reason || "unknown",
+        source: "cookies",
+        createdAt: now,
+      });
 
       return {
         ok: true,
+        source: "cookies",
+        charged: amt,
         remaining: next,
+        remainingFreePremiumActions: currentFree,
         uid,
       };
     });
@@ -636,6 +1306,150 @@ async function spendCookies({ req, amount, reason }) {
     });
     return { ok: true, skipped: true, remaining: null };
   }
+}
+
+async function previewPremiumAction({ req, amount, reason, allowFreePremiumActions = true }) {
+  if (!ECONOMY_ENABLED) {
+    return {
+      ok: true,
+      skipped: true,
+      allowed: true,
+      source: null,
+      remaining: null,
+      remainingFreePremiumActions: null,
+      action: reason || "unknown",
+      requiredCookies: typeof amount === "number" && Number.isFinite(amount) ? amount : 0,
+    };
+  }
+  if (!_adminInitialized) {
+    return {
+      ok: true,
+      skipped: true,
+      allowed: true,
+      source: null,
+      remaining: null,
+      remainingFreePremiumActions: null,
+      action: reason || "unknown",
+      requiredCookies: typeof amount === "number" && Number.isFinite(amount) ? amount : 0,
+    };
+  }
+
+  const authCtx = await getEconomyAuthContext(req);
+  const uid = authCtx.uid;
+  if (!uid) {
+    return {
+      ok: true,
+      skipped: true,
+      allowed: true,
+      source: null,
+      remaining: null,
+      remainingFreePremiumActions: null,
+      action: reason || "unknown",
+      requiredCookies: typeof amount === "number" && Number.isFinite(amount) ? amount : 0,
+    };
+  }
+
+  const amt = typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
+  if (amt <= 0) {
+    return {
+      ok: true,
+      skipped: true,
+      allowed: true,
+      source: null,
+      remaining: null,
+      remainingFreePremiumActions: null,
+      action: reason || "unknown",
+      requiredCookies: 0,
+    };
+  }
+
+  const db = getAnalyticsDb();
+  try {
+    const result = await db.runTransaction(async (tx) => {
+      const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
+      const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+      if (grantRes?.ledger) {
+        addEconomyLedgerEntryTx(tx, db, uid, grantRes.ledger);
+      }
+
+      const effectiveCookies =
+        typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
+          ? grantRes.cookies
+          : (typeof data.cookies === "number" && Number.isFinite(data.cookies) ? data.cookies : 0);
+      const effectiveFreePremiumActions =
+        typeof grantRes.freePremiumActionsRemaining === "number" &&
+        Number.isFinite(grantRes.freePremiumActionsRemaining)
+          ? Math.max(0, Math.floor(grantRes.freePremiumActionsRemaining))
+          : typeof data.freePremiumActionsRemaining === "number" &&
+              Number.isFinite(data.freePremiumActionsRemaining)
+            ? Math.max(0, Math.floor(data.freePremiumActionsRemaining))
+            : 0;
+
+      if (allowFreePremiumActions && effectiveFreePremiumActions > 0) {
+        return {
+          ok: true,
+          allowed: true,
+          source: "free_premium_action",
+          remaining: effectiveCookies,
+          remainingFreePremiumActions: effectiveFreePremiumActions,
+          action: reason || "unknown",
+          requiredCookies: amt,
+          uid,
+        };
+      }
+
+      if (effectiveCookies < amt) {
+        return {
+          ok: false,
+          allowed: false,
+          code: ECONOMY_ERROR_CODES.NOT_ENOUGH_COOKIES,
+          source: "cookies",
+          action: reason || "unknown",
+          requiredCookies: amt,
+          remaining: effectiveCookies,
+          remainingFreePremiumActions: effectiveFreePremiumActions,
+          uid,
+        };
+      }
+
+      return {
+        ok: true,
+        allowed: true,
+        source: "cookies",
+        remaining: effectiveCookies,
+        remainingFreePremiumActions: effectiveFreePremiumActions,
+        action: reason || "unknown",
+        requiredCookies: amt,
+        uid,
+      };
+    });
+
+    return result;
+  } catch (err) {
+    console.error("[Economy] previewPremiumAction failed; skipping enforcement", {
+      message: err?.message,
+      code: err?.code,
+    });
+    return {
+      ok: true,
+      skipped: true,
+      allowed: true,
+      source: null,
+      remaining: null,
+      remainingFreePremiumActions: null,
+      action: reason || "unknown",
+      requiredCookies: amt,
+    };
+  }
+}
+
+async function spendCookies({ req, amount, reason }) {
+  return consumePremiumAction({
+    req,
+    amount,
+    reason,
+    allowFreePremiumActions: true,
+  });
 }
 
 // Read (and lazily initialize) the user's economy doc.
@@ -666,6 +1480,9 @@ async function getOrInitCookiesBalance(req) {
       const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
       // One-time signup bonus: only when we have a VERIFIED non-anonymous token.
       const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+      if (grantRes?.ledger) {
+        addEconomyLedgerEntryTx(tx, db, uid, grantRes.ledger);
+      }
 
       const effectiveCookies =
         typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
@@ -675,11 +1492,21 @@ async function getOrInitCookiesBalance(req) {
       const current = effectiveCookies;
 
       // Defensive: if doc exists but cookies is missing, persist a normalized value.
-      if (typeof data.cookies !== "number" || !Number.isFinite(data.cookies)) {
+      if (
+        typeof data.cookies !== "number" ||
+        !Number.isFinite(data.cookies) ||
+        typeof data.freePremiumActionsRemaining !== "number" ||
+        !Number.isFinite(data.freePremiumActionsRemaining)
+      ) {
         tx.set(
           ref,
           {
             cookies: current,
+            freePremiumActionsRemaining:
+              typeof data.freePremiumActionsRemaining === "number" &&
+              Number.isFinite(data.freePremiumActionsRemaining)
+                ? Math.max(0, Math.floor(data.freePremiumActionsRemaining))
+                : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
             updatedAt: Date.now(),
             _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
@@ -687,7 +1514,16 @@ async function getOrInitCookiesBalance(req) {
         );
       }
 
-      return { ok: true, cookies: current, uid };
+      return {
+        ok: true,
+        cookies: current,
+        freePremiumActionsRemaining:
+          typeof data.freePremiumActionsRemaining === "number" &&
+          Number.isFinite(data.freePremiumActionsRemaining)
+            ? Math.max(0, Math.floor(data.freePremiumActionsRemaining))
+            : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
+        uid,
+      };
     });
 
     return result;
@@ -697,7 +1533,12 @@ async function getOrInitCookiesBalance(req) {
       message: err?.message,
       code: err?.code,
     });
-    return { ok: true, skipped: true, cookies: ECONOMY_LIMITS.STARTING_COOKIES };
+    return {
+      ok: true,
+      skipped: true,
+      cookies: ECONOMY_LIMITS.STARTING_COOKIES,
+      freePremiumActionsRemaining: ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
+    };
   }
 }
 
@@ -716,11 +1557,15 @@ app.get("/economy/balance", async (req, res) => {
       ok: true,
       cookies,
       balance: cookies,
+      freePremiumActionsRemaining:
+        typeof result.freePremiumActionsRemaining === "number"
+          ? result.freePremiumActionsRemaining
+          : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
       skipped: !!result.skipped,
     });
   } catch (err) {
     console.error("❌ /economy/balance (GET) error:", err?.message || err);
-    return res.status(500).json({ error: "Failed to load cookies balance" });
+    return res.status(500).json({ error: "Failed to load Eggs balance" });
   }
 });
 
@@ -750,37 +1595,256 @@ app.post("/economy/balance", async (req, res) => {
       ok: true,
       cookies,
       balance: cookies,
+      freePremiumActionsRemaining:
+        typeof result.freePremiumActionsRemaining === "number"
+          ? result.freePremiumActionsRemaining
+          : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
       skipped: !!result.skipped,
     });
   } catch (err) {
     console.error("❌ /economy/balance (POST) error:", err?.message || err);
-    return res.status(500).json({ error: "Failed to load cookies balance" });
+    return res.status(500).json({ error: "Failed to load Eggs balance" });
+  }
+});
+
+app.get("/economy/history", async (req, res) => {
+  try {
+    if (!ECONOMY_ENABLED || !_adminInitialized) {
+      return res.json({ ok: true, entries: [] });
+    }
+
+    const authCtx = await getEconomyAuthContext(req);
+    const uid = authCtx.uid;
+    if (!uid) {
+      return res.json({ ok: true, entries: [] });
+    }
+
+    const limitRaw =
+      typeof req.query?.limit === "string" ? Number(req.query.limit) : 50;
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0
+        ? Math.min(100, Math.floor(limitRaw))
+        : 50;
+
+    const db = getAnalyticsDb();
+    const snap = await getEconomyLedgerCol(db, uid)
+      .orderBy("createdAt", "desc")
+      .limit(limit)
+      .get();
+
+    const entries = snap.docs.map((doc) => ({
+      id: doc.id,
+      ...(doc.data() || {}),
+    }));
+
+    return res.json({ ok: true, entries });
+  } catch (err) {
+    console.error("❌ /economy/history error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to load Eggs history" });
+  }
+});
+
+app.post("/economy/rewards/claim", async (req, res) => {
+  try {
+    if (!ECONOMY_ENABLED || !_adminInitialized) {
+      return res.json({ ok: true, skipped: true });
+    }
+
+    const rewardKey =
+      typeof req.body?.rewardKey === "string" && req.body.rewardKey.trim()
+        ? req.body.rewardKey.trim()
+        : null;
+
+    if (!rewardKey || !ECONOMY_REWARD_DEFS[rewardKey]) {
+      return res.status(400).json({ ok: false, error: "invalid_reward_key" });
+    }
+
+    const authCtx = await getEconomyAuthContext(req);
+    const uid = authCtx.uid;
+    if (!uid) {
+      return res.status(401).json({ ok: false, error: "missing_uid" });
+    }
+
+    const db = getAnalyticsDb();
+    const result = await db.runTransaction(async (tx) => {
+      const { ref, data } = await getOrInitEconomyDocTx(tx, db, uid);
+      const grantRes = maybeGrantSignupBonusTx(tx, ref, data, authCtx.decoded);
+      const effectiveData = {
+        ...data,
+        cookies:
+          typeof grantRes.cookies === "number" && Number.isFinite(grantRes.cookies)
+            ? grantRes.cookies
+            : data.cookies,
+        freePremiumActionsRemaining:
+          typeof grantRes.freePremiumActionsRemaining === "number" &&
+          Number.isFinite(grantRes.freePremiumActionsRemaining)
+            ? grantRes.freePremiumActionsRemaining
+            : data.freePremiumActionsRemaining,
+      };
+      if (grantRes?.ledger) {
+        addEconomyLedgerEntryTx(tx, db, uid, grantRes.ledger);
+      }
+
+      const rewardRes = claimEconomyRewardTx(tx, db, uid, ref, effectiveData, rewardKey);
+      return {
+        ok: true,
+        changed: !!rewardRes.changed,
+        alreadyGranted: !!rewardRes.alreadyGranted,
+        rewardKey,
+        cookies:
+          typeof rewardRes.cookies === "number" && Number.isFinite(rewardRes.cookies)
+            ? rewardRes.cookies
+            : effectiveData.cookies,
+        freePremiumActionsRemaining:
+          typeof rewardRes.freePremiumActionsRemaining === "number" &&
+          Number.isFinite(rewardRes.freePremiumActionsRemaining)
+            ? rewardRes.freePremiumActionsRemaining
+            : effectiveData.freePremiumActionsRemaining,
+      };
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error("❌ /economy/rewards/claim error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "failed_to_claim_reward" });
+  }
+});
+
+app.post("/economy/premium-action", async (req, res) => {
+  try {
+    const action =
+      typeof req.body?.action === "string" ? req.body.action.trim() : "";
+    const previewOnly = req.body?.preview === true;
+    const amount = PREMIUM_ACTION_COSTS[action];
+
+    if (!action || typeof amount !== "number" || !Number.isFinite(amount)) {
+      return res.status(400).json({ ok: false, error: "Unknown premium action" });
+    }
+
+    const economySpend = previewOnly
+      ? await previewPremiumAction({ req, amount, reason: action })
+      : await spendCookies({ req, amount, reason: action });
+
+    if (economySpend && economySpend.ok === false) {
+      return respondNotEnoughCookies(res, {
+        action,
+        requiredCookies: economySpend.requiredCookies || amount,
+        balance: economySpend.remaining,
+        remainingFreePremiumActions: economySpend.remainingFreePremiumActions,
+        message: `You need ${amount} Eggs to use this premium action.`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      action,
+      preview: previewOnly,
+      source: economySpend?.source || null,
+      charged:
+        typeof economySpend?.charged === "number" ? economySpend.charged : 0,
+      remaining:
+        typeof economySpend?.remaining === "number" ? economySpend.remaining : null,
+      remainingFreePremiumActions:
+        typeof economySpend?.remainingFreePremiumActions === "number"
+          ? economySpend.remainingFreePremiumActions
+          : null,
+      skippedEconomy: !!economySpend?.skipped,
+    });
+  } catch (err) {
+    console.error("❌ /economy/premium-action error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to process premium action" });
   }
 });
 // Backend-first economy contract/config endpoint.
 // The mobile app can call this to fetch current pricing, limits and any active offers.
 app.get("/economy/config", async (req, res) => {
   try {
+    const bal = await getOrInitCookiesBalance(req);
+    const cookies =
+      typeof bal.cookies === "number" && Number.isFinite(bal.cookies)
+        ? bal.cookies
+        : ECONOMY_LIMITS.STARTING_COOKIES;
+    const freePremiumActionsRemaining =
+      typeof bal.freePremiumActionsRemaining === "number" &&
+      Number.isFinite(bal.freePremiumActionsRemaining)
+        ? Math.max(0, Math.floor(bal.freePremiumActionsRemaining))
+        : ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING;
+
     return res.json({
       ok: true,
       version: "v1",
+      startingFreePremiumActions: ECONOMY_LIMITS.FREE_PREMIUM_ACTIONS_STARTING,
       startingCookies: ECONOMY_LIMITS.STARTING_COOKIES,
       signupBonusCookies: ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES,
       costs: {
         aiSuggestions: ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
         aiFullRecipe: ECONOMY_LIMITS.COST_AI_RECIPE_FULL,
         instagramReelImport: ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
-        createCookbook: ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
+        recipeNutritionEstimate: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
+        mealPhotoLog: ECONOMY_LIMITS.COST_MEAL_PHOTO_LOG,
+        describeMeal: ECONOMY_LIMITS.COST_DESCRIBE_MEAL,
+        createCookbook: 0,
       },
       freeRules: {
-        freeCustomCookbooks: ECONOMY_LIMITS.FREE_CUSTOM_COOKBOOKS,
+        freeCustomCookbooks: null,
         defaultCookbooksFree: true,
       },
       offers: ECONOMY_OFFERS,
+      balance: {
+        cookies,
+        freePremiumActionsRemaining,
+      },
     });
   } catch (err) {
     console.error("❌ /economy/config (GET) error:", err?.message || err);
     return res.status(500).json({ error: "Failed to load economy config" });
+  }
+});
+
+app.post("/recipes/estimate-nutrition/charge", async (req, res) => {
+  try {
+    const previewOnly = req.body?.preview === true;
+    const economySpend = previewOnly
+      ? await previewPremiumAction({
+          req,
+          amount: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
+          reason: "recipe_nutrition_estimate",
+        })
+      : await spendCookies({
+      req,
+      amount: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
+      reason: "recipe_nutrition_estimate",
+    });
+
+    if (economySpend && economySpend.ok === false) {
+      return respondNotEnoughCookies(res, {
+        action: economySpend.action || "recipe_nutrition_estimate",
+        requiredCookies:
+          economySpend.requiredCookies || ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
+        balance: economySpend.remaining,
+        remainingFreePremiumActions: economySpend.remainingFreePremiumActions,
+        message: `You need ${ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE} Eggs to estimate recipe nutrition values.`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      action: "recipe_nutrition_estimate",
+      preview: previewOnly,
+      source: economySpend?.source || null,
+      charged:
+        typeof economySpend?.charged === "number" ? economySpend.charged : 0,
+      remaining:
+        typeof economySpend?.remaining === "number" ? economySpend.remaining : null,
+      remainingFreePremiumActions:
+        typeof economySpend?.remainingFreePremiumActions === "number"
+          ? economySpend.remainingFreePremiumActions
+          : null,
+      skippedEconomy: !!economySpend?.skipped,
+    });
+  } catch (err) {
+    console.error("❌ /recipes/estimate-nutrition/charge error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to charge nutrition estimate" });
   }
 });
 
@@ -816,23 +1880,51 @@ app.get("/economy/catalog", async (req, res) => {
 
     const signupBonus = getSignupBonusStatus(economyDataForStatus, authCtx);
 
+    const rewardBonuses = Object.entries(ECONOMY_REWARD_DEFS)
+      .map(([rewardKey, def]) => {
+        const status = getRewardBonusStatus(economyDataForStatus, rewardKey);
+        return {
+          id: def.bonusId,
+          rewardKey,
+          kind: "reward",
+          title: def.title,
+          description: def.description,
+          price: 0,
+          currency: "USD",
+          cookies: def.amount,
+          status: status.status,
+          reason: status.reason,
+          action: def.action || null,
+          badges: Array.isArray(def.badges) ? def.badges : [],
+          sortOrder:
+            typeof def.sortOrder === "number" && Number.isFinite(def.sortOrder)
+              ? def.sortOrder
+              : 0,
+        };
+      })
+      .filter((reward) => reward.status !== "hidden")
+      .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+
     // "Free offer" shown in the catalog (no redeem button). It becomes redeemed automatically once granted.
     const bonuses = [
       {
         id: "signup_bonus_v1",
+        rewardKey: "signup_bonus_v1",
         kind: "signup_bonus",
         title: `Create an account bonus`,
-        description: `Create an account and log in to get ${ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES} free cookies.`,
+        description: "Create an account and log in.",
         price: 0,
         currency: "USD",
         cookies: ECONOMY_LIMITS.SIGNUP_BONUS_COOKIES,
         status: signupBonus.status, // available | redeemed | locked
         reason: signupBonus.reason, // create_account_required | already_redeemed | login_required | eligible
-        // Helps the UI decide what CTA to show (e.g., "Create account")
-        action: signupBonus.status === "available" && signupBonus.reason === "create_account_required"
-          ? "create_account"
-          : null,
+        action:
+          signupBonus.status === "available" && signupBonus.reason === "create_account_required"
+            ? "create_account"
+            : null,
+        badges: ["🎁 Welcome bonus"],
       },
+      ...rewardBonuses,
     ];
 
     // Offer rendering should be deterministic
@@ -1027,7 +2119,7 @@ async function handleEconomyPurchaseVerify(req, res) {
 
     const grantedCookies = getTotalCookiesFromOffer(offer);
     if (grantedCookies <= 0) {
-      return res.status(400).json({ ok: false, error: "Offer grants 0 cookies" });
+      return res.status(400).json({ ok: false, error: "Offer grants 0 Eggs" });
     }
 
     let newBalance = null;
@@ -1067,6 +2159,21 @@ async function handleEconomyPurchaseVerify(req, res) {
         },
         { merge: true }
       );
+      addEconomyLedgerEntryTx(tx, db, auth.uid, {
+        id: `purchase_${String(purchaseToken).trim()}`,
+        delta: grantedCookies,
+        balanceAfter: nextCookies,
+        kind: "purchase",
+        reason: "cookie_purchase",
+        source: "purchase",
+        metadata: {
+          sku: offer.sku || offer.id,
+          offerId: offer.id,
+          purchaseToken,
+          orderId: orderId || play.orderId || null,
+        },
+        createdAt: now,
+      });
 
       // Store purchase record
       tx.set(
@@ -1121,7 +2228,7 @@ async function handleEconomyPurchaseVerify(req, res) {
       grantedCookies,
       balance: newBalance,
       cookies: newBalance,
-      message: "Purchase verified and cookies granted",
+      message: "Purchase verified and Eggs granted",
     });
   } catch (err) {
     console.error("❌ /economy/purchases/verify error:", err?.message || err);
@@ -1175,12 +2282,87 @@ app.post("/economy/dev/grant", async (req, res) => {
         },
         { merge: true }
       );
+      addEconomyLedgerEntryTx(tx, db, auth.uid, {
+        delta: amount,
+        balanceAfter: nextCookies,
+        kind: "adjustment",
+        reason: "dev_grant",
+        source: "dev",
+        createdAt: now,
+      });
     });
 
     return res.json({ ok: true, granted: amount, cookies: newBalance, balance: newBalance });
   } catch (err) {
     console.error("❌ /economy/dev/grant error:", err?.message || err);
-    return res.status(500).json({ ok: false, error: "Failed to grant cookies" });
+    return res.status(500).json({ ok: false, error: "Failed to grant Eggs" });
+  }
+});
+
+// DEV ONLY: set free premium actions remaining for testing.
+// Enabled only if ECONOMY_DEV_GRANT_ENABLED is true and NODE_ENV != production.
+app.post("/economy/dev/set-free-premium-actions", async (req, res) => {
+  try {
+    if (!ECONOMY_DEV_GRANT_ENABLED) {
+      return res.status(404).json({ ok: false, error: "Not found" });
+    }
+
+    const auth = await requireVerifiedUid(req, res);
+    if (!auth) return;
+
+    const body = req.body || {};
+    const value =
+      typeof body.value === "number" && Number.isFinite(body.value)
+        ? Math.max(0, Math.floor(body.value))
+        : null;
+
+    if (value === null) {
+      return res.status(400).json({ ok: false, error: "value must be a non-negative number" });
+    }
+
+    const db = getAnalyticsDb();
+    let cookies = null;
+
+    await db.runTransaction(async (tx) => {
+      const { ref: econRef, data: econData } = await getOrInitEconomyDocTx(tx, db, auth.uid);
+      const currentCookies =
+        typeof econData.cookies === "number" && Number.isFinite(econData.cookies)
+          ? econData.cookies
+          : 0;
+      cookies = currentCookies;
+      const now = Date.now();
+
+      tx.set(
+        econRef,
+        {
+          freePremiumActionsRemaining: value,
+          updatedAt: now,
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      addEconomyLedgerEntryTx(tx, db, auth.uid, {
+        delta: 0,
+        balanceAfter: currentCookies,
+        freePremiumActionsAfter: value,
+        kind: "adjustment",
+        reason: "dev_set_free_premium_actions",
+        source: "dev",
+        metadata: { value },
+        createdAt: now,
+      });
+    });
+
+    return res.json({
+      ok: true,
+      freePremiumActionsRemaining: value,
+      cookies,
+      balance: cookies,
+    });
+  } catch (err) {
+    console.error("❌ /economy/dev/set-free-premium-actions error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to update free premium actions" });
   }
 });
 
@@ -1758,6 +2940,552 @@ app.post("/sync/preferences", async (req, res) => {
   }
 });
 
+// ---------------- My Day Sync Endpoints ----------------
+
+app.get("/sync/myday/profile", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+
+    const db = getAnalyticsDb();
+    const snap = await db.doc(`users/${uid}/myDay/profile`).get();
+    if (!snap.exists) {
+      return res.json({ doc: null });
+    }
+    return res.json({ doc: snap.data() || null });
+  } catch (err) {
+    console.error("❌ /sync/myday/profile (GET) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load My Day profile" });
+  }
+});
+
+app.post("/sync/myday/profile", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+
+    const doc = req.body?.doc;
+    if (!doc || typeof doc !== "object") {
+      return res.status(400).json({ error: "doc object is required" });
+    }
+
+    const now = Date.now();
+    const payload = stripUndefinedDeep({
+      ...doc,
+      updatedAt:
+        typeof doc.updatedAt === "number" && Number.isFinite(doc.updatedAt)
+          ? doc.updatedAt
+          : now,
+      schemaVersion:
+        typeof doc.schemaVersion === "number" && Number.isFinite(doc.schemaVersion)
+          ? doc.schemaVersion
+          : 1,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const db = getAnalyticsDb();
+    await db.doc(`users/${uid}/myDay/profile`).set(payload, { merge: true });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /sync/myday/profile (POST) error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save My Day profile" });
+  }
+});
+
+app.post("/sync/myday/meals/pull", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+
+    const db = getAnalyticsDb();
+    const snap = await db.collection(`users/${uid}/myDayMeals`).get();
+    const items = [];
+    snap.forEach((doc) => items.push({ id: doc.id, ...(doc.data() || {}) }));
+    return res.json({ items });
+  } catch (err) {
+    console.error("❌ /sync/myday/meals/pull error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load My Day meals" });
+  }
+});
+
+app.post("/sync/myday/meals/push", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    const db = getAnalyticsDb();
+    const batch = db.batch();
+    const now = Date.now();
+    let upserted = 0;
+    let deleted = 0;
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== "object") continue;
+      const id =
+        typeof raw.id === "string" && raw.id.trim()
+          ? raw.id.trim()
+          : null;
+      if (!id) continue;
+
+      const ref = db.doc(`users/${uid}/myDayMeals/${id}`);
+      if (raw.isDeleted === true) {
+        batch.delete(ref);
+        deleted += 1;
+        continue;
+      }
+
+      const payload = stripUndefinedDeep({
+        ...raw,
+        updatedAt:
+          typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
+            ? raw.updatedAt
+            : now,
+        schemaVersion:
+          typeof raw.schemaVersion === "number" && Number.isFinite(raw.schemaVersion)
+            ? raw.schemaVersion
+            : 1,
+        _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      delete payload.id;
+      batch.set(ref, payload, { merge: true });
+      upserted += 1;
+    }
+
+    await batch.commit();
+    return res.json({ ok: true, upserted, deleted });
+  } catch (err) {
+    console.error("❌ /sync/myday/meals/push error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save My Day meals" });
+  }
+});
+
+app.post("/sync/myday/weights/pull", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+
+    const db = getAnalyticsDb();
+    const snap = await db.collection(`users/${uid}/myDayWeights`).get();
+    const items = [];
+    snap.forEach((doc) => items.push({ id: doc.id, ...(doc.data() || {}) }));
+    return res.json({ items });
+  } catch (err) {
+    console.error("❌ /sync/myday/weights/pull error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load My Day weights" });
+  }
+});
+
+app.post("/sync/myday/weights/push", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
+    }
+    const uid = authResolution.uid;
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    const db = getAnalyticsDb();
+    const batch = db.batch();
+    const now = Date.now();
+    let upserted = 0;
+    let deleted = 0;
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== "object") continue;
+      const id =
+        typeof raw.id === "string" && raw.id.trim()
+          ? raw.id.trim()
+          : null;
+      if (!id) continue;
+
+      const ref = db.doc(`users/${uid}/myDayWeights/${id}`);
+      if (raw.isDeleted === true) {
+        batch.delete(ref);
+        deleted += 1;
+        continue;
+      }
+
+      const payload = stripUndefinedDeep({
+        ...raw,
+        updatedAt:
+          typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
+            ? raw.updatedAt
+            : now,
+        schemaVersion:
+          typeof raw.schemaVersion === "number" && Number.isFinite(raw.schemaVersion)
+            ? raw.schemaVersion
+            : 1,
+        _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      delete payload.id;
+      batch.set(ref, payload, { merge: true });
+      upserted += 1;
+    }
+
+    await batch.commit();
+    return res.json({ ok: true, upserted, deleted });
+  } catch (err) {
+    console.error("❌ /sync/myday/weights/push error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to save My Day weights" });
+  }
+});
+
+// ---------------- Ingredient Catalog Endpoints ----------------
+app.get("/ingredients/catalog/manifest", async (req, res) => {
+  try {
+    const db = _adminInitialized ? getAnalyticsDb() : null;
+    const manifestSnap = db ? await ingredientCatalogDocRef(db).get() : null;
+    const manifest = manifestSnap?.exists ? manifestSnap.data() || {} : {};
+    const combinedItems = await getCombinedIngredientCatalogItems(db);
+
+    return res.json({
+      manifest: {
+        version: String(manifest.version || INGREDIENT_CATALOG_SEED_MANIFEST.version),
+        updatedAt:
+          typeof manifest.updatedAt === "number" && manifest.updatedAt > 0
+            ? Math.max(manifest.updatedAt, INGREDIENT_CATALOG_SEED_MANIFEST.updatedAt)
+            : INGREDIENT_CATALOG_SEED_MANIFEST.updatedAt,
+        locales:
+          Array.isArray(manifest.locales) && manifest.locales.length > 0
+            ? manifest.locales
+            : SUPPORTED_INGREDIENT_LOCALES,
+        itemCount: combinedItems.length,
+      },
+    });
+  } catch (err) {
+    console.error("❌ /ingredients/catalog/manifest error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load ingredient catalog manifest" });
+  }
+});
+
+app.get("/ingredients/catalog/items", async (req, res) => {
+  try {
+    const db = _adminInitialized ? getAnalyticsDb() : null;
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 5000)) : 2000;
+    const updatedAfterRaw = Number(req.query.updatedAfter);
+    const updatedAfter = Number.isFinite(updatedAfterRaw) ? updatedAfterRaw : null;
+    const combinedItems = await getCombinedIngredientCatalogItems(db);
+    const filteredItems =
+      updatedAfter !== null
+        ? combinedItems.filter((item) => item.updatedAt > updatedAfter)
+        : combinedItems;
+    const items = filteredItems.slice(0, limit);
+
+    return res.json({
+      items,
+      cursor: items.length > 0 ? items[items.length - 1].updatedAt : null,
+    });
+  } catch (err) {
+    console.error("❌ /ingredients/catalog/items error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load ingredient catalog items" });
+  }
+});
+
+app.post("/ingredients/catalog/candidates", async (req, res) => {
+  try {
+    if (!_adminInitialized) {
+      return res.status(500).json({ error: "Admin SDK not initialized" });
+    }
+
+    const authCtx = await getEconomyAuthContext(req);
+    if (!authCtx?.uid) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const candidate = req.body?.candidate;
+    if (!candidate || typeof candidate !== "object") {
+      return res.status(400).json({ error: "candidate object is required" });
+    }
+
+    const db = getAnalyticsDb();
+    const persisted = await persistIngredientCatalogCandidate({
+      db,
+      candidate,
+      submittedByUid: authCtx.uid,
+    });
+
+    return res.json({
+      ok: true,
+      candidateId: persisted.candidateId,
+      autoPromotion: {
+        shouldPromote: persisted.scored.shouldPromote,
+        score: persisted.scored.score,
+        reasons: persisted.scored.reasons,
+      },
+      item: persisted.item,
+      localEntry: persisted.localEntry,
+    });
+  } catch (err) {
+    console.error("❌ /ingredients/catalog/candidates error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to submit ingredient catalog candidate" });
+  }
+});
+
+app.post("/ingredients/catalog/resolve", async (req, res) => {
+  try {
+    const rawIngredients = Array.isArray(req.body?.ingredients) ? req.body.ingredients : [];
+    const language = normalizeLanguage(req.body?.language);
+    const ingredients = rawIngredients
+      .map((entry) => ({
+        sourceText: sanitizeInput(entry?.sourceText || ""),
+        name: sanitizeInput(entry?.name || ""),
+      }))
+      .filter((entry) => entry.sourceText || entry.name)
+      .slice(0, 8);
+
+    if (ingredients.length === 0) {
+      return res.status(400).json({ error: "ingredients array is required" });
+    }
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["items"],
+      properties: {
+        items: {
+          type: "array",
+          minItems: ingredients.length,
+          maxItems: ingredients.length,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "sourceText",
+              "canonicalName",
+              "category",
+              "aliases",
+              "nutritionPer100",
+              "defaultServing",
+              "resolvedQuantity",
+              "confidence",
+            ],
+            properties: {
+              sourceText: { type: "string" },
+              canonicalName: { type: "string" },
+              category: { type: "string" },
+              aliases: {
+                type: "object",
+                additionalProperties: false,
+                required: SUPPORTED_INGREDIENT_LOCALES,
+                properties: Object.fromEntries(
+                  SUPPORTED_INGREDIENT_LOCALES.map((locale) => [
+                    locale,
+                    {
+                      type: "array",
+                      minItems: 1,
+                      items: { type: "string" },
+                    },
+                  ])
+                ),
+              },
+              nutritionPer100: {
+                type: "object",
+                additionalProperties: false,
+                required: ["calories", "protein", "carbs", "fat", "unit"],
+                properties: {
+                  calories: { type: "number" },
+                  protein: { type: "number" },
+                  carbs: { type: "number" },
+                  fat: { type: "number" },
+                  unit: { type: "string", enum: ["g", "ml"] },
+                },
+              },
+              defaultServing: {
+                type: "object",
+                additionalProperties: false,
+                required: ["quantity", "unit"],
+                properties: {
+                  quantity: { type: "number" },
+                  unit: {
+                    type: "string",
+                    enum: ["g", "kg", "ml", "l", "unit", "slice", "cup", "tbsp", "tsp"],
+                  },
+                },
+              },
+              resolvedQuantity: {
+                type: "object",
+                additionalProperties: false,
+                required: ["quantity", "unit"],
+                properties: {
+                  quantity: { type: "number" },
+                  unit: {
+                    type: "string",
+                    enum: ["g", "kg", "ml", "l", "unit", "slice", "cup", "tbsp", "tsp"],
+                  },
+                },
+              },
+              confidence: { type: "number" },
+            },
+          },
+        },
+      },
+    };
+
+    const prompt = `
+Resolve the following food ingredient phrases into structured catalog entries.
+
+Rules:
+- canonicalName must be in English and be a clear food/ingredient name.
+- Provide aliases for all supported locales: en, pt-PT, pt-BR, es, fr, de.
+- nutritionPer100 must be realistic and represent the ingredient per 100 g or 100 ml.
+- defaultServing must be a realistic usual serving for one serving of that ingredient.
+- resolvedQuantity must represent the amount described in sourceText:
+  - if sourceText gives an explicit weight/volume, keep that amount;
+  - if sourceText gives a count (for example 1 yogurt), convert it into the usual serving amount;
+  - if sourceText gives no quantity, use the usual serving amount.
+- Keep units sensible and compatible with nutritionPer100.
+- Confidence should be between 0 and 1.
+- The output should be strong enough to satisfy automatic catalog promotion rules:
+  - all locales present
+  - nutrition values finite and realistic
+  - macro calories roughly match calories
+  - serving quantity reasonable
+
+Return one object per input item, in the same order, with matching sourceText.
+
+Input items:
+${JSON.stringify(ingredients, null, 2)}
+
+Return only valid JSON.
+`;
+
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "ingredient_catalog_resolution",
+      schema,
+      temperature: 0.2,
+      timeoutMs: 15000,
+      messages: [
+        {
+          role: "system",
+          content:
+            `You are a food ingredient catalog assistant. Return only valid JSON. The app language is ${language}, but canonicalName must still be English. Aliases must cover en, pt-PT, pt-BR, es, fr, and de. Favor realistic supermarket/nutrition database conventions.`,
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    raw = cleanJsonResponse(raw);
+    const parsed = safeJSONParse(raw, {});
+    const aiItems = Array.isArray(parsed?.items) ? parsed.items : [];
+
+    const db = _adminInitialized ? getAnalyticsDb() : null;
+    const authCtx = await getEconomyAuthContext(req).catch(() => ({ uid: null }));
+    const resolved = [];
+
+    for (const item of aiItems) {
+      const candidate = {
+        canonicalName: item?.canonicalName,
+        category: item?.category ?? null,
+        aliases: item?.aliases || {},
+        nutritionPer100: item?.nutritionPer100 || null,
+        defaultServing: item?.defaultServing || null,
+        sourceText: item?.sourceText || null,
+        confidence: item?.confidence ?? null,
+        createdAt: Date.now(),
+      };
+
+      let persisted = null;
+      if (db) {
+        persisted = await persistIngredientCatalogCandidate({
+          db,
+          candidate,
+          submittedByUid: authCtx?.uid || null,
+        });
+      } else {
+        const scored = shouldAutoPromoteCandidate(candidate);
+        persisted = {
+          candidateId: null,
+          scored,
+          item: null,
+          localEntry: serializeIngredientCatalogItem(
+            `candidate_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            {
+              canonicalName: normalizeAlias(candidate.canonicalName || ""),
+              category: candidate.category ?? null,
+              aliases: scored.normalized.aliases,
+              nutritionPer100: scored.normalized.nutritionPer100,
+              defaultServing: scored.normalized.defaultServing,
+              source: "ai_resolved",
+              updatedAt: Date.now(),
+            }
+          ),
+        };
+      }
+
+      resolved.push({
+        sourceText: item?.sourceText || candidate.sourceText || "",
+        resolvedQuantity: item?.resolvedQuantity || persisted.localEntry?.defaultServing || null,
+        confidence: Number.isFinite(Number(item?.confidence)) ? Number(item.confidence) : null,
+        autoPromotion: {
+          shouldPromote: !!persisted.scored?.shouldPromote,
+          score: persisted.scored?.score ?? 0,
+          reasons: persisted.scored?.reasons ?? [],
+        },
+        localEntry: persisted.localEntry,
+        item: persisted.item,
+      });
+    }
+
+    return res.json({ ok: true, items: resolved });
+  } catch (err) {
+    console.error("❌ /ingredients/catalog/resolve error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to resolve ingredient catalog entries" });
+  }
+});
+
 // ---------------- Cookbooks Sync Endpoints ----------------
 
 // Legacy client compatibility:
@@ -1779,13 +3507,13 @@ app.post("/sync/cookbooks/pull", async (req, res) => {
       return res.status(500).json({ error: "Admin SDK not initialized" });
     }
 
-    const body = req.body || {};
-    const uid =
-      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
-
-    if (!uid) {
-      return res.status(400).json({ error: "Missing uid" });
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
     }
+    const uid = authResolution.uid;
 
     const db = getAnalyticsDb();
     const collectionRef = db.collection(`users/${uid}/cookbooks`);
@@ -1817,6 +3545,8 @@ app.post("/sync/cookbooks/pull", async (req, res) => {
         deviceId: ctx.deviceId,
         metadata: {
           count: items.length,
+          authSource: authResolution.source,
+          fallbackUsed: !!authResolution.fallbackUsed,
         },
       });
     } catch (e) {
@@ -1850,12 +3580,15 @@ app.post("/sync/cookbooks/push", async (req, res) => {
       return res.status(500).json({ error: "Admin SDK not initialized" });
     }
 
-    const body = req.body || {};
-    const uid =
-      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
-    if (!uid) {
-      return res.status(400).json({ error: "Missing uid" });
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
     }
+    const uid = authResolution.uid;
+
+    const body = req.body || {};
 
     const items = Array.isArray(body.items) ? body.items : [];
 
@@ -1945,8 +3678,8 @@ app.post("/sync/cookbooks/push", async (req, res) => {
     }
 
     // Economy enforcement should be per-uid.
-    // Legacy clients send uid in body; set x-user-id so spend logic (and future code) remains consistent.
-    // (This does not replace proper auth; it's a compatibility fallback.)
+    // Keep x-user-id populated for downstream compatibility, but the actual uid
+    // above now prefers the verified Firebase token.
     req.headers["x-user-id"] = uid;
 
     // Perform writes (and cookie charging) in a single Firestore transaction to:
@@ -2013,71 +3746,12 @@ app.post("/sync/cookbooks/push", async (req, res) => {
         }
       }
 
-      // 4) Compute charges for NEW custom cookbooks (no writes yet)
-      // We must also handle the case where multiple new cookbooks are created in a single push.
-      const freeQuota = ECONOMY_LIMITS.FREE_CUSTOM_COOKBOOKS;
-      const cost = ECONOMY_LIMITS.COST_EXTRA_COOKBOOK;
+      // 4) Cookbooks are always free. We still run the transaction so the write path stays atomic.
 
-      // We'll charge based on the "server existing custom count" and increment as we virtually add new custom cookbooks.
-      let virtualCustomCount = existingCustomCount;
-      let toChargeCount = 0;
-
-      for (const st of readStates) {
-        const isNewCustom = st.isNew && !st.looksDefault;
-        if (!isNewCustom) continue;
-
-        // If user already has >= freeQuota custom cookbooks, this new one costs cookies.
-        if (virtualCustomCount >= freeQuota) {
-          toChargeCount += 1;
-        }
-
-        // In any case, this new custom cookbook increases the count.
-        virtualCustomCount += 1;
-      }
-
-      // 5) Enforce cookies (if economy available) and then perform writes.
-      if (economy && toChargeCount > 0) {
-        const amtPer = typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
-        const totalAmt = amtPer > 0 ? toChargeCount * amtPer : 0;
-
-        if (totalAmt > 0) {
-          if (economy.cookies < totalAmt) {
-            const err = new Error("insufficient_cookies");
-            err.code = "INSUFFICIENT_COOKIES";
-            err.remaining = economy.cookies;
-            throw err;
-          }
-
-          economy.cookies -= totalAmt;
-          txResult.charged = toChargeCount;
-          txResult.skippedEconomy = false;
-          txResult.remaining = economy.cookies;
-        }
-      }
-
-      // Perform cookbook writes
+      // 5) Perform cookbook writes
       for (const st of readStates) {
         tx.set(st.docRef, st.item.data, { merge: true });
         txResult.upserted += 1;
-      }
-
-      // Persist updated economy balance (minimal audit) if we charged anything
-      if (economy && txResult.charged > 0) {
-        const now2 = Date.now();
-        tx.set(
-          economy.ref,
-          {
-            cookies: economy.cookies,
-            updatedAt: now2,
-            _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastSpend: {
-              amount: txResult.charged * ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
-              reason: "create_cookbook",
-              at: now2,
-            },
-          },
-          { merge: true }
-        );
       }
     });
 
@@ -2092,6 +3766,8 @@ app.post("/sync/cookbooks/push", async (req, res) => {
           charged: txResult.charged,
           skippedEconomy: !!txResult.skippedEconomy,
           remainingCookies: txResult.remaining,
+          authSource: authResolution.source,
+          fallbackUsed: !!authResolution.fallbackUsed,
         },
       });
     } catch (e) {
@@ -2117,19 +3793,6 @@ app.post("/sync/cookbooks/push", async (req, res) => {
     });
   } catch (err) {
     // Translate our transaction error to a stable HTTP status for the client.
-    if (err && (err.code === "INSUFFICIENT_COOKIES" || err.message === "insufficient_cookies")) {
-      const remaining =
-        typeof err.remaining === "number" && Number.isFinite(err.remaining)
-          ? err.remaining
-          : 0;
-      return respondNotEnoughCookies(res, {
-        action: "create_cookbook",
-        requiredCookies: ECONOMY_LIMITS.COST_EXTRA_COOKBOOK,
-        balance: remaining,
-        message: "You do not have enough cookies to create more cookbooks.",
-      });
-    }
-
     console.error("❌ /sync/cookbooks/push error:", err?.message || err);
     return res.status(500).json({ error: "Failed to save cookbooks" });
   }
@@ -2155,13 +3818,13 @@ app.post("/sync/recipes/pull", async (req, res) => {
       return res.status(500).json({ error: "Admin SDK not initialized" });
     }
 
-    const body = req.body || {};
-    const uid =
-      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
-
-    if (!uid) {
-      return res.status(400).json({ error: "Missing uid" });
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
     }
+    const uid = authResolution.uid;
 
     const db = getAnalyticsDb();
     const collectionRef = db.collection(`users/${uid}/recipes`);
@@ -2193,6 +3856,8 @@ app.post("/sync/recipes/pull", async (req, res) => {
         deviceId: ctx.deviceId,
         metadata: {
           count: items.length,
+          authSource: authResolution.source,
+          fallbackUsed: !!authResolution.fallbackUsed,
         },
       });
     } catch (e) {
@@ -2226,14 +3891,18 @@ app.post("/sync/recipes/push", async (req, res) => {
       return res.status(500).json({ error: "Admin SDK not initialized" });
     }
 
-    const body = req.body || {};
-    const uid =
-      typeof body.uid === "string" && body.uid.trim() ? body.uid.trim() : null;
-    if (!uid) {
-      return res.status(400).json({ error: "Missing uid" });
+    const authResolution = await resolveLegacySyncUid(req);
+    if (!authResolution.ok || !authResolution.uid) {
+      return res
+        .status(authResolution.status || 401)
+        .json({ error: authResolution.error || "Unauthorized" });
     }
+    const uid = authResolution.uid;
+
+    const body = req.body || {};
 
     const items = Array.isArray(body.items) ? body.items : [];
+    req.headers["x-user-id"] = uid;
 
     const db = getAnalyticsDb();
     const batch = db.batch();
@@ -2322,6 +3991,8 @@ app.post("/sync/recipes/push", async (req, res) => {
         metadata: {
           upserted: upsertedCount,
           deleted: deletedCount,
+          authSource: authResolution.source,
+          fallbackUsed: !!authResolution.fallbackUsed,
         },
       });
     } catch (e) {
@@ -2573,6 +4244,167 @@ function checkUploadRateLimit(key) {
 
   entry.count += 1;
 }
+
+app.post("/analyzeMealPhoto", upload.single("image"), async (req, res) => {
+  try {
+    validateUploadedImage(req.file);
+
+    const language = normalizeLanguage(req.body?.language);
+    const mimeType = req.file.mimetype || "image/jpeg";
+    const base64 = req.file.buffer.toString("base64");
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["isFood", "confidence", "title", "ingredients", "nutrition"],
+      properties: {
+        isFood: { type: "boolean" },
+        confidence: { type: "number" },
+        title: { type: "string" },
+        ingredients: {
+          type: "array",
+          maxItems: 10,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["name", "quantity", "unit"],
+            properties: {
+              name: { type: "string" },
+              quantity: { type: "number" },
+              unit: { type: "string", enum: ["g", "kg", "ml", "l", "tbsp", "tsp", "un"] },
+            },
+          },
+        },
+        nutrition: {
+          type: "object",
+          additionalProperties: false,
+          required: ["calories", "protein", "carbs", "fat"],
+          properties: {
+            calories: { type: "number" },
+            protein: { type: "number" },
+            carbs: { type: "number" },
+            fat: { type: "number" },
+          },
+        },
+      },
+    };
+
+    const prompt = `
+Analyze this image for meal logging.
+
+Rules:
+- First decide whether this is clearly a food/meal image.
+- If it is not food, return isFood=false, confidence, an empty ingredients array, and zero nutrition values.
+- If it is food:
+  - identify only the main ingredients that materially affect calories/macros;
+  - avoid garnish, tiny spices, and decorative elements unless they clearly matter;
+  - estimate one realistic quantity per visible main ingredient;
+  - use units only from: g, kg, ml, l, tbsp, tsp, un;
+  - estimate total nutrition for the pictured meal as served in the photo;
+  - title should be a short natural meal title in the user's language (${language}).
+
+Return only valid JSON.
+`;
+
+    let raw = "";
+    try {
+      const completion = await withTimeout(
+        client.chat.completions.create({
+          model: "gpt-4o-mini",
+          temperature: 0.2,
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "meal_photo_analysis",
+              schema,
+              strict: true,
+            },
+          },
+          messages: [
+            {
+              role: "system",
+              content: `You are a nutrition assistant for a meal logging app. Respond only with valid JSON. The user language is ${language}.`,
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+        }),
+        20000
+      );
+      raw = completion.choices[0]?.message?.content?.trim() || "";
+    } catch (err) {
+      console.warn("[/analyzeMealPhoto] structured vision failed, retrying plain JSON:", err?.message || err);
+      const completion = await withTimeout(
+        client.chat.completions.create({
+          model: "gpt-4o-mini",
+          temperature: 0.2,
+          messages: [
+            {
+              role: "system",
+              content: `You are a nutrition assistant for a meal logging app. Respond only with valid JSON. The user language is ${language}.`,
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+        }),
+        20000
+      );
+      raw = completion.choices[0]?.message?.content?.trim() || "";
+    }
+
+    const parsed = safeJSONParse(cleanJsonResponse(raw), null);
+    const isFood = parsed?.isFood === true;
+    const ingredients = Array.isArray(parsed?.ingredients)
+      ? parsed.ingredients
+          .map((item) => ({
+            name: String(item?.name || "").trim().slice(0, 80),
+            quantity: Number(item?.quantity),
+            unit: String(item?.unit || "").trim().toLowerCase(),
+          }))
+          .filter(
+            (item) =>
+              item.name &&
+              Number.isFinite(item.quantity) &&
+              item.quantity > 0 &&
+              ["g", "kg", "ml", "l", "tbsp", "tsp", "un"].includes(item.unit)
+          )
+          .slice(0, 10)
+      : [];
+
+    const nutrition = {
+      calories: Math.max(0, Math.round(Number(parsed?.nutrition?.calories) || 0)),
+      protein: Math.max(0, Math.round(Number(parsed?.nutrition?.protein) || 0)),
+      carbs: Math.max(0, Math.round(Number(parsed?.nutrition?.carbs) || 0)),
+      fat: Math.max(0, Math.round(Number(parsed?.nutrition?.fat) || 0)),
+    };
+
+    return res.json({
+      ok: true,
+      analysis: {
+        isFood,
+        confidence: Number.isFinite(Number(parsed?.confidence)) ? Number(parsed.confidence) : 0,
+        title: String(parsed?.title || "").trim(),
+        ingredients: isFood ? ingredients : [],
+        nutrition: isFood ? nutrition : { calories: 0, protein: 0, carbs: 0, fat: 0 },
+      },
+    });
+  } catch (err) {
+    const status = err?.statusCode || 500;
+    console.error("❌ /analyzeMealPhoto error:", err?.message || err);
+    return res.status(status).json({ error: err?.message || "Failed to analyze meal photo" });
+  }
+});
 
 // ---------------- Firebase Admin (Storage via backend) ----------------
 // Initialize Admin SDK using either a JSON service account in env or Application Default Credentials.
@@ -2981,6 +4813,42 @@ async function ensureLanguage(text, targetLang) {
   return text;
 }
 
+function detectLikelyLanguage(text) {
+  if (!text || typeof text !== "string") return null;
+  const normalized = text.trim();
+  if (normalized.length < 40) return null;
+
+  try {
+    const detected = franc(normalized);
+    const map = {
+      por: "Portuguese",
+      spa: "Spanish",
+      fra: "French",
+      deu: "German",
+      ita: "Italian",
+      eng: "English",
+    };
+    return map[detected] || null;
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyTargetLanguage(text, targetLang) {
+  const detectedLang = detectLikelyLanguage(text);
+  if (!detectedLang) return true;
+
+  const detected = detectedLang.toLowerCase();
+  const target = String(targetLang || "English").toLowerCase();
+
+  if (target.includes("portuguese")) return detected === "portuguese";
+  if (target.includes("spanish")) return detected === "spanish";
+  if (target.includes("french")) return detected === "french";
+  if (target.includes("german")) return detected === "german";
+  if (target.includes("italian")) return detected === "italian";
+  return detected === "english";
+}
+
 // --- Helper: clean JSON output from OpenAI (strip markdown fences) ---
 function cleanJsonResponse(text) {
   if (!text) return "";
@@ -2988,6 +4856,82 @@ function cleanJsonResponse(text) {
     .replace(/```json/gi, "")
     .replace(/```/g, "")
     .trim();
+}
+
+function inferRecipeTitleFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] || segments[segments.length - 2] || "";
+    const decoded = decodeURIComponent(last)
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[-_]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!decoded) return "";
+    return decoded.replace(/\b\w/g, (match) => match.toUpperCase());
+  } catch {
+    return "";
+  }
+}
+
+function extractQuotedListFromJsonLike(raw, key, nextKeys = []) {
+  const text = String(raw || "");
+  const keyIndex = text.indexOf(`"${key}"`);
+  if (keyIndex === -1) return [];
+  const arrayStart = text.indexOf("[", keyIndex);
+  if (arrayStart === -1) return [];
+
+  let endIndex = text.indexOf("]", arrayStart);
+  if (endIndex === -1) {
+    const nextIndices = nextKeys
+      .map((nextKey) => text.indexOf(`"${nextKey}"`, arrayStart))
+      .filter((index) => index !== -1);
+    endIndex = nextIndices.length ? Math.min(...nextIndices) : text.length;
+  }
+
+  const slice = text.slice(arrayStart, endIndex);
+  return Array.from(slice.matchAll(/"((?:[^"\\]|\\.)*)"/g))
+    .map((match) => match[1])
+    .map((value) =>
+      value
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter(Boolean);
+}
+
+function recoverRecipeFromJsonLike(raw, fallbackTitle = "") {
+  const text = cleanJsonResponse(raw);
+  if (!text) return null;
+
+  const titleMatch = text.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const cookingTimeMatch = text.match(/"cookingTime"\s*:\s*(\d+(?:\.\d+)?)/);
+  const difficultyMatch = text.match(/"difficulty"\s*:\s*"(Easy|Moderate|Challenging)"/);
+  const servingsMatch = text.match(/"servings"\s*:\s*(\d+(?:\.\d+)?)/);
+  const costMatch = text.match(/"cost"\s*:\s*"(Cheap|Medium|Expensive)"/);
+
+  const ingredients = extractQuotedListFromJsonLike(text, "ingredients", ["steps", "tags"]);
+  const steps = extractQuotedListFromJsonLike(text, "steps", ["tags"]);
+  const tags = extractQuotedListFromJsonLike(text, "tags");
+
+  if (!ingredients.length || !steps.length) return null;
+
+  return {
+    title:
+      (titleMatch?.[1] || "")
+        .replace(/\\"/g, '"')
+        .trim() || fallbackTitle || "Untitled Recipe",
+    cookingTime: cookingTimeMatch ? Number(cookingTimeMatch[1]) : 30,
+    difficulty: difficultyMatch?.[1] || "Moderate",
+    servings: servingsMatch ? Number(servingsMatch[1]) : 4,
+    cost: costMatch?.[1] || "Medium",
+    ingredients,
+    steps,
+    tags,
+  };
 }
 
 // --- Helper: safe JSON parse with fallback ---
@@ -3011,6 +4955,70 @@ function safeJSONParse(raw, fallback) {
       }
     }
     return fallback;
+  }
+}
+
+function createAiTimingLogger(scope, meta = {}) {
+  const startedAt = Date.now();
+  let lastAt = startedAt;
+
+  return {
+    mark(stage, extra = {}) {
+      const now = Date.now();
+      console.log(`[AI Timing] ${scope}:${stage}`, {
+        ...meta,
+        totalMs: now - startedAt,
+        deltaMs: now - lastAt,
+        ...extra,
+      });
+      lastAt = now;
+    },
+  };
+}
+
+async function requestStructuredJsonCompletion({
+  schemaName,
+  schema,
+  messages,
+  temperature = 0.7,
+  timeoutMs = 10000,
+  model = "gpt-4o-mini",
+}) {
+  try {
+    const completion = await withTimeout(
+      client.chat.completions.create({
+        model,
+        messages,
+        temperature,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: schemaName,
+            schema,
+            strict: true,
+          },
+        },
+      }),
+      timeoutMs
+    );
+
+    return completion.choices[0].message.content.trim();
+  } catch (err) {
+    console.warn(
+      `[AI] Structured output failed for ${schemaName}, falling back to prompt-only JSON:`,
+      err?.message || err
+    );
+
+    const completion = await withTimeout(
+      client.chat.completions.create({
+        model,
+        messages,
+        temperature,
+      }),
+      timeoutMs
+    );
+
+    return completion.choices[0].message.content.trim();
   }
 }
 
@@ -3227,7 +5235,7 @@ async function transcribeInstagramAudio(audioUrl) {
       method: "GET",
       timeout: 20000,
       headers: {
-        "User-Agent": "MyCookbookAI/1.0",
+        "User-Agent": "CookNEatAI/1.0",
       },
     });
 
@@ -3685,6 +5693,36 @@ function normalizeDifficulty(raw) {
 function validateRecipe(raw, mealType) {
   const difficulty = normalizeDifficulty(raw.difficulty);
 
+  const normalizeNullableNutritionValue = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+
+  const validateNutritionInfo = (input) => {
+    if (!input || typeof input !== "object") return null;
+    const rawPerServing =
+      input?.perServing && typeof input.perServing === "object"
+        ? input.perServing
+        : input;
+
+    const perServing = {
+      calories: normalizeNullableNutritionValue(rawPerServing?.calories),
+      protein: normalizeNullableNutritionValue(rawPerServing?.protein),
+      carbs: normalizeNullableNutritionValue(rawPerServing?.carbs),
+      fat: normalizeNullableNutritionValue(rawPerServing?.fat),
+    };
+
+    const hasAnyValue = Object.values(perServing).some((value) => value !== null);
+    if (!hasAnyValue) return null;
+
+    return {
+      perServing,
+      source: "ai_generated",
+      updatedAt: new Date().toISOString(),
+    };
+  };
+
   // ---- Robust normalization for ingredients ----
   let normalizedIngredients = [];
   if (Array.isArray(raw.ingredients)) {
@@ -3767,6 +5805,7 @@ function validateRecipe(raw, mealType) {
     ingredients: normalizedIngredients,
     steps: normalizedSteps,
     tags: normalizeTags(raw.tags, mealType),
+    nutritionInfo: validateNutritionInfo(raw.nutritionInfo || raw.nutrition),
     createdAt: new Date().toISOString(),
   };
 
@@ -3787,7 +5826,11 @@ function validateRecipe(raw, mealType) {
 
 // Suggestions (3 cards for the wizard review)
 app.post("/getRecipeSuggestions", async (req, res) => {
-  let { note, people, time, dietary, avoid, mealType, avoidOther, language } = req.body;
+  let { note, people, time, dietary, avoid, mealType, avoidOther, language, excludeSuggestions } = req.body;
+  const timing = createAiTimingLogger("getRecipeSuggestions", {
+    language,
+    people,
+  });
 
   // Rate limiting: per-user/device/IP caps for AI suggestions
   const rateCheck = enforceAiRateLimit(req);
@@ -3799,23 +5842,6 @@ app.post("/getRecipeSuggestions", async (req, res) => {
         "You have reached the limit of AI recipe suggestions for now. Please try again later.",
     });
   }
-
-  // Economy (cookies): charge for AI suggestions (MVP)
-  const economySpend = await spendCookies({
-    req,
-    amount: ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
-    reason: "ai_suggestions",
-  });
-
-  if (economySpend && economySpend.ok === false) {
-  return respondNotEnoughCookies(res, {
-    action: economySpend.action || "ai_suggestions",
-    requiredCookies:
-      economySpend.requiredCookies || ECONOMY_LIMITS.COST_AI_RECIPE_SUGGESTIONS,
-    balance: economySpend.remaining,
-    message: "You do not have enough cookies to generate more AI suggestions.",
-  });
-}
 
   // Sanitize all relevant inputs
   note = sanitizeInput(note);
@@ -3835,6 +5861,15 @@ app.post("/getRecipeSuggestions", async (req, res) => {
     avoid = avoid.filter((a) => a !== "other").concat(otherArr);
   }
   language = normalizeLanguage(language);
+  timing.mark("normalized-input");
+  const normalizedExcludedSuggestions = Array.isArray(excludeSuggestions)
+    ? excludeSuggestions
+        .map((entry) => ({
+          title: sanitizeInput(entry?.title),
+          description: sanitizeInput(entry?.description),
+        }))
+        .filter((entry) => entry.title || entry.description)
+    : [];
   // Normalize measurement system from body (supports several possible field names)
   const measurementSystemNormalized = normalizeMeasurementSystem(
     (req.body && (req.body.measurementSystem || req.body.units || req.body.unitSystem)) || "Metric"
@@ -3843,6 +5878,13 @@ app.post("/getRecipeSuggestions", async (req, res) => {
   const mealPart =
     mealType && mealType !== "Im just hungry" && mealType !== "I’m just hungry"
       ? `- Meal type: ${mealType}\n`
+      : "";
+
+  const excludedSuggestionsBlock =
+    normalizedExcludedSuggestions.length > 0
+      ? `\nDo NOT repeat or closely resemble any of these suggestions the user has already seen:\n${normalizedExcludedSuggestions
+          .map((entry, index) => `- ${index + 1}. ${entry.title}${entry.description ? `: ${entry.description}` : ""}`)
+          .join("\n")}\n`
       : "";
 
   // Improved userPrompt with explicit JSON block and language requirement, and explicit translation enforcement
@@ -3856,6 +5898,7 @@ I want you to provide 3 unique recipe suggestions based on the following constra
 - Ingredients to avoid: ${avoid.length > 0 ? avoid.join(", ") : "None"}
 - Measurement system: ${measurementSystemNormalized}
 ${mealPart}
+${excludedSuggestionsBlock}
 
 Return ONLY valid JSON of exactly 3 objects, written in ${language}, each matching this schema:
 [
@@ -3864,37 +5907,69 @@ Return ONLY valid JSON of exactly 3 objects, written in ${language}, each matchi
     "title": "string",
     "cookingTime": number,        // minutes (5–180)
     "difficulty": "Easy" | "Moderate" | "Challenging",
+    "calories": number,           // per serving, realistic estimate
     "description": "string"
   },
   ...
 ]
 
 IMPORTANT: All text in every field must be written entirely in the target language (${language}). If any part of the output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language.
+Each of the 3 suggestions must be clearly different from the others in concept, main ingredients, and style.
 `;
 
-  try {
-    const completion = await withTimeout(
-      client.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              `You are a professional chef assistant. Always reply ONLY with valid JSON that matches the schema provided and return exactly 3 recipe suggestions. All text must be written in the user’s selected language (${language}). No matter the input, always reply in ${language}. IMPORTANT: Every string field must be in ${language}. If any part of your output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language. If the selected language is Portuguese (Portugal), always use European Portuguese (Portugal) and never Brazilian Portuguese. When you mention any quantities or units in descriptions, respect the user's measurement system: if it is "Metric", use metric units (g, kg, ml, l, etc.); if it is "US", use US/imperial units (cups, tbsp, tsp, oz, lb, etc.) and never mix systems.`,
+  const suggestionSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["suggestions"],
+    properties: {
+      suggestions: {
+        type: "array",
+        minItems: 3,
+        maxItems: 3,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "title", "cookingTime", "difficulty", "calories", "description"],
+          properties: {
+            id: { type: "string" },
+            title: { type: "string" },
+            cookingTime: { type: "number" },
+            difficulty: {
+              type: "string",
+              enum: ["Easy", "Moderate", "Challenging"],
+            },
+            calories: { type: "number" },
+            description: { type: "string" },
           },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.7,
-      }),
-      10000
-    );
+        },
+      },
+    },
+  };
 
-    let raw = completion.choices[0].message.content.trim();
+  try {
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "recipe_suggestions",
+      schema: suggestionSchema,
+      temperature: 0.9,
+      timeoutMs: 10000,
+      messages: [
+        {
+          role: "system",
+          content:
+            `You are a professional chef assistant. Always reply ONLY with valid JSON that matches the schema provided and return exactly 3 recipe suggestions. All text must be written in the user’s selected language (${language}). No matter the input, always reply in ${language}. IMPORTANT: Every string field must be in ${language}. If any part of your output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language. If the selected language is Portuguese (Portugal), always use European Portuguese (Portugal) and never Brazilian Portuguese. When you mention any quantities or units in descriptions, respect the user's measurement system: if it is "Metric", use metric units (g, kg, ml, l, etc.); if it is "US", use US/imperial units (cups, tbsp, tsp, oz, lb, etc.) and never mix systems.`,
+        },
+        { role: "user", content: userPrompt },
+      ],
+    });
+    timing.mark("openai-response");
     raw = cleanJsonResponse(raw);
     if (process.env.NODE_ENV !== "production") {
       console.log("🧹 Cleaned response (suggestions):", raw);
     }
-    let suggestions = safeJSONParse(raw, []);
+    const parsedPayload = safeJSONParse(raw, {});
+    let suggestions = Array.isArray(parsedPayload?.suggestions)
+      ? parsedPayload.suggestions
+      : [];
     // If not array or not 3, pad as before
     if (!Array.isArray(suggestions) || suggestions.length !== 3) {
       console.error("⚠️ Invalid JSON from AI for suggestions or incorrect count, padding with placeholders.");
@@ -3907,26 +5982,59 @@ IMPORTANT: All text in every field must be written entirely in the target langua
         title: "Placeholder Recipe",
         cookingTime: 30,
         difficulty: "Easy",
+        calories: 400,
         description: "No description available.",
       });
     }
     // Batch enforce language on titles and descriptions, but NOT difficulty
     const titles = suggestions.map(s => s.title || "");
     const descriptions = suggestions.map(s => s.description || "");
-    const ids = suggestions.map(s => s.id || "");
-    // Batch translate titles, descriptions, ids
-    const [translatedTitles, translatedDescriptions, translatedIds] = await Promise.all([
+    const [translatedTitles, translatedDescriptions] = await Promise.all([
       ensureLanguage(titles, language),
       ensureLanguage(descriptions, language),
-      ensureLanguage(ids, language),
     ]);
-    suggestions = suggestions.map((s, idx) => ({
-      ...s,
-      id: translatedIds[idx] || s.id,
-      title: translatedTitles[idx] || s.title,
-      description: translatedDescriptions[idx] || s.description,
-      difficulty: normalizeDifficulty(s.difficulty),
-    }));
+    timing.mark("language-enforcement");
+    const forbiddenKeys = new Set(
+      normalizedExcludedSuggestions
+        .map((entry) => String(entry.title || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const batchSeenKeys = new Set();
+    suggestions = suggestions
+      .map((s, idx) => ({
+        ...s,
+        title: translatedTitles[idx] || s.title,
+        description: translatedDescriptions[idx] || s.description,
+        difficulty: normalizeDifficulty(s.difficulty),
+        calories:
+          typeof s.calories === "number" && Number.isFinite(s.calories) && s.calories > 0
+            ? s.calories
+            : null,
+    }))
+      .filter((s) => {
+        const key = String(s?.title || "").trim().toLowerCase();
+        if (!key) return false;
+        if (forbiddenKeys.has(key)) return false;
+        if (batchSeenKeys.has(key)) return false;
+        batchSeenKeys.add(key);
+        return true;
+      })
+      .map((s, idx) => ({
+        ...s,
+        id: `ai_suggestion_${Date.now()}_${idx + 1}`,
+      }));
+
+    while (suggestions.length < 3) {
+      suggestions.push({
+        id: `ai_suggestion_${Date.now()}_fallback_${suggestions.length + 1}`,
+        title: `Suggestion ${suggestions.length + 1}`,
+        cookingTime: 30,
+        difficulty: "Easy",
+        calories: 400,
+        description: "",
+      });
+    }
+    timing.mark("post-process-complete", { suggestionCount: suggestions.length });
 
     // Analytics: AI suggestions generated
     const ctx = getEventContext(req);
@@ -3953,6 +6061,11 @@ IMPORTANT: All text in every field must be written entirely in the target langua
 // Full recipe (when user taps a suggestion card)
 app.post("/getRecipe", async (req, res) => {
   let { note, people, time, dietary, avoid, mealType, suggestionId, suggestion, avoidOther, language } = req.body;
+  const timing = createAiTimingLogger("getRecipe", {
+    language,
+    people,
+    suggestionId: suggestionId || suggestion?.id || null,
+  });
 
   // Rate limiting: per-user/device/IP caps for full AI recipes
   const rateCheck = enforceAiRateLimit(req);
@@ -3977,7 +6090,7 @@ app.post("/getRecipe", async (req, res) => {
       error: "insufficient_cookies",
       remaining: economySpend.remaining,
       message:
-        "You do not have enough cookies to generate more AI recipes.",
+        "You do not have enough Eggs to generate more AI recipes.",
     });
   }
 
@@ -3998,6 +6111,7 @@ app.post("/getRecipe", async (req, res) => {
     avoid = avoid.filter((a) => a !== "other").concat(otherArr);
   }
   language = normalizeLanguage(language);
+  timing.mark("normalized-input");
   // Normalize measurement system from body (supports several possible field names)
   const measurementSystemNormalized = normalizeMeasurementSystem(
     (req.body && (req.body.measurementSystem || req.body.units || req.body.unitSystem)) || "Metric"
@@ -4032,10 +6146,17 @@ Return ONLY valid JSON in ${language} (translate all strings, including ingredie
   "cookingTime": number,  // minutes (5–180 realistic range)
   "difficulty": "Easy" | "Moderate" | "Challenging",
   "servings": number,     // 1–999
-  "cost": "Cheap" | "Medium" | "Expensive",
   "ingredients": ["list of ingredients with quantities, always using the user's measurement system (${measurementSystemNormalized})"],
   "steps": ["step-by-step preparation instructions"],
-  "tags": ["short tags like Vegan, Vegetarian, Gluten-Free, Dinner, Breakfast"]
+  "tags": ["short tags like Vegan, Vegetarian, Gluten-Free, Dinner, Breakfast"],
+  "nutritionInfo": {
+    "perServing": {
+      "calories": number,
+      "protein": number,
+      "carbs": number,
+      "fat": number
+    }
+  }
 }
 
 For the ingredients and any quantities mentioned in the steps, you MUST strictly use the user's measurement system:
@@ -4046,52 +6167,117 @@ Never mix measurement systems in the same recipe.
 IMPORTANT: All text in every field must be written entirely in the target language (${language}). If any part of the output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language.
 `;
 
-  try {
-    const completion = await withTimeout(
-      client.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              `You are a professional chef assistant. Always reply ONLY with valid JSON that matches the schema provided. All text must be written in the user’s selected language (${language}), including ingredients, steps, and tags. No matter the input, always reply in ${language}. IMPORTANT: Every string field must be in ${language}. If any part of your output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language. If the selected language is Portuguese (Portugal), always use European Portuguese (Portugal) and never Brazilian Portuguese. You must strictly respect the user's measurement system: for "Metric" use metric units (g, kg, ml, l, etc.), and for "US" use US/imperial units (cups, tbsp, tsp, oz, lb, etc.). Never mix measurement systems within a single recipe.`,
+  const fullRecipeSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "title",
+      "cookingTime",
+      "difficulty",
+      "servings",
+      "ingredients",
+      "steps",
+      "tags",
+      "nutritionInfo",
+    ],
+    properties: {
+      title: { type: "string" },
+      cookingTime: { type: "number" },
+      difficulty: {
+        type: "string",
+        enum: ["Easy", "Moderate", "Challenging"],
+      },
+      servings: { type: "number" },
+      ingredients: {
+        type: "array",
+        items: { type: "string" },
+      },
+      steps: {
+        type: "array",
+        items: { type: "string" },
+      },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+      },
+      nutritionInfo: {
+        type: "object",
+        additionalProperties: false,
+        required: ["perServing"],
+        properties: {
+          perServing: {
+            type: "object",
+            additionalProperties: false,
+            required: ["calories", "protein", "carbs", "fat"],
+            properties: {
+              calories: { type: "number" },
+              protein: { type: "number" },
+              carbs: { type: "number" },
+              fat: { type: "number" },
+            },
           },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.7,
-      }),
-      25000
-    );
+        },
+      },
+    },
+  };
 
-    let raw = completion.choices[0].message.content.trim();
+  try {
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "full_recipe",
+      schema: fullRecipeSchema,
+      temperature: 0.7,
+      timeoutMs: 25000,
+      messages: [
+        {
+          role: "system",
+          content:
+            `You are a professional chef assistant. Always reply ONLY with valid JSON that matches the schema provided. All text must be written in the user’s selected language (${language}), including ingredients, steps, and tags. No matter the input, always reply in ${language}. IMPORTANT: Every string field must be in ${language}. If any part of your output is not in ${language}, you must internally re-translate it before returning. Never return text in any other language. If the selected language is Portuguese (Portugal), always use European Portuguese (Portugal) and never Brazilian Portuguese. You must strictly respect the user's measurement system: for "Metric" use metric units (g, kg, ml, l, etc.), and for "US" use US/imperial units (cups, tbsp, tsp, oz, lb, etc.). Never mix measurement systems within a single recipe.`,
+        },
+        { role: "user", content: userPrompt },
+      ],
+    });
+    timing.mark("openai-response");
     raw = cleanJsonResponse(raw);
     if (process.env.NODE_ENV !== "production") {
       console.log("🧹 Cleaned response (recipe):", raw);
     }
     // Use safeJSONParse helper, then validate with mealType for tag normalization
     const parsed = safeJSONParse(raw, {});
+    timing.mark("json-parse");
     const safe = validateRecipe(parsed, mealType);
     // Normalize difficulty after validation (ensure always English enum)
     safe.difficulty = normalizeDifficulty(safe.difficulty);
 
 
-    // --- Enforce language on title, ingredients, and steps (but not enums) ---
+    // --- Enforce language only when the combined recipe text looks mismatched ---
+    let languageEnforcementApplied = false;
     if (safe) {
       const titleArr = [safe.title || ""];
       const ingredientsArr = Array.isArray(safe.ingredients) ? safe.ingredients : [];
       const stepsArr = Array.isArray(safe.steps) ? safe.steps : [];
+      const combinedRecipeText = [
+        safe.title || "",
+        ...ingredientsArr,
+        ...stepsArr,
+      ]
+        .filter(Boolean)
+        .join("\n");
 
-      const [translatedTitleArr, translatedIngredients, translatedSteps] = await Promise.all([
-        enforceLanguageOnObject(titleArr, language),
-        enforceLanguageOnObject(ingredientsArr, language),
-        enforceLanguageOnObject(stepsArr, language),
-      ]);
+      if (!isLikelyTargetLanguage(combinedRecipeText, language)) {
+        languageEnforcementApplied = true;
+        const [translatedTitleArr, translatedIngredients, translatedSteps] = await Promise.all([
+          enforceLanguageOnObject(titleArr, language),
+          enforceLanguageOnObject(ingredientsArr, language),
+          enforceLanguageOnObject(stepsArr, language),
+        ]);
 
-      safe.title = translatedTitleArr[0] || safe.title;
-      safe.ingredients = translatedIngredients;
-      safe.steps = translatedSteps;
-      // Do NOT translate difficulty or cost (keep as enums)
+        safe.title = translatedTitleArr[0] || safe.title;
+        safe.ingredients = translatedIngredients;
+        safe.steps = translatedSteps;
+      }
+      // Do NOT translate difficulty (keep as enum-like label)
     }
+    timing.mark("language-enforcement", { applied: languageEnforcementApplied });
 
     // --- Enforce measurement system on ingredient quantities (server-side safety net, AFTER translation) ---
     if (measurementSystemNormalized === "US") {
@@ -4194,6 +6380,11 @@ IMPORTANT: All text in every field must be written entirely in the target langua
       finalTags = tags.slice(0, 5);
     }
     safe.tags = finalTags;
+    timing.mark("post-process-complete", {
+      ingredientCount: safe.ingredients.length,
+      stepCount: safe.steps.length,
+      hasNutritionInfo: !!safe.nutritionInfo,
+    });
 
     // Analytics: full AI recipe generated
     const ctx = getEventContext(req);
@@ -4207,7 +6398,7 @@ IMPORTANT: All text in every field must be written entirely in the target langua
         servings: safe.servings,
         cookingTime: safe.cookingTime,
         difficulty: safe.difficulty,
-        cost: safe.cost,
+        hasNutritionInfo: !!safe.nutritionInfo,
         tags: safe.tags,
       },
     });
@@ -4322,12 +6513,12 @@ async function handleContactSupport(req, res) {
     }
 
     const toAddress = process.env.SUPPORT_EMAIL || "info@rafaelpiloto.com";
-    const fromAddress = process.env.SMTP_FROM || "MyCookbook AI Support <no-reply@rafaelpiloto.com>";
+    const fromAddress = process.env.SMTP_FROM || "Cook N'Eat AI Support <no-reply@rafaelpiloto.com>";
 
     const payload = {
       from: fromAddress,
       to: toAddress,
-      subject: `[MyCookbook AI Support] ${trimmedSubject}`,
+      subject: `[Cook N'Eat AI Support] ${trimmedSubject}`,
       reply_to: trimmedEmail,
       text: [
         `Support message from: ${trimmedEmail}`,
@@ -4543,7 +6734,8 @@ app.post("/extractRecipeDraftFromUrl", async (req, res) => {
           economySpend.requiredCookies ||
           ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
         balance: economySpend.remaining,
-        message: `You need ${ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL} Cookies to import a recipe from an Instagram Reel.`,
+        remainingFreePremiumActions: economySpend.remainingFreePremiumActions,
+        message: `You need ${ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL} Eggs to import a recipe from an Instagram Reel.`,
       });
     }
 
@@ -4552,12 +6744,15 @@ app.post("/extractRecipeDraftFromUrl", async (req, res) => {
       status: normalized.status,
       recipe: normalized.recipe,
       warnings: normalized.warnings,
+      premiumActionSource: economySpend?.source || null,
       chargedCookies:
-        economySpend.skipped === true
-          ? 0
-          : ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
+        typeof economySpend?.charged === "number" ? economySpend.charged : 0,
       remainingCookies:
         typeof economySpend.remaining === "number" ? economySpend.remaining : null,
+      remainingFreePremiumActions:
+        typeof economySpend?.remainingFreePremiumActions === "number"
+          ? economySpend.remainingFreePremiumActions
+          : null,
       source: {
         platform: "instagram",
         type: "instagram_reel",
@@ -4608,6 +6803,12 @@ app.post("/importRecipeFromUrl", async (req, res) => {
       host: _parsedUrl.host,
     },
   });
+  recordUrlImportTelemetry({
+    url,
+    host: _parsedUrl.host,
+    status: "attempt",
+    stage: "request_received",
+  });
 
   // Helper to clean ingredient strings
   function cleanIngredient(str) {
@@ -4621,7 +6822,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
   }
 
   // Helper for normalizing the scraped recipe
-  function normalizeImportedRecipe(scraped, req) {
+  function normalizeImportedRecipe(scraped, req, sourceUrl) {
     // --- Cooking Time ---
     // Candidates: [totalTime, cookTime, prepTime], prefer first valid
     let cookingTime = 30;
@@ -4692,7 +6893,8 @@ app.post("/importRecipeFromUrl", async (req, res) => {
         str.match(/\bfor\s+(\d{1,4})\b/i) ||
         str.match(/\b(\d{1,4})\s*(comensales|comensais)\b/i);
       if (match) {
-        return parseInt(match[1] || match[2], 10);
+        const numericCapture = match.slice(1).find((value) => /^\d{1,4}$/.test(String(value || "").trim()));
+        return numericCapture ? parseInt(numericCapture, 10) : null;
       }
       // Fallback: if the string contains any number, assume it's the servings count
       const justNumber = str.match(/(\d{1,4})/);
@@ -4733,7 +6935,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
         } else {
           // Handle relative URL
           try {
-            image = new URL(imgVal, req.protocol + "://" + req.get("host") + "/").href;
+            image = new URL(imgVal, sourceUrl || req.protocol + "://" + req.get("host") + "/").href;
           } catch (e) {
             image = undefined;
           }
@@ -4749,7 +6951,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
             } else {
               // Relative URL
               try {
-                foundImg = new URL(img.trim(), req.protocol + "://" + req.get("host") + "/").href;
+                foundImg = new URL(img.trim(), sourceUrl || req.protocol + "://" + req.get("host") + "/").href;
                 break;
               } catch (e) { }
             }
@@ -4759,7 +6961,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
               break;
             } else {
               try {
-                foundImg = new URL(img.url.trim(), req.protocol + "://" + req.get("host") + "/").href;
+                foundImg = new URL(img.url.trim(), sourceUrl || req.protocol + "://" + req.get("host") + "/").href;
                 break;
               } catch (e) { }
             }
@@ -4773,7 +6975,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
         } else {
           // Relative URL
           try {
-            image = new URL(imgVal, req.protocol + "://" + req.get("host") + "/").href;
+            image = new URL(imgVal, sourceUrl || req.protocol + "://" + req.get("host") + "/").href;
           } catch (e) {
             image = undefined;
           }
@@ -4881,59 +7083,313 @@ app.post("/importRecipeFromUrl", async (req, res) => {
   try {
     // Fetch raw HTML with timeout and size limit (2 MB)
     const MAX_HTML_BYTES = 2 * 1024 * 1024; // 2 MB
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s
+    const browserLikeHeaders = {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+      "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9,pt-PT;q=0.8,pt;q=0.7",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
+      "Upgrade-Insecure-Requests": "1",
+    };
+
+    async function fetchRecipePage(fetchUrl, headers = {}) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s
+      try {
+        return await fetch(fetchUrl, {
+          signal: controller.signal,
+          size: MAX_HTML_BYTES,
+          redirect: "follow",
+          compress: true,
+          headers,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function buildFetchCandidates(rawUrl) {
+      const candidates = [rawUrl];
+      try {
+        const parsed = new URL(rawUrl);
+        const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+        if (host === "allrecipes.com") {
+          const printUrl = new URL(rawUrl);
+          printUrl.searchParams.set("print", "1");
+          candidates.push(printUrl.toString());
+
+          const outputUrl = new URL(rawUrl);
+          outputUrl.searchParams.set("output", "1");
+          candidates.push(outputUrl.toString());
+        }
+      } catch {
+        // ignore malformed alt candidate creation
+      }
+      return Array.from(new Set(candidates));
+    }
+
+    function buildAllrecipesSecondaryCandidates(rawUrl) {
+      try {
+        const parsed = new URL(rawUrl);
+        const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+        if (host !== "allrecipes.com") return [];
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        const slug = segments[segments.length - 1] || "";
+        if (!slug) return [];
+        const capitalizedSlug = slug
+          .split("-")
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join("-");
+        return Array.from(
+          new Set([
+            `https://www.punchfork.com/recipe/${capitalizedSlug}-Allrecipes`,
+            `https://www.punchfork.com/recipe/${slug}-Allrecipes`,
+          ])
+        );
+      } catch {
+        return [];
+      }
+    }
+
+    async function scrapeRecipeCandidates(candidateUrls) {
+      let lastError = null;
+      for (const candidateUrl of candidateUrls) {
+        try {
+          return await scrapeRecipe(candidateUrl);
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("recipe-scraper failed for all candidates");
+    }
+
+    async function tryAllrecipesSecondarySource(rawUrl, requestInfo) {
+      const secondaryUrls = buildAllrecipesSecondaryCandidates(rawUrl);
+      if (!secondaryUrls.length) return null;
+
+      for (const secondaryUrl of secondaryUrls) {
+        try {
+          const secondaryResponse = await fetchRecipePage(secondaryUrl, browserLikeHeaders);
+          if (!secondaryResponse.ok) continue;
+          const secondaryHtml = await secondaryResponse.text();
+          const extracted = extractRecipeFromHtml({
+            url: secondaryUrl,
+            html: secondaryHtml,
+            requestInfo,
+          });
+          if (!extracted?.recipe) continue;
+
+          const recipe = {
+            ...extracted.recipe,
+            sourceUrl: rawUrl,
+          };
+
+          const hasRealSteps =
+            Array.isArray(recipe.steps) &&
+            recipe.steps.some((step) => typeof step === "string" && step.trim() && step !== "No steps provided");
+
+          if (!hasRealSteps) {
+            const stepSchema = {
+              type: "object",
+              additionalProperties: false,
+              required: ["steps"],
+              properties: {
+                steps: {
+                  type: "array",
+                  minItems: 3,
+                  maxItems: 8,
+                  items: { type: "string" },
+                },
+              },
+            };
+
+            let raw = await requestStructuredJsonCompletion({
+              schemaName: "allrecipes_secondary_steps",
+              schema: stepSchema,
+              temperature: 0.2,
+              timeoutMs: 12000,
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You reconstruct plausible cooking steps from a known recipe title and grounded ingredient list. Keep steps concise, practical, and conservative. Do not invent unusual ingredients or techniques.",
+                },
+                {
+                  role: "user",
+                  content: `
+Generate 4 to 8 concise cooking steps for this recipe.
+
+Recipe title: ${recipe.title}
+Servings: ${recipe.servings}
+Cooking time target: ${recipe.cookingTime} minutes
+Ingredients:
+${recipe.ingredients.map((ingredient) => `- ${ingredient}`).join("\n")}
+
+Rules:
+- Use only the grounded ingredient list above.
+- Keep the steps practical and generic when exact source details are unknown.
+- Do not add story text.
+- Return only JSON.
+`,
+                },
+              ],
+            });
+
+            raw = cleanJsonResponse(raw);
+            const parsedSteps = safeJSONParse(raw, null);
+            if (parsedSteps?.steps?.length) {
+              recipe.steps = parsedSteps.steps.map((step) => String(step || "").trim()).filter(Boolean);
+            }
+          }
+
+          return {
+            recipe,
+            stage: "allrecipes_secondary_source",
+            extractor: "punchfork_plus_ai_steps",
+          };
+        } catch {
+          // keep trying secondary candidates
+        }
+      }
+
+      return null;
+    }
 
     let response;
+    let earlyFetchFailure = null;
     try {
-      response = await fetch(url, { signal: controller.signal, size: MAX_HTML_BYTES });
+      const candidateUrls = buildFetchCandidates(url);
+      const headerVariants = [
+        browserLikeHeaders,
+        {
+          ...browserLikeHeaders,
+          "Accept-Language": "en-US,en;q=0.9",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+        },
+      ];
+
+      for (const candidateUrl of candidateUrls) {
+        for (const headers of headerVariants) {
+          response = await fetchRecipePage(candidateUrl, headers);
+          if (response.ok) {
+            break;
+          }
+        }
+        if (response?.ok) {
+          break;
+        }
+      }
     } catch (err) {
-      clearTimeout(timeoutId);
       if (err && (err.name === 'AbortError' || err.type === 'aborted')) {
         console.error("❌ ImportRecipeFromUrl 408 - Fetch timeout for:", url);
-        return res.status(408).json({ error: "Fetch timed out (15s)" });
+        earlyFetchFailure = { status: 408, error: "Fetch timed out (15s)" };
       }
-      if (err && (/max\s*size/i.test(String(err.message)) || err.type === 'max-size')) {
+      else if (err && (/max\s*size/i.test(String(err.message)) || err.type === 'max-size')) {
         console.error("❌ ImportRecipeFromUrl 413 - Response too large for:", url);
-        return res.status(413).json({ error: "Response too large (>2MB)" });
+        earlyFetchFailure = { status: 413, error: "Response too large (>2MB)" };
+      } else {
+        console.error("❌ ImportRecipeFromUrl fetch error:", err);
+        earlyFetchFailure = { status: 502, error: "Failed to fetch URL" };
       }
-      console.error("❌ ImportRecipeFromUrl fetch error:", err);
-      return res.status(502).json({ error: "Failed to fetch URL" });
-    } finally {
-      clearTimeout(timeoutId);
     }
 
     if (!response.ok) {
       console.error("❌ ImportRecipeFromUrl fetch non-OK:", response.status, url);
-      return res.status(502).json({ error: `Upstream responded with ${response.status}` });
+      earlyFetchFailure = { status: 502, error: `Upstream responded with ${response.status}` };
     }
 
-    const contentLengthHeader = response.headers.get('content-length');
-    if (contentLengthHeader && Number(contentLengthHeader) > MAX_HTML_BYTES) {
-      try { response.body && response.body.cancel && response.body.cancel(); } catch (_) { }
-      console.error("❌ ImportRecipeFromUrl 413 - Declared Content-Length too large:", contentLengthHeader);
-      return res.status(413).json({ error: "Response too large (>2MB)" });
+    let html = "";
+    if (response?.ok) {
+      const contentLengthHeader = response.headers.get('content-length');
+      if (contentLengthHeader && Number(contentLengthHeader) > MAX_HTML_BYTES) {
+        try { response.body && response.body.cancel && response.body.cancel(); } catch (_) { }
+        console.error("❌ ImportRecipeFromUrl 413 - Declared Content-Length too large:", contentLengthHeader);
+        earlyFetchFailure = { status: 413, error: "Response too large (>2MB)" };
+      }
     }
 
-    let html;
-    try {
-      html = await response.text();
-    } catch (e) {
-      console.error("❌ ImportRecipeFromUrl reading body failed:", e);
-      return res.status(502).json({ error: "Failed to read response body" });
+    if (response?.ok && !earlyFetchFailure) {
+      try {
+        html = await response.text();
+      } catch (e) {
+        console.error("❌ ImportRecipeFromUrl reading body failed:", e);
+        earlyFetchFailure = { status: 502, error: "Failed to read response body" };
+      }
+    }
+
+    const requestInfo = {
+      protocol: req.protocol,
+      host: req.get("host"),
+    };
+
+    let extractedByService = null;
+    if (html) {
+      extractedByService = extractRecipeFromHtml({
+        url,
+        html,
+        requestInfo,
+      });
+
+      if (extractedByService?.recipe) {
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: extractedByService.stage,
+          extractor: extractedByService.extractor,
+          looksRecipeLike: extractedByService.looksRecipeLike,
+        });
+        trackEvent("import_recipe_from_url_result", {
+          userId: ctx.userId,
+          deviceId: ctx.deviceId,
+          metadata: {
+            host: _parsedUrl.host,
+            status: "success",
+            stage: extractedByService.stage,
+            extractor: extractedByService.extractor,
+          },
+        });
+        return res.json({ recipe: extractedByService.recipe });
+      }
     }
 
     // Try JSON-LD
-    const ldRecipes = extractJsonLd(html);
-    if (ldRecipes.length > 0) {
-      const safe = normalizeImportedRecipe(ldRecipes[0], req);
-      return res.json({ recipe: safe });
+    if (html) {
+      const ldRecipes = extractJsonLd(html);
+      if (ldRecipes.length > 0) {
+        const safe = normalizeImportedRecipe(ldRecipes[0], req, url);
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: "jsonld_legacy",
+          extractor: "jsonld_legacy",
+          looksRecipeLike: true,
+        });
+        return res.json({ recipe: safe });
+      }
     }
 
     // Try recipe-scraper
+    const recipeScraperCandidates = buildFetchCandidates(url);
+
     try {
-      const scraped = await scrapeRecipe(url);
-      const safe = normalizeImportedRecipe(scraped, req);
+      const scraped = await scrapeRecipeCandidates(recipeScraperCandidates);
+      const safe = normalizeImportedRecipe(scraped, req, url);
+      recordUrlImportTelemetry({
+        url,
+        host: _parsedUrl.host,
+        status: "success",
+        stage: "recipe_scraper",
+        extractor: "recipe_scraper",
+        looksRecipeLike: true,
+      });
       return res.json({ recipe: safe });
     } catch (e) {
       console.warn("recipe-scraper failed, trying heuristics.");
@@ -4971,7 +7427,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           instructions: steps,
         };
         if (servings) scraped.yield = servings.toString();
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -4980,52 +7436,142 @@ app.post("/importRecipeFromUrl", async (req, res) => {
     if (url.includes("feed.continente.pt")) {
       const $ = cheerio.load(html);
       const title = he.decode($("h1").first().text().trim());
-      const ingredients = [];
-      // Flexible selector: any element with class containing 'ingredient' (case-insensitive), then li children
-      $("[class*='ingredient' i] li").each((i, el) => {
-        const txt = $(el).text().trim();
-        if (txt) {
-          const cleaned = cleanIngredient(txt);
-          if (cleaned) ingredients.push(cleaned);
+      const collectContinenteSectionItems = (headingRegex, mode = "ingredients") => {
+        const items = [];
+        const seen = new Set();
+        const headings = $("h1, h2, h3, h4, h5, h6, strong, [role='heading']");
+        let heading = null;
+
+        headings.each((_, el) => {
+          const text = $(el).text().replace(/\s+/g, " ").trim();
+          if (!heading && headingRegex.test(text)) {
+            heading = $(el);
+          }
+        });
+
+        if (!heading || !heading.length) {
+          return items;
         }
-      });
-      // Also allow direct ingredient class elements if not contained in a <ul>
-      $("[class*='ingredient' i]").each((i, el) => {
-        // If this element is an li and not already captured above
-        if ($(el).is("li")) {
+
+        const pushItem = (rawText) => {
+          const text = String(rawText || "").replace(/\s+/g, " ").trim();
+          if (!text) return;
+          if (/^adicionar à lista de compras$/i.test(text)) return;
+          if (/^gostou desta receita\??$/i.test(text)) return;
+          if (/^avalie esta receita$/i.test(text)) return;
+          const normalized =
+            mode === "ingredients" ? cleanIngredient(text) : he.decode(text).trim();
+          if (!normalized || seen.has(normalized)) return;
+          seen.add(normalized);
+          items.push(normalized);
+        };
+
+        let current = heading.next();
+        let siblingSteps = 0;
+        while (current && current.length && siblingSteps < 80) {
+          siblingSteps += 1;
+          const nodeName = (current.get(0)?.tagName || "").toLowerCase();
+          const text = current.text().replace(/\s+/g, " ").trim();
+
+          if (
+            /^(ingredientes|prepara[cç][aã]o|informa[cç][aã]o nutricional|utens[ií]lios [uú]teis|gostou desta receita\??|tamb[eé]m vai gostar|veja tamb[eé]m)$/i.test(
+              text
+            ) &&
+            headingRegex.test(text) === false
+          ) {
+            break;
+          }
+
+          if (/^adicionar à lista de compras$/i.test(text)) {
+            break;
+          }
+
+          if (nodeName === "ul" || nodeName === "ol") {
+            current.find("li").each((_, li) => {
+              pushItem($(li).text());
+            });
+          } else if (nodeName === "li") {
+            pushItem(text);
+          } else if (mode === "steps" && (nodeName === "p" || nodeName === "div")) {
+            if (/^\d+[.)]?$/.test(text)) {
+              current = current.next();
+              continue;
+            }
+            pushItem(text);
+          }
+
+          current = current.next();
+        }
+
+        return items;
+      };
+
+      let ingredients = collectContinenteSectionItems(/^ingredientes$/i, "ingredients");
+      let steps = collectContinenteSectionItems(/^prepara[cç][aã]o$/i, "steps");
+
+      if (!ingredients.length) {
+        // Flexible selector: any element with class containing 'ingredient' (case-insensitive), then li children
+        $("[class*='ingredient' i] li").each((i, el) => {
           const txt = $(el).text().trim();
           if (txt) {
             const cleaned = cleanIngredient(txt);
-            if (cleaned && !ingredients.includes(cleaned)) ingredients.push(cleaned);
+            if (cleaned) ingredients.push(cleaned);
           }
-        }
-      });
-      const steps = [];
-      // Flexible selector: any element with class containing 'step', select li and p children
-      $("[class*='step' i] li, [class*='step' i] p").each((i, el) => {
-        const txt = $(el).text().trim();
-        if (txt) {
-          const decoded = he.decode(txt);
-          if (decoded) steps.push(decoded);
-        }
-      });
-      // Also allow direct step class elements if not contained in a list/paragraph
-      $("[class*='step' i]").each((i, el) => {
-        if ($(el).is("li") || $(el).is("p")) {
+        });
+        // Also allow direct ingredient class elements if not contained in a <ul>
+        $("[class*='ingredient' i]").each((i, el) => {
+          if ($(el).is("li")) {
+            const txt = $(el).text().trim();
+            if (txt) {
+              const cleaned = cleanIngredient(txt);
+              if (cleaned && !ingredients.includes(cleaned)) ingredients.push(cleaned);
+            }
+          }
+        });
+      }
+
+      if (!steps.length) {
+        // Flexible selector: any element with class containing 'step', select li and p children
+        $("[class*='step' i] li, [class*='step' i] p").each((i, el) => {
           const txt = $(el).text().trim();
           if (txt) {
             const decoded = he.decode(txt);
-            if (decoded && !steps.includes(decoded)) steps.push(decoded);
+            if (decoded) steps.push(decoded);
           }
-        }
-      });
+        });
+        // Also allow direct step class elements if not contained in a list/paragraph
+        $("[class*='step' i]").each((i, el) => {
+          if ($(el).is("li") || $(el).is("p")) {
+            const txt = $(el).text().trim();
+            if (txt) {
+              const decoded = he.decode(txt);
+              if (decoded && !steps.includes(decoded)) steps.push(decoded);
+            }
+          }
+        });
+      }
+
+      let servings;
+      const servingsText = $("body").text().match(/(\d{1,3})\s+por[cç][õo]es/i);
+      if (servingsText) {
+        servings = parseInt(servingsText[1], 10);
+      }
+
+      let totalTime = null;
+      const timeMatch = $("body").text().match(/(?:Prep:\s*)?(\d{1,3})\s*min/i);
+      if (timeMatch) {
+        totalTime = parseInt(timeMatch[1], 10);
+      }
+
       if (ingredients.length || steps.length) {
         const scraped = {
           name: title,
           ingredients,
           instructions: steps,
         };
-        const safe = normalizeImportedRecipe(scraped, req);
+        if (servings) scraped.yield = servings.toString();
+        if (totalTime) scraped.totalTime = totalTime;
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5109,7 +7655,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           instructions: steps,
           image,
         };
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5323,7 +7869,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           image,
         };
         if (servings) scraped.yield = servings.toString();
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5475,7 +8021,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           instructions: steps,
           totalTime: cookingTime
         };
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5624,7 +8170,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           image,
         };
         if (servings) scraped.yield = servings.toString();
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5741,7 +8287,7 @@ app.post("/importRecipeFromUrl", async (req, res) => {
         };
         if (servings) scraped.yield = servings.toString();
         if (cookingTime) scraped.totalTime = cookingTime;
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
@@ -5803,112 +8349,276 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           image,
         };
         if (servings) scraped.yield = servings.toString();
-        const safe = normalizeImportedRecipe(scraped, req);
+        const safe = normalizeImportedRecipe(scraped, req, url);
         return res.json({ recipe: safe });
       }
     }
 
     // Simple heuristic fallback (title + ingredients list from HTML)
-    const $ = cheerio.load(html);
-    const title = $("h1").first().text();
-    const ingredients = $("li:contains(ingred)").map((i, el) => $(el).text()).get();
+    if (html) {
+      const $ = cheerio.load(html);
+      const title = $("h1").first().text();
+      const ingredients = $("li:contains(ingred)").map((i, el) => $(el).text()).get();
 
-    if (title && ingredients.length) {
-      const safe = normalizeImportedRecipe({ title, ingredients, instructions: [] }, req);
-      return res.json({ recipe: safe });
+      if (title && ingredients.length) {
+        const safe = normalizeImportedRecipe({ title, ingredients, instructions: [] }, req, url);
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: "simple_heuristic",
+          extractor: "simple_heuristic",
+          looksRecipeLike: true,
+        });
+        return res.json({ recipe: safe });
+      }
     }
 
     // ---------- Generic multilanguage fallback ----------
-    try {
-      const ldRecipesGeneric = extractJsonLd(html);
-      if (ldRecipesGeneric.length > 0) {
-        const safe = normalizeImportedRecipe(ldRecipesGeneric[0], req);
-        return res.json({ recipe: safe });
+    if (html) {
+      try {
+        const ldRecipesGeneric = extractJsonLd(html);
+        if (ldRecipesGeneric.length > 0) {
+          const safe = normalizeImportedRecipe(ldRecipesGeneric[0], req, url);
+          recordUrlImportTelemetry({
+            url,
+            host: _parsedUrl.host,
+            status: "success",
+            stage: "jsonld_generic_legacy",
+            extractor: "jsonld_generic_legacy",
+            looksRecipeLike: true,
+          });
+          return res.json({ recipe: safe });
+        }
+      } catch (e) {
+        console.warn("Generic JSON-LD extract failed");
       }
-    } catch (e) {
-      console.warn("Generic JSON-LD extract failed");
     }
 
     try {
-      const scrapedGeneric = await scrapeRecipe(url);
-      const safe = normalizeImportedRecipe(scrapedGeneric, req);
+      const scrapedGeneric = await scrapeRecipeCandidates(recipeScraperCandidates);
+      const safe = normalizeImportedRecipe(scrapedGeneric, req, url);
+      recordUrlImportTelemetry({
+        url,
+        host: _parsedUrl.host,
+        status: "success",
+        stage: "recipe_scraper_generic_legacy",
+        extractor: "recipe_scraper_generic_legacy",
+        looksRecipeLike: true,
+      });
       return res.json({ recipe: safe });
     } catch (e) {
       console.warn("Generic recipe-scraper failed, trying heuristics.");
     }
 
     // Heuristic multilanguage extraction
-    const $generic = cheerio.load(html);
-    let genIngredients = [];
-    $generic("[itemprop='recipeIngredient'], .ingredients li, .ingredientes li, .zutaten li, .ingrédients li").each((i, el) => {
-      const txt = $generic(el).text().trim();
-      if (txt) genIngredients.push(cleanIngredient(txt));
-    });
+    if (html) {
+      const $generic = cheerio.load(html);
+      let genIngredients = [];
+      $generic("[itemprop='recipeIngredient'], .ingredients li, .ingredientes li, .zutaten li, .ingrédients li").each((i, el) => {
+        const txt = $generic(el).text().trim();
+        if (txt) genIngredients.push(cleanIngredient(txt));
+      });
 
-    let genSteps = [];
-    $generic("[itemprop='recipeInstructions'], .method li, .preparation li, .zubereitung li, .préparation li").each((i, el) => {
-      const txt = $generic(el).text().trim();
-      if (txt) genSteps.push(he.decode(txt));
-    });
+      let genSteps = [];
+      $generic("[itemprop='recipeInstructions'], .method li, .preparation li, .zubereitung li, .préparation li").each((i, el) => {
+        const txt = $generic(el).text().trim();
+        if (txt) genSteps.push(he.decode(txt));
+      });
 
-    let genTitle = $generic("h1").first().text().trim() || $generic("title").text().trim();
-    genTitle = he.decode(genTitle);
+      let genTitle = $generic("h1").first().text().trim() || $generic("title").text().trim();
+      genTitle = he.decode(genTitle);
 
-    if (genIngredients.length || genSteps.length) {
-      const safe = normalizeImportedRecipe({ name: genTitle, ingredients: genIngredients, instructions: genSteps }, req);
-      return res.json({ recipe: safe });
-    }
-
-    console.error("❌ ImportRecipeFromUrl 422 - Could not detect recipe structure");
-
-    // Final fallback → AI (only if enabled)
-    if (process.env.ENABLE_AI_FALLBACK === "true") {
-      try {
-        const prompt = `
-Extract a recipe from the following HTML. Return ONLY valid JSON:
-
-{
-  "title": "string",
-  "cookingTime": number,
-  "difficulty": "Easy" | "Moderate" | "Challenging",
-  "servings": number,
-  "cost": "Cheap" | "Medium" | "Expensive",
-  "ingredients": ["..."],
-  "steps": ["..."],
-  "tags": ["..."]
-}
-
-HTML (truncated):
-"""
-${html.slice(0, 6000)}
-"""`;
-
-        const completion = await client.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: "You are a chef assistant. Output valid JSON only." },
-            { role: "user", content: prompt }
-          ],
-          temperature: 0.3,
-          timeout: 10000,
+      if (genIngredients.length || genSteps.length) {
+        const safe = normalizeImportedRecipe({ name: genTitle, ingredients: genIngredients, instructions: genSteps }, req, url);
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: "generic_heuristic_legacy",
+          extractor: "generic_heuristic_legacy",
+          looksRecipeLike: true,
         });
-
-        let raw = completion.choices[0].message.content.trim();
-        if (raw.startsWith("```")) {
-          raw = raw.replace(/```(json)?/gi, "").replace(/```/g, "").trim();
-        }
-
-        const parsed = JSON.parse(raw);
-        const safe = normalizeImportedRecipe(parsed, req);
         return res.json({ recipe: safe });
-
-      } catch (err) {
-        console.error("❌ AI fallback failed:", err);
-        return res.status(422).json({ error: "Could not extract recipe, even with AI fallback" });
       }
     }
 
-    // If AI disabled
+    if (earlyFetchFailure && _parsedUrl.host.replace(/^www\./i, "").toLowerCase() === "allrecipes.com") {
+      const secondaryResult = await tryAllrecipesSecondarySource(url, requestInfo);
+      if (secondaryResult?.recipe) {
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: secondaryResult.stage,
+          extractor: secondaryResult.extractor,
+          looksRecipeLike: true,
+        });
+        trackEvent("import_recipe_from_url_result", {
+          userId: ctx.userId,
+          deviceId: ctx.deviceId,
+          metadata: {
+            host: _parsedUrl.host,
+            status: "success",
+            stage: secondaryResult.stage,
+            extractor: secondaryResult.extractor,
+          },
+        });
+        return res.json({ recipe: secondaryResult.recipe });
+      }
+    }
+
+    // ---------- Final AI fallback ----------
+    try {
+      const $ai = cheerio.load(html);
+      $ai("script, style, noscript, svg").remove();
+      const pageTitle = he.decode(
+        $ai("h1").first().text().trim() || $ai("title").text().trim() || ""
+      );
+      const pageText = $ai("body").text().replace(/\s+/g, " ").trim().slice(0, 18000);
+
+      const aiSchema = {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "cookingTime", "difficulty", "servings", "cost", "ingredients", "steps", "tags"],
+        properties: {
+          title: { type: "string" },
+          cookingTime: { type: "number" },
+          difficulty: { type: "string", enum: ["Easy", "Moderate", "Challenging"] },
+          servings: { type: "number" },
+          cost: { type: "string", enum: ["Cheap", "Medium", "Expensive"] },
+          ingredients: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+          },
+          steps: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+          },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+      };
+
+      let raw = await requestStructuredJsonCompletion({
+        schemaName: "import_recipe_from_url_fallback",
+        schema: aiSchema,
+        temperature: 0.2,
+        timeoutMs: 20000,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You extract recipes from webpage text. If the content is not a recipe page, return an empty recipe structure with title as an empty string and empty arrays for ingredients and steps.",
+          },
+          {
+            role: "user",
+            content: `
+Extract a recipe from this webpage content.
+
+Rules:
+- Only return a recipe if the page clearly contains a recipe with ingredients and preparation steps.
+- Preserve the original language used in the recipe.
+- Ingredients must include quantities when they are present in the page.
+- Steps must be concise cooking instructions, not editorial text.
+- Keep the response compact: no more than 10 steps, merging tiny adjacent actions when helpful.
+- cookingTime should be in minutes.
+- difficulty should be one of Easy, Moderate, or Challenging.
+- servings should be a realistic integer.
+- cost should be Cheap, Medium, or Expensive.
+- tags should be short food-related tags.
+- If this is not clearly a recipe page, return:
+  {
+    "title": "",
+    "cookingTime": 30,
+    "difficulty": "Moderate",
+    "servings": 4,
+    "cost": "Medium",
+    "ingredients": [],
+    "steps": [],
+    "tags": []
+  }
+
+URL: ${url}
+Page title: ${pageTitle}
+Visible page text:
+"""
+${pageText}
+"""
+`,
+          },
+        ],
+      });
+
+      raw = cleanJsonResponse(raw);
+      const fallbackTitle = pageTitle || inferRecipeTitleFromUrl(url);
+      const parsed =
+        safeJSONParse(raw, null) ||
+        recoverRecipeFromJsonLike(raw, fallbackTitle);
+
+      if (parsed && (!parsed.title || !String(parsed.title).trim())) {
+        parsed.title = fallbackTitle || "Untitled Recipe";
+      }
+      const hasMeaningfulRecipe =
+        parsed &&
+        typeof parsed.title === "string" &&
+        parsed.title.trim().length > 0 &&
+        Array.isArray(parsed.ingredients) &&
+        parsed.ingredients.filter((item) => typeof item === "string" && item.trim()).length > 0 &&
+        Array.isArray(parsed.steps) &&
+        parsed.steps.filter((item) => typeof item === "string" && item.trim()).length > 0;
+
+      if (hasMeaningfulRecipe) {
+        const safe = validateRecipe(parsed, null);
+        recordUrlImportTelemetry({
+          url,
+          host: _parsedUrl.host,
+          status: "success",
+          stage: "ai_fallback",
+          extractor: "ai_fallback",
+          looksRecipeLike: extractedByService?.looksRecipeLike ?? null,
+        });
+        trackEvent("import_recipe_from_url_result", {
+          userId: ctx.userId,
+          deviceId: ctx.deviceId,
+          metadata: {
+            host: _parsedUrl.host,
+            status: "success",
+            stage: "ai_fallback",
+            extractor: "ai_fallback",
+          },
+        });
+        return res.json({ recipe: safe });
+      }
+    } catch (e) {
+      console.warn("AI URL import fallback failed:", e?.message || e);
+    }
+
+    console.error("❌ ImportRecipeFromUrl 422 - Could not detect recipe structure");
+      recordUrlImportTelemetry({
+        url,
+        host: _parsedUrl.host,
+        status: "failure",
+        stage: "no_recipe_detected",
+        extractor: null,
+        reason: earlyFetchFailure?.error || "could_not_detect_recipe_structure",
+        looksRecipeLike: extractedByService?.looksRecipeLike ?? null,
+      });
+    trackEvent("import_recipe_from_url_result", {
+      userId: ctx.userId,
+      deviceId: ctx.deviceId,
+      metadata: {
+        host: _parsedUrl.host,
+        status: "failure",
+        stage: "no_recipe_detected",
+        fetchFailure: earlyFetchFailure?.error || null,
+        looksRecipeLike: extractedByService?.looksRecipeLike ?? null,
+      },
+    });
     return res.status(422).json({
       errorCode: "INVALID_RECIPE_STRUCTURE"
       // error: "We could not detect a valid recipe structure in the provided link. Please double-check the URL or try another recipe website."

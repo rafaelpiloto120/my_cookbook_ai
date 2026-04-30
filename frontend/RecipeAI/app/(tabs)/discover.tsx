@@ -15,7 +15,7 @@ import { useThemeColors } from "../../context/ThemeContext";
 import AppCard from "../../components/AppCard";
 
 // Import da imagem default
-import defaultImage from "../../assets/default_recipe.png";
+const defaultImage = require("../../assets/default_recipe.png");
 
 // Dummy recipes
 const dummyRecipes = [
@@ -81,8 +81,8 @@ export default function Discover() {
             key={recipe.id}
             onPress={() =>
               router.push({
-                pathname: `/recipe/${recipe.id}`,
-                params: { recipe: JSON.stringify(recipe) },
+                pathname: "/recipe/[id]",
+                params: { id: recipe.id, recipe: JSON.stringify(recipe) },
               })
             }
           >

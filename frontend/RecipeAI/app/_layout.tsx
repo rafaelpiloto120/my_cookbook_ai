@@ -9,6 +9,8 @@ import { AuthProvider } from "../context/AuthContext";
 import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { getOrCreateDeviceId } from "../utils/deviceId";
 import { auth } from "../firebaseConfig";
+import { syncIngredientCatalog } from "../lib/ingredients/catalogSync";
+import { getApiBaseUrl } from "../lib/config/api";
 
 function RootStack() {
   const { bg, text } = useThemeColors();
@@ -28,6 +30,7 @@ function RootStack() {
       {/* Onboarding flow root (matches app/onboarding/index.tsx) */}
       <Stack.Screen name="onboarding/index" options={{ headerShown: false }} />
       <Stack.Screen name="economy" options={{ headerShown: false }} />
+      <Stack.Screen name="faq" />
       <Stack.Screen name="import-help" />
     </Stack>
   );
@@ -70,7 +73,27 @@ export default function RootLayout() {
     return () => {
       cancelled = true;
     };
-  }, [router, pathname]);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshIngredientCatalog() {
+      try {
+        const hasSeen = await AsyncStorage.getItem("hasSeenOnboarding");
+        if (!hasSeen || cancelled) return;
+        await syncIngredientCatalog({ force: false });
+      } catch (err) {
+        console.warn("[RootLayout] ingredient catalog refresh failed", err);
+      }
+    }
+
+    refreshIngredientCatalog();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,7 +105,7 @@ export default function RootLayout() {
 
         console.log("[Analytics] deviceId =>", id);
 
-        const url = process.env.EXPO_PUBLIC_API_URL;
+        const url = getApiBaseUrl();
         if (!url) {
           console.warn("[Analytics] No EXPO_PUBLIC_API_URL set, skipping session_start logging.");
           return;

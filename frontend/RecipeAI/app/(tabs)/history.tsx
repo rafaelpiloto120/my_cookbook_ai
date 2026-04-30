@@ -21,7 +21,7 @@ import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import { Stack, useRouter, useLocalSearchParams } from "expo-router";
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useThemeColors } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
 import { Ionicons } from "@expo/vector-icons";
@@ -32,6 +32,25 @@ import i18n from "../../i18n";
 import { useAuth } from "../../context/AuthContext";
 import { syncEngine as globalSyncEngine } from "../../lib/sync/SyncEngine";
 import { importRecipesFromFile } from "../../utils/importFromFile";
+import {
+  RecipeNutritionInfo,
+  getRecipeCaloriesPerServing,
+} from "../../lib/recipes/nutrition";
+import { normalizeRecipeDifficulty } from "../../lib/recipes/difficulty";
+import { getApiBaseUrl as getResolvedApiBaseUrl } from "../../lib/config/api";
+import {
+  claimEconomyReward,
+  fetchEconomyCatalogBundle,
+  fetchEconomySnapshot,
+  shouldHidePremiumPricing,
+  writeCachedEconomySnapshot,
+  type EconomyCatalogOffer,
+} from "../../lib/economy/client";
+import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
+import {
+  claimRewardKeysSequentially,
+  getRecipeRewardKeysForCount,
+} from "../../lib/economy/rewards";
 
 const defaultImage = require("../../assets/default_recipe.png");
 
@@ -51,6 +70,7 @@ interface Recipe {
   imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
   isDeleted?: boolean;
+  nutritionInfo?: RecipeNutritionInfo | null;
 }
 
 interface Cookbook {
@@ -58,6 +78,8 @@ interface Cookbook {
   name: string;
   image?: string;
   imageUrl?: string;
+  createdAt?: number | string;
+  updatedAt?: number | string;
 }
 
 const defaultCookbookImagesById: Record<string, string> = {
@@ -71,7 +93,6 @@ const defaultCookbookImagesById: Record<string, string> = {
 // These will be assigned after t is available
 
 let difficultyMap: Record<string, string>;
-let costMap: Record<string, string>;
 
 type RecipeSortOption =
   | "title_asc"
@@ -80,10 +101,31 @@ type RecipeSortOption =
   | "created_desc"
   | "created_asc";
 
+type CookbookSortOption =
+  | "title_asc"
+  | "title_desc"
+  | "updated_desc"
+  | "created_desc"
+  | "created_asc";
+
+type CalorieFilterOption =
+  | "none"
+  | "low"
+  | "medium"
+  | "high";
+
+const FILTER_TAGS_INITIAL_VISIBLE = 12;
+
+function getRecipeCalorieBucket(recipe: Recipe): CalorieFilterOption {
+  const calories = getRecipeCaloriesPerServing(recipe);
+  if (calories === null || !Number.isFinite(calories)) return "none";
+  if (calories < 300) return "low";
+  if (calories <= 600) return "medium";
+  return "high";
+}
+
 function getApiBaseUrl(): string | null {
-  const v = process.env.EXPO_PUBLIC_API_URL;
-  if (typeof v === "string" && v.trim()) return v.trim();
-  return null;
+  return getResolvedApiBaseUrl();
 }
 
 const API_BASE_URL = getApiBaseUrl();
@@ -133,7 +175,7 @@ async function trackAnalyticsEvent(
 }
 
 export default function History() {
-  const params = useLocalSearchParams<{ tab?: string }>();
+  const params = useLocalSearchParams<{ tab?: string; openNewRecipe?: string; openNewCookbook?: string }>();
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [cookbooks, setCookbooks] = useState<Cookbook[]>([]);
   const [activeTab, setActiveTab] = useState<"all" | "cookbooks">(
@@ -145,9 +187,13 @@ export default function History() {
   const [filterVisible, setFilterVisible] = useState(false);
   const [sortVisible, setSortVisible] = useState(false);
   const [sortBy, setSortBy] = useState<RecipeSortOption>("title_asc");
+  const [cookbookSortBy, setCookbookSortBy] =
+    useState<CookbookSortOption>("title_asc");
   const [selectedDifficulties, setSelectedDifficulties] = useState<string[]>([]);
-  const [selectedCosts, setSelectedCosts] = useState<string[]>([]);
+  const [selectedCalories, setSelectedCalories] = useState<CalorieFilterOption[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [filterTagSearch, setFilterTagSearch] = useState("");
+  const [visibleFilterTagCount, setVisibleFilterTagCount] = useState(FILTER_TAGS_INITIAL_VISIBLE);
 
   // new cookbook modal
   const [newCookbookVisible, setNewCookbookVisible] = useState(false);
@@ -185,24 +231,11 @@ export default function History() {
     context: "cookbook" | "instagram_reel";
     remaining: number;
   }>({ visible: false, context: "cookbook", remaining: 0 });
+  const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
+  const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
+  const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
 
-  const [offerCookies5, setOfferCookies5] = useState<
-    | null
-    | {
-        id: string;
-        title: string;
-        subtitle?: string | null;
-        price: number;
-        currency: string;
-        cookies: number;
-        badges?: string[];
-        isPromo?: boolean;
-        bonusCookies?: number;
-        mostPurchased?: boolean;
-      }
-  >(null);
-
-  const backendUrl = process.env.EXPO_PUBLIC_API_URL!;
+  const backendUrl = getResolvedApiBaseUrl()!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   const firebaseAuth = getAuth();
 
@@ -214,11 +247,15 @@ export default function History() {
     return null;
   };
 
-  const goToStore = (highlightOfferId?: string) => {
+  const goToStore = (highlightOfferId?: string, autoBuy = false) => {
     try {
       router.push({
         pathname: "/economy/store",
-        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+        params: highlightOfferId
+          ? autoBuy
+            ? { highlight: highlightOfferId, autoBuy: "1" }
+            : { highlight: highlightOfferId }
+          : undefined,
       } as any);
     } catch {
       router.push("/economy/store" as any);
@@ -313,6 +350,24 @@ export default function History() {
       setImportFileVisible(false);
       setImportFileError(null);
 
+      try {
+        if (backendUrl && result.count > 0) {
+          const activeRecipeCount = Array.isArray(nextRecipes)
+            ? nextRecipes.filter((item: any) => !item?.isDeleted).length
+            : 0;
+          await claimRewardKeysSequentially(
+            {
+              backendUrl,
+              appEnv,
+              auth: firebaseAuth,
+            },
+            getRecipeRewardKeysForCount(activeRecipeCount)
+          );
+        }
+      } catch (rewardErr) {
+        console.warn("[History] file import reward claim failed", rewardErr);
+      }
+
       Alert.alert(
         t("recipes.import_from_file", { defaultValue: "Import from File / App" }),
         t("recipes.file_import_success", {
@@ -339,54 +394,16 @@ export default function History() {
   ) => {
     const rem = typeof remaining === "number" ? remaining : 0;
 
-    // Try to fetch catalog offer cookies_5 so we can render it in the same style as Store.
-    if (!offerCookies5) {
+    if (!featuredOffer || availableRewardsCount === 0) {
       try {
-        const currentUser = firebaseAuth.currentUser;
-        const idToken = currentUser ? await currentUser.getIdToken() : null;
-        const deviceId = await getDeviceId().catch(() => null);
-        const userId = currentUser?.uid ?? null;
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "x-app-env": appEnv,
-        };
-        if (idToken) headers.Authorization = `Bearer ${idToken}`;
-        if (deviceId) headers["x-device-id"] = deviceId;
-        if (userId) headers["x-user-id"] = userId;
-
-        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
-        const data = await res.json().catch(() => null);
-        const root = (data as any)?.data ?? data;
-        const rawOffers: any[] =
-          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
-          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
-          [];
-
-        const o5 = rawOffers.find(
-          (o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5"
+        const catalog = await fetchEconomyCatalogBundle({ backendUrl, appEnv, auth: firebaseAuth });
+        const featured = catalog.offers.find((offer) => String(offer.id).trim() === "cookies_15");
+        if (featured) setFeaturedOffer(featured);
+        setAvailableRewardsCount(
+          Array.isArray(catalog.bonuses)
+            ? catalog.bonuses.filter((bonus) => bonus?.status === "available").length
+            : 0
         );
-
-        if (o5) {
-          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
-          setOfferCookies5({
-            id: "cookies_5",
-            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
-            subtitle:
-              (typeof o5?.subtitle === "string"
-                ? o5.subtitle
-                : typeof o5?.description === "string"
-                  ? o5.description
-                  : null) ?? null,
-            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
-            currency,
-            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
-            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
-            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
-            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
-            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
-          });
-        }
       } catch {
         // ignore
       }
@@ -397,16 +414,16 @@ export default function History() {
 
   const fetchCookieBalanceSafe = useCallback(async (): Promise<number | null> => {
     try {
-      const headers = await buildBackendAuthHeaders();
-      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
-      if (!res.ok) return null;
-      const data = await res.json().catch(() => null);
-      const bal = data?.balance;
-      return typeof bal === "number" ? bal : null;
+      const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth: firebaseAuth });
+      if (!snapshot) return null;
+      setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+      await writeCachedEconomySnapshot(firebaseAuth.currentUser?.uid, snapshot);
+      if (shouldHidePremiumPricing(snapshot.freePremiumActionsRemaining)) return null;
+      return snapshot.balance;
     } catch {
       return null;
     }
-  }, [backendUrl, buildBackendAuthHeaders]);
+  }, [backendUrl, appEnv, firebaseAuth]);
 
   useEffect(() => {
     let cancelled = false;
@@ -450,16 +467,11 @@ export default function History() {
     await openInsufficientCookiesModal(bal, context);
     return false;
   };
-  // Use translations for difficulty and cost maps (matching i18n.ts structure)
+  // Use translations for difficulty map (matching i18n.ts structure)
   difficultyMap = {
     Easy: t("difficulty.easy"),
     Moderate: t("difficulty.moderate"),
     Challenging: t("difficulty.challenging"),
-  };
-  costMap = {
-    Cheap: t("cost.cheap"),
-    Medium: t("cost.medium"),
-    Expensive: t("cost.expensive"),
   };
   // --- Scroll position persistence
   const listRef = useRef<FlatList>(null);
@@ -479,6 +491,12 @@ export default function History() {
 
   const compareRecipeTitles = useCallback((a: Recipe, b: Recipe) => {
     return (a.title || "").localeCompare(b.title || "", undefined, {
+      sensitivity: "base",
+    });
+  }, []);
+
+  const compareCookbookNames = useCallback((a: Cookbook, b: Cookbook) => {
+    return (a.name || "").localeCompare(b.name || "", undefined, {
       sensitivity: "base",
     });
   }, []);
@@ -514,6 +532,39 @@ export default function History() {
       return sorted;
     },
     [compareRecipeTitles, getRecipeTimestamp, sortBy]
+  );
+
+  const sortCookbooks = useCallback(
+    (list: Cookbook[]) => {
+      const sorted = [...list];
+      sorted.sort((a, b) => {
+        switch (cookbookSortBy) {
+          case "title_desc":
+            return compareCookbookNames(b, a);
+          case "updated_desc":
+            return (
+              getRecipeTimestamp(b.updatedAt ?? b.createdAt) -
+                getRecipeTimestamp(a.updatedAt ?? a.createdAt) ||
+              compareCookbookNames(a, b)
+            );
+          case "created_desc":
+            return (
+              getRecipeTimestamp(b.createdAt) - getRecipeTimestamp(a.createdAt) ||
+              compareCookbookNames(a, b)
+            );
+          case "created_asc":
+            return (
+              getRecipeTimestamp(a.createdAt) - getRecipeTimestamp(b.createdAt) ||
+              compareCookbookNames(a, b)
+            );
+          case "title_asc":
+          default:
+            return compareCookbookNames(a, b);
+        }
+      });
+      return sorted;
+    },
+    [compareCookbookNames, cookbookSortBy, getRecipeTimestamp]
   );
 
   // // Clear "recipes" key in AsyncStorage once
@@ -655,7 +706,7 @@ export default function History() {
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
-      let timeout: NodeJS.Timeout | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
       // Load recipes and cookbooks, then restore scroll position
       const restoreScroll = async () => {
         await loadRecipes();
@@ -682,6 +733,25 @@ export default function History() {
     }, [loadRecipes, loadCookbooks])
   );
 
+  useEffect(() => {
+    setActiveTab(params?.tab === "cookbooks" ? "cookbooks" : "all");
+  }, [params?.tab]);
+
+  useEffect(() => {
+    if (params.openNewRecipe === "1") {
+      setNewRecipeVisible(true);
+      router.replace("/history" as any);
+    }
+  }, [params.openNewRecipe, router]);
+
+  useEffect(() => {
+    if (params.openNewCookbook === "1") {
+      setActiveTab("cookbooks");
+      setNewCookbookVisible(true);
+      router.replace({ pathname: "/history", params: { tab: "cookbooks" } } as any);
+    }
+  }, [params.openNewCookbook, router]);
+
 
   // --- Delete modal state
   const [deleteTarget, setDeleteTarget] = useState<{ id: string, type: "recipe" | "cookbook" } | null>(null);
@@ -693,26 +763,12 @@ export default function History() {
       return;
     }
 
-    // Creating additional cookbooks beyond the free limit costs 1 Cookie.
-    // Assumption: the first cookbook is free; from the 2nd onward, require 1 Cookie.
-    // We pre-check to avoid wasting AI / backend resources and to give a clear upgrade path.
-    if (Array.isArray(cookbooks) && cookbooks.length >= 1) {
-      // Close the name modal first, then show the insufficient cookies modal if needed.
-      const ok = await ensureHasCookiesOrPrompt(1);
-      if (!ok) {
-        setNewCookbookVisible(false);
-        return;
-      }
-    }
-
     const ts = Date.now();
     const newBook: Cookbook = {
       id: `${ts}`,
       name: newCookbookName.trim(),
       image: undefined,
-      // @ts-expect-error: legacy cookbook shape used by sync layer includes timestamps
       createdAt: ts,
-      // @ts-expect-error: legacy cookbook shape used by sync layer includes timestamps
       updatedAt: ts,
     };
 
@@ -729,6 +785,19 @@ export default function History() {
       cookbookId: newBook.id,
       cookbookName: newBook.name,
     });
+
+    try {
+      if (backendUrl) {
+        await claimEconomyReward({
+          backendUrl,
+          appEnv,
+          auth: firebaseAuth,
+          rewardKey: "first_cookbook_created_v1",
+        });
+      }
+    } catch (rewardErr) {
+      console.warn("[History] cookbook reward claim failed", rewardErr);
+    }
 
     setNewCookbookName("");
     setNewCookbookVisible(false);
@@ -839,7 +908,14 @@ export default function History() {
   // --- All tags (for filters)
   const allTags = Array.from(
     new Set(recipes.flatMap((r) => getNormalizedTags(r.tags)))
+  ).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const filteredTagOptions = allTags.filter((tag) =>
+    tag.toLowerCase().includes(filterTagSearch.trim().toLowerCase())
   );
+  const visibleTagOptions =
+    filterTagSearch.trim().length > 0
+      ? filteredTagOptions
+      : filteredTagOptions.slice(0, visibleFilterTagCount);
 
   // --- Filtered recipes
   const filteredRecipes = recipes.filter((r) => {
@@ -847,9 +923,10 @@ export default function History() {
     const matchesSearch = r.title.toLowerCase().includes(search.toLowerCase());
     const matchesDiff =
       selectedDifficulties.length === 0 ||
-      selectedDifficulties.includes(r.difficulty);
-    const matchesCost =
-      selectedCosts.length === 0 || selectedCosts.includes(r.cost);
+      selectedDifficulties.includes(normalizeRecipeDifficulty(r.difficulty));
+    const matchesCalories =
+      selectedCalories.length === 0 ||
+      selectedCalories.includes(getRecipeCalorieBucket(r));
 
     const normalizedTags = getNormalizedTags(r.tags).map((t) =>
       t.toLowerCase()
@@ -860,10 +937,11 @@ export default function History() {
         selectedTags.map((ft) => ft.toLowerCase()).includes(t)
       );
 
-    return matchesSearch && matchesDiff && matchesCost && matchesTags;
+    return matchesSearch && matchesDiff && matchesCalories && matchesTags;
   });
 
   const visibleRecipes = sortRecipes(filteredRecipes);
+  const visibleCookbooks = sortCookbooks(cookbooks);
 
   const sortOptions: { value: RecipeSortOption; label: string }[] = [
     {
@@ -892,11 +970,42 @@ export default function History() {
     sortOptions.find((option) => option.value === sortBy)?.label ??
     t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" });
 
+  const selectedCookbookSortLabel =
+    sortOptions.find((option) => option.value === cookbookSortBy)?.label ??
+    t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" });
+
+  const calorieFilterOptions: { value: CalorieFilterOption; label: string }[] = [
+    {
+      value: "none",
+      label: t("recipes.calories_filter_none", {
+        defaultValue: "No calories",
+      }),
+    },
+    {
+      value: "low",
+      label: t("recipes.calories_filter_low", {
+        defaultValue: "Low (<300 kcal)",
+      }),
+    },
+    {
+      value: "medium",
+      label: t("recipes.calories_filter_medium", {
+        defaultValue: "Medium (300-600 kcal)",
+      }),
+    },
+    {
+      value: "high",
+      label: t("recipes.calories_filter_high", {
+        defaultValue: "High (>600 kcal)",
+      }),
+    },
+  ];
+
   // --- Toggle filter chip
-  const toggleFilter = (
-    arr: string[],
-    value: string,
-    setFn: (v: string[]) => void
+  const toggleFilter = <T extends string>(
+    arr: T[],
+    value: T,
+    setFn: (v: T[]) => void
   ) => {
     if (arr.includes(value)) {
       setFn(arr.filter((v) => v !== value));
@@ -982,8 +1091,8 @@ export default function History() {
               <TouchableOpacity
                 onPress={() =>
                   router.push({
-                    pathname: `/recipe/${item.id}`,
-                    params: { from: "history" },
+                    pathname: "/recipe/[id]",
+                    params: { id: item.id, from: "history" },
                   })
                 }
               >
@@ -994,10 +1103,17 @@ export default function History() {
                   />
                   <View style={{ flex: 1 }}>
                     <View style={styles.cardHeader}>
-                      <Text style={[styles.cardTitle, { color: text }]}>
+                      <Text
+                        style={[styles.cardTitle, { color: text }]}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
                         {item.title}
                       </Text>
-                      <TouchableOpacity onPress={() => deleteRecipe(item.id)}>
+                      <TouchableOpacity
+                        onPress={() => deleteRecipe(item.id)}
+                        style={styles.deleteButton}
+                      >
                         <MaterialIcons
                           name="delete-outline"
                           size={22}
@@ -1005,9 +1121,23 @@ export default function History() {
                         />
                       </TouchableOpacity>
                     </View>
-                    <Text style={{ color: subText }}>
-                      ⏱ {item.cookingTime} min • {difficultyMap[item.difficulty] || item.difficulty} • {costMap[item.cost] || item.cost}
-                    </Text>
+                    <View style={styles.metaRow}>
+                      <Text style={[styles.metaText, { color: subText }]}>
+                        {`⏱ ${item.cookingTime} min`}
+                      </Text>
+                      <Text style={[styles.metaText, { color: subText }]}>
+                        {difficultyMap[normalizeRecipeDifficulty(item.difficulty)] ||
+                          normalizeRecipeDifficulty(item.difficulty)}
+                      </Text>
+                      {getRecipeCaloriesPerServing(item) !== null ? (
+                        <View style={styles.metaCalories}>
+                          <MaterialCommunityIcons name="fire" size={14} color="#E27D60" />
+                          <Text style={[styles.metaText, { color: subText }]}>
+                            {`${Math.round(getRecipeCaloriesPerServing(item) as number)} kcal`}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
                     <View style={styles.tagRow}>
                       {getNormalizedTags(item.tags).slice(0, 3).map((t, i) => (
                         <View key={i} style={styles.tagChip}>
@@ -1024,7 +1154,7 @@ export default function History() {
                 <Text style={{ color: subText, marginBottom: 8 }}>
                   {t("recipes.no_recipes")}
                 </Text>
-                <TouchableOpacity onPress={() => router.push("/(tabs)/")}>
+                <TouchableOpacity onPress={() => router.push("/")}>
                   <Text style={{ color: "#E27D60", fontWeight: "600" }}>
                     {t("recipes.create_in_ai_kitchen")}
                   </Text>
@@ -1037,8 +1167,20 @@ export default function History() {
         </>
       ) : (
         <>
+          <TouchableOpacity
+            onPress={() => setSortVisible(true)}
+            accessibilityLabel={t("recipes.sort_by", { defaultValue: "Sort by" })}
+            style={[styles.sortSummaryButton, styles.cookbookSortSummaryButton]}
+          >
+            <Text style={[styles.resultMetaText, { color: text }]}>
+              {t("recipes.sort_by_label", {
+                defaultValue: "Sort by: {{value}}",
+                value: selectedCookbookSortLabel,
+              })}
+            </Text>
+          </TouchableOpacity>
           <FlatList
-            data={cookbooks}
+            data={visibleCookbooks}
             keyExtractor={(item) => item.id}
             numColumns={2}
             contentContainerStyle={{ paddingBottom: 10 }}
@@ -1165,20 +1307,6 @@ export default function History() {
               style={styles.addOptionRow}
               onPress={() => {
                 setNewRecipeVisible(false);
-                Alert.alert(t("common.coming_soon"), t("common.coming_soon_desc"));
-              }}
-            >
-              <Text style={styles.addOptionEmoji}>📷</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.addOptionText}>{t("recipes.import_from_image")}</Text>
-                <Text style={styles.addOptionSub}>{t("recipes.import_from_image_sub")}</Text>
-              </View>
-              <MaterialIcons name="chevron-right" size={24} color={subText} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.addOptionRow}
-              onPress={() => {
-                setNewRecipeVisible(false);
                 setImportFileError(null);
                 setImportFileVisible(true);
               }}
@@ -1288,23 +1416,34 @@ export default function History() {
                     defaultValue: "Instagram Reel import",
                   })}
                 </Text>
-                <Text style={{ color: subText, lineHeight: 19 }}>
-                  {t("recipes.instagram_reel_import_confirm_body", {
-                    count: INSTAGRAM_REEL_IMPORT_COST,
-                    defaultValue:
-                      "Importing a recipe from an Instagram Reel costs {{count}} Cookies. We will only charge you if we create a high-quality draft.",
-                  })}
-                </Text>
-                <Text style={{ color: subText, marginTop: 8, fontWeight: "600" }}>
-                  {instagramImportBalanceLoading
-                    ? t("economy.loading_balance", {
-                        defaultValue: "Checking your Cookies...",
-                      })
-                    : t("economy.current_balance_short", {
-                        count: instagramImportBalance ?? 0,
-                        defaultValue: "You have {{count}} Cookies.",
+                {shouldHidePremiumPricing(freePremiumActionsRemaining) ? (
+                  <Text style={{ color: subText, lineHeight: 19 }}>
+                    {t("recipes.instagram_reel_import_free_runway_body", {
+                      defaultValue:
+                        "We’ll turn this Reel into a recipe draft for you to review before saving.",
+                    })}
+                  </Text>
+                ) : (
+                  <>
+                    <Text style={{ color: subText, lineHeight: 19 }}>
+                      {t("recipes.instagram_reel_import_confirm_body", {
+                        count: INSTAGRAM_REEL_IMPORT_COST,
+                        defaultValue:
+                          "Importing a recipe from an Instagram Reel costs {{count}} Eggs. We will only charge you if we create a high-quality draft.",
                       })}
-                </Text>
+                    </Text>
+                    <Text style={{ color: subText, marginTop: 8 }}>
+                      {instagramImportBalanceLoading
+                        ? t("economy.loading_balance", {
+                            defaultValue: "Checking your Eggs...",
+                          })
+                        : t("economy.current_balance_short", {
+                            count: instagramImportBalance ?? 0,
+                            defaultValue: "You have {{count}} Eggs.",
+                          })}
+                    </Text>
+                  </>
+                )}
               </View>
             ) : null}
             {importError ? (
@@ -1332,7 +1471,11 @@ export default function History() {
                 );
                 const baseUrl = API_BASE_URL;
                 if (!baseUrl) {
-                  setImportError("Backend URL is not configured.");
+                  setImportError(
+                    t("recipes.file_import_error_backend_missing", {
+                      defaultValue: "Backend URL is not configured.",
+                    })
+                  );
                   setImporting(false);
                   setImportUrlLoadingText(null);
                   return;
@@ -1443,6 +1586,18 @@ export default function History() {
                     );
                     const draftKey = "pending_import_recipe_draft";
                     await AsyncStorage.setItem(draftKey, JSON.stringify(recipe));
+                    try {
+                      if (backendUrl) {
+                        await claimEconomyReward({
+                          backendUrl,
+                          appEnv,
+                          auth: firebaseAuth,
+                          rewardKey: "first_instagram_reel_import_v1",
+                        });
+                      }
+                    } catch (rewardErr) {
+                      console.warn("[History] Instagram Reel reward claim failed", rewardErr);
+                    }
                     setImportUrl("");
                     setImportUrlVisible(false);
                     router.push({ pathname: "/add-recipe", params: { draftKey } } as any);
@@ -1490,6 +1645,24 @@ export default function History() {
                     console.warn("[History] sync after import recipe failed", syncErr);
                   }
 
+                  try {
+                    if (backendUrl) {
+                      const activeRecipeCount = Array.isArray(parsed)
+                        ? parsed.filter((item: any) => !item?.isDeleted).length
+                        : 0;
+                      await claimRewardKeysSequentially(
+                        {
+                          backendUrl,
+                          appEnv,
+                          auth: firebaseAuth,
+                        },
+                        getRecipeRewardKeysForCount(activeRecipeCount)
+                      );
+                    }
+                  } catch (rewardErr) {
+                    console.warn("[History] imported recipe reward claim failed", rewardErr);
+                  }
+
                   setImportUrl("");
                   setImportUrlVisible(false);
                   setImportedRecipe(recipe);
@@ -1497,7 +1670,10 @@ export default function History() {
                 } catch (err: any) {
                   console.error("Import error:", err);
                   setImportError(
-                    err?.message || "Failed to import recipe. Please check the URL."
+                    err?.message ||
+                      t("recipes.url_import_failed", {
+                        defaultValue: "Failed to import recipe. Please check the URL.",
+                      })
                   );
                   setImportUrl("");
                 } finally {
@@ -1517,10 +1693,7 @@ export default function History() {
               ) : (
                 <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 16 }}>
                   {isInstagramReelUrl(importUrl.trim())
-                    ? t("recipes.instagram_reel_import_button", {
-                        count: INSTAGRAM_REEL_IMPORT_COST,
-                        defaultValue: "Proceed for {{count}} Cookies",
-                      })
+                    ? t("common.proceed", { defaultValue: "Proceed" })
                     : t("recipes.import_button")}
                 </Text>
               )}
@@ -1556,8 +1729,8 @@ export default function History() {
                   setSuccessVisible(false);
                   if (importedRecipe) {
                     router.push({
-                      pathname: `/recipe/${importedRecipe.id}`,
-                      params: { from: "history" },
+                      pathname: "/recipe/[id]",
+                      params: { id: importedRecipe.id, from: "history" },
                     });
                   }
                 }}
@@ -1628,27 +1801,31 @@ export default function History() {
                   ))}
                 </View>
 
-                <Text style={styles.modalSubtitle}>{t("recipes.cost")}</Text>
+                <Text style={styles.modalSubtitle}>
+                  {t("recipes.calories", { defaultValue: "Calories" })}
+                </Text>
                 <View style={styles.filterRow}>
-                  {["Cheap", "Medium", "Expensive"].map((c) => (
+                  {calorieFilterOptions.map((option) => (
                     <TouchableOpacity
-                      key={c}
+                      key={option.value}
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedCosts.includes(c)
+                          backgroundColor: selectedCalories.includes(option.value)
                             ? "#293a53"
                             : "#E0E0E0",
                         },
                       ]}
-                      onPress={() => toggleFilter(selectedCosts, c, setSelectedCosts)}
+                      onPress={() =>
+                        toggleFilter(selectedCalories, option.value, setSelectedCalories)
+                      }
                     >
                       <Text
                         style={{
-                          color: selectedCosts.includes(c) ? "#fff" : "#000",
+                          color: selectedCalories.includes(option.value) ? "#fff" : "#000",
                         }}
                       >
-                        {t(`cost.${c.toLowerCase()}`)}
+                        {option.label}
                       </Text>
                     </TouchableOpacity>
                   ))}
@@ -1657,8 +1834,18 @@ export default function History() {
                 {allTags.length > 0 && (
                   <>
                     <Text style={styles.modalSubtitle}>{t("recipes.tags")}</Text>
+                    <TextInput
+                      style={styles.filterSearchInput}
+                      placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
+                      placeholderTextColor="#7A8597"
+                      value={filterTagSearch}
+                      onChangeText={(value) => {
+                        setFilterTagSearch(value);
+                        setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
+                      }}
+                    />
                     <View style={styles.filterRow}>
-                      {allTags.map((tag) => (
+                      {visibleTagOptions.map((tag) => (
                         <TouchableOpacity
                           key={tag}
                           style={[
@@ -1681,6 +1868,26 @@ export default function History() {
                         </TouchableOpacity>
                       ))}
                     </View>
+                    {filteredTagOptions.length === 0 ? (
+                      <Text style={styles.filterEmptyText}>
+                        {t("recipes.no_tag_matches", { defaultValue: "No matching tags" })}
+                      </Text>
+                    ) : null}
+                    {filterTagSearch.trim().length === 0 &&
+                    filteredTagOptions.length > visibleFilterTagCount ? (
+                      <TouchableOpacity
+                        style={styles.filterMoreButton}
+                        onPress={() =>
+                          setVisibleFilterTagCount((prev) => prev + FILTER_TAGS_INITIAL_VISIBLE)
+                        }
+                      >
+                        <Text style={styles.filterMoreText}>
+                          {t("recipes.show_more_tags", {
+                            defaultValue: "Show more tags",
+                          })}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </>
                 )}
 
@@ -1691,8 +1898,10 @@ export default function History() {
                   ]}
                   onPress={() => {
                     setSelectedDifficulties([]);
-                    setSelectedCosts([]);
+                    setSelectedCalories([]);
                     setSelectedTags([]);
+                    setFilterTagSearch("");
+                    setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
                   }}
                 >
                   <Text
@@ -1729,7 +1938,10 @@ export default function History() {
                 </TouchableOpacity>
               </View>
               {sortOptions.map((option) => {
-                const isSelected = sortBy === option.value;
+                const isSelected =
+                  activeTab === "all"
+                    ? sortBy === option.value
+                    : cookbookSortBy === option.value;
                 return (
                   <TouchableOpacity
                     key={option.value}
@@ -1738,7 +1950,11 @@ export default function History() {
                       isSelected ? styles.sortOptionRowSelected : null,
                     ]}
                     onPress={() => {
-                      setSortBy(option.value);
+                      if (activeTab === "all") {
+                        setSortBy(option.value);
+                      } else {
+                        setCookbookSortBy(option.value);
+                      }
                       setSortVisible(false);
                     }}
                   >
@@ -1788,13 +2004,16 @@ export default function History() {
             </View>
             <Text
               style={{
-                fontSize: 13,
-                lineHeight: 18,
-                marginBottom: 12,
                 color: subText,
+                fontSize: 14,
+                lineHeight: 20,
+                marginBottom: 14,
               }}
             >
-              {t("economy.cookbook_pricing_note")}
+              {t("recipes.cookbook_helper_text", {
+                defaultValue:
+                  "Cookbooks help you group recipes your way, like Breakfast, Meal Prep, or Family Favorites.",
+              })}
             </Text>
             <TextInput
               style={[styles.input, { borderColor: border, color: text }]}
@@ -1807,138 +2026,31 @@ export default function History() {
           </View>
         </TouchableOpacity>
       </Modal>
-      {/* Insufficient cookies modal (cookbooks) */}
-      <Modal
+      <InsufficientCookiesModal
         visible={insufficientModal.visible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-      >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-        />
-        <View style={styles.modalCenter}> 
-          <View
-            style={[
-              styles.modalCard,
-              {
-                backgroundColor: isDark ? "#1f2430" : "#fff",
-                borderColor: isDark ? "#ffffff22" : "#00000012",
-              },
-            ]}
-          >
-            <TouchableOpacity
-              onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-              style={styles.modalCloseBtn}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
-            </TouchableOpacity>
-
-            <Text style={[styles.modalTitleCookies, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
-              {t("economy.insufficient_title", "Not enough Cookies")}
-            </Text>
-
-            <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}> 
-              {insufficientModal.context === "instagram_reel"
-                ? t("economy.insufficient_instagram_reel_body_short", {
-                    count: INSTAGRAM_REEL_IMPORT_COST,
-                    remaining: insufficientModal.remaining,
-                    defaultValue: `You need ${INSTAGRAM_REEL_IMPORT_COST} Cookies to import a recipe from an Instagram Reel. You have ${insufficientModal.remaining}.`,
-                  })
-                : t("economy.insufficient_cookbook_body_short", {
-                    remaining: insufficientModal.remaining,
-                    defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
-                  })}
-            </Text>
-
-            {/* Offer card (cookies_5) in Store-like style */}
-            {offerCookies5 ? (
-              <View
-                style={[
-                  styles.modalOfferCard,
-                  {
-                    backgroundColor: isDark ? "#171b24" : "#fff",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-              >
-                <View style={styles.modalOfferLeft}>
-                  <View style={styles.modalOfferTopRow}>
-                    <View style={styles.modalOfferTopLeft}>
-                      <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
-                        🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}> 
-                    {offerCookies5.subtitle
-                      ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(
-                          offerCookies5.currency || "USD"
-                        ).toUpperCase()}`
-                      : `${offerCookies5.price.toFixed(2)} ${String(
-                          offerCookies5.currency || "USD"
-                        ).toUpperCase()}`}
-                  </Text>
-                </View>
-
-                <View style={styles.modalOfferRight}>
-                  <TouchableOpacity
-                    style={styles.buyBtnCookies}
-                    onPress={() => {
-                      setInsufficientModal((s) => ({ ...s, visible: false }));
-                      goToStore("cookies_5");
-                    }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.buyBtnTextCookies}>{t("economy.buy", "Buy")}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : null}
-
-            {/* Bottom actions: only two buttons */}
-            <View style={styles.modalActionsRow}>
-              <TouchableOpacity
-                style={[
-                  styles.modalActionBtn,
-                  {
-                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-                onPress={() => {
-                  setInsufficientModal((s) => ({ ...s, visible: false }));
-                  goToStore();
-                }}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
-                  {t("economy.offers_button", "Other offers")}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.modalActionBtn,
-                  {
-                    backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                    borderColor: isDark ? "#ffffff22" : "#00000012",
-                  },
-                ]}
-                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}> 
-                  {t("wizard.button_back", "Back")}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        isDark={isDark}
+        title={t("economy.insufficient_title", "Not enough Eggs")}
+        body={
+          insufficientModal.context === "instagram_reel"
+            ? `You need ${INSTAGRAM_REEL_IMPORT_COST} Eggs to import a recipe from Instagram Reel. Currently, you have ${insufficientModal.remaining} Eggs.`
+            : `You need 1 Egg to create a new cookbook. Currently, you have ${insufficientModal.remaining} Eggs.`
+        }
+        featuredOffer={featuredOffer}
+        availableRewardsCount={availableRewardsCount}
+        onClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+        onBuyOffer={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore("cookies_15", true);
+        }}
+        onOpenStore={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore("cookies_15");
+        }}
+        onOpenRewards={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore();
+        }}
+      />
 
       {/* Delete confirmation modal */}
       <Modal visible={!!deleteTarget} transparent animationType="fade">
@@ -2022,14 +2134,41 @@ const styles = StyleSheet.create({
   recipeImage: { width: 80, height: 80, borderRadius: 12, marginRight: 12 },
   cardHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
+    gap: 10,
   },
-  cardTitle: { fontSize: 16, fontWeight: "600", flexShrink: 1 },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    flex: 1,
+    flexShrink: 1,
+    marginBottom: 4,
+    paddingRight: 10,
+  },
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    columnGap: 12,
+    rowGap: 4,
+    marginBottom: 8,
+  },
+  metaText: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  metaCalories: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  deleteButton: {
+    paddingLeft: 6,
+    paddingTop: 2,
+  },
   tagRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    marginTop: 4,
   },
   tagChip: {
     backgroundColor: "#E27D60",
@@ -2114,6 +2253,31 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     marginBottom: 8,
   },
+  filterSearchInput: {
+    borderWidth: 1,
+    borderColor: "#D9DEE8",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: "#293a53",
+    marginBottom: 10,
+  },
+  filterEmptyText: {
+    fontSize: 13,
+    color: "#7A8597",
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  filterMoreButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 6,
+  },
+  filterMoreText: {
+    color: "#293a53",
+    fontSize: 13,
+    fontWeight: "700",
+  },
   resultMetaText: {
     fontSize: 13,
     fontWeight: "600",
@@ -2122,6 +2286,9 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     marginBottom: 10,
     marginHorizontal: 16,
+  },
+  cookbookSortSummaryButton: {
+    marginTop: 10,
   },
   filterOption: {
     borderRadius: 20,

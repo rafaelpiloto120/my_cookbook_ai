@@ -8,6 +8,7 @@ interface AppButtonProps {
   variant?: "primary" | "secondary" | "cta" | "danger";
   fullWidth?: boolean;
   style?: ViewStyle;
+  disabled?: boolean;
 }
 
 export default function AppButton({
@@ -16,6 +17,7 @@ export default function AppButton({
   variant = "primary",
   fullWidth = true,
   style,
+  disabled = false,
 }: AppButtonProps) {
   const { primary, secondary, cta, text, bg } = useThemeColors();
 
@@ -35,10 +37,12 @@ export default function AppButton({
       style={[
         styles.button,
         { backgroundColor, width: fullWidth ? "100%" : undefined },
+        disabled ? { opacity: 0.7 } : null,
         style,
       ]}
       onPress={onPress}
       activeOpacity={0.8}
+      disabled={disabled}
     >
       <Text style={[styles.label, { color: textColor }]}>{label}</Text>
     </TouchableOpacity>

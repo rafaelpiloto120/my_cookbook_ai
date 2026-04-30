@@ -37,6 +37,47 @@ class SimpleEmitter {
 
 export const prefsEvents = new SimpleEmitter();
 
+export async function applyPrefsToLegacyStorage(prefs: {
+  userLanguage?: string;
+  userDietary?: string[];
+  userAvoid?: string[];
+  userAvoidOther?: string;
+  userMeasurement?: "metric" | "imperial";
+  themeMode?: "light" | "dark" | "system";
+}) {
+  const entries: [string, string][] = [];
+
+  if (prefs.userLanguage !== undefined) {
+    entries.push(["userLanguage", prefs.userLanguage]);
+    entries.push(["language", prefs.userLanguage]);
+  }
+  if (prefs.userDietary !== undefined) {
+    entries.push(["dietary", JSON.stringify(prefs.userDietary)]);
+  }
+  if (prefs.userAvoid !== undefined) {
+    entries.push(["avoid", JSON.stringify(prefs.userAvoid)]);
+  }
+  if (prefs.userAvoidOther !== undefined) {
+    entries.push(["avoidOther", prefs.userAvoidOther]);
+  }
+  if (prefs.userMeasurement !== undefined) {
+    const measurement = prefs.userMeasurement === "imperial" ? "US" : "Metric";
+    entries.push(["userMeasurement", prefs.userMeasurement]);
+    entries.push(["measurement", measurement]);
+    entries.push(["measureSystem", measurement]);
+  }
+  if (prefs.themeMode !== undefined) {
+    const themeValue = prefs.themeMode === "dark" ? "dark" : "light";
+    entries.push(["themeMode", prefs.themeMode]);
+    entries.push(["theme", themeValue]);
+    entries.push(["@theme", themeValue]);
+  }
+
+  if (entries.length) {
+    await AsyncStorage.multiSet(entries);
+  }
+}
+
 // Central place to persist + notify
 export async function saveUserPrefs(prefs: {
   userLanguage?: string;
@@ -47,9 +88,9 @@ export async function saveUserPrefs(prefs: {
   themeMode?: "light" | "dark" | "system";
 }) {
   // 1) Preserve existing per-field keys for backward compatibility
+  await applyPrefsToLegacyStorage(prefs);
+
   const entries: [string, string][] = [];
-  if (prefs.userLanguage !== undefined)
-    entries.push(["userLanguage", prefs.userLanguage]);
   if (prefs.userDietary !== undefined)
     entries.push(["userDietary", JSON.stringify(prefs.userDietary)]);
   if (prefs.userAvoid !== undefined)
@@ -60,10 +101,10 @@ export async function saveUserPrefs(prefs: {
     entries.push(["userMeasurement", prefs.userMeasurement]);
   if (prefs.themeMode !== undefined)
     entries.push(["themeMode", prefs.themeMode]);
+  if (prefs.userLanguage !== undefined)
+    entries.push(["userLanguage", prefs.userLanguage]);
 
-  if (entries.length) {
-    await AsyncStorage.multiSet(entries);
-  }
+  if (entries.length) await AsyncStorage.multiSet(entries);
 
   // 2) Maintain a consolidated, sync-friendly prefs document
   try {

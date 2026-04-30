@@ -2,9 +2,26 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { RecipeDoc, LocalEntity } from "./types";
 import { resolveByUpdatedAt } from "./conflictStrategy";
+import { normalizeRecipeNutritionInfo } from "../recipes/nutrition";
+import { getApiBaseUrl } from "../config/api";
+import { auth } from "../../firebaseConfig";
 
 const AS_KEY_RECIPES = "sync_recipes";
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || "http://10.0.2.2:3000";
+const API_BASE_URL = getApiBaseUrl() || "http://10.0.2.2:3000";
+
+async function getRecipeSyncAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const user = auth.currentUser;
+    if (!user) return {};
+
+    const token = await user.getIdToken();
+    if (!token) return {};
+
+    return { Authorization: `Bearer ${token}` };
+  } catch {
+    return {};
+  }
+}
 
 export class RecipeSync {
   /**
@@ -78,6 +95,7 @@ export class RecipeSync {
         difficulty: r.difficulty ?? "easy",
         servings: typeof r.servings === "number" ? r.servings : null,
         cost: r.cost ?? null,
+        nutritionInfo: normalizeRecipeNutritionInfo((r as any).nutritionInfo ?? (r as any).nutrition),
         ingredients: Array.isArray(r.ingredients) ? r.ingredients : [],
         steps: Array.isArray(r.steps)
           ? r.steps
@@ -305,10 +323,12 @@ export class RecipeSync {
 
     let items: any[] = [];
     try {
+      const authHeaders = await getRecipeSyncAuthHeaders();
       const res = await fetch(`${API_BASE_URL}/sync/recipes/pull`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders,
         },
         body: JSON.stringify({ uid }),
       });
@@ -483,10 +503,12 @@ export class RecipeSync {
     });
 
     try {
+      const authHeaders = await getRecipeSyncAuthHeaders();
       const res = await fetch(`${API_BASE_URL}/sync/recipes/push`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders,
         },
         body: JSON.stringify({
           uid,

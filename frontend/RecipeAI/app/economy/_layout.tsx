@@ -1,8 +1,11 @@
 // frontend/RecipeAI/app/economy/_layout.tsx
 import React from "react";
 import { Stack } from "expo-router";
+import { useTranslation } from "react-i18next";
 
 export default function EconomyLayout() {
+  const { t } = useTranslation();
+
   return (
     <Stack
       screenOptions={{
@@ -11,13 +14,12 @@ export default function EconomyLayout() {
         headerStyle: { backgroundColor: "#293a53" },
         headerTintColor: "#fff",
         headerTitleAlign: "center",
-        headerBackTitleVisible: false,
       }}
     >
       <Stack.Screen
         name="store"
         options={{
-          title: "Buy cookies",
+          title: t("economy.cookies", { defaultValue: "Eggs" }),
         }}
       />
     </Stack>

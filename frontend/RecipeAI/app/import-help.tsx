@@ -65,7 +65,7 @@ export default function ImportHelpScreen() {
         <Text style={[styles.lead, { color: subText }]}>
           {t("recipes.import_help_intro", {
             defaultValue:
-              "Use this guide to export recipes from supported apps and file types, then import the file into MyCookbook AI.",
+              "Use this guide to export recipes from supported apps and file types, then import the file into Cook N'Eat AI.",
           })}
         </Text>
 
@@ -97,7 +97,7 @@ export default function ImportHelpScreen() {
               }),
               t("recipes.import_help_recipe_box_step_5", {
                 defaultValue:
-                  "In MyCookbook AI, open Import from File / App and choose the exported .rtk file.",
+                  "In Cook N'Eat AI, open Import from File / App and choose the exported .rtk file.",
               }),
             ]}
           />
@@ -131,7 +131,7 @@ export default function ImportHelpScreen() {
               }),
               t("recipes.import_help_paprika_step_5", {
                 defaultValue:
-                  "Save the exported .paprikarecipes file and then choose it in MyCookbook AI.",
+                  "Save the exported .paprikarecipes file and then choose it in Cook N'Eat AI.",
               }),
             ]}
           />

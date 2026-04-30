@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MyCookbook",
+    "name": "Cook N'Eat AI",
     "slug": "mycookbook-ai",
     "version": "1.0.1",
     "orientation": "portrait",
@@ -14,7 +14,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#F8F2DF",
         "foregroundImage": "./assets/images/icon.png"
       },
       "edgeToEdgeEnabled": true,
@@ -35,7 +35,7 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#F8F2DF",
           "dark": {
             "backgroundColor": "#000000"
           }

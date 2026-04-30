@@ -1,7 +1,7 @@
 import { Tabs, Stack, useRouter, usePathname } from "expo-router";
 import { useThemeColors } from "../../context/ThemeContext";
 import { MaterialIcons } from "@expo/vector-icons";
-import { TouchableOpacity, View, Text, Platform } from "react-native";
+import { View, Text, Platform } from "react-native";
 import React, { useEffect, useState, useRef } from "react";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
@@ -9,16 +9,20 @@ import { useTranslation } from "react-i18next";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSyncEngine } from "../../lib/sync/SyncEngine";
 import { useFocusEffect } from "@react-navigation/native";
+import { getApiBaseUrl } from "../../lib/config/api";
+import { loadLastMainTab, mainTabFromPathname, saveLastMainTab } from "../../lib/navigation/lastMainTab";
 
 export default function TabLayout() {
-  const { isDark, bg, text, subText } = useThemeColors();
+  const { isDark, bg, text } = useThemeColors();
 
   const { t } = useTranslation();
 
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
+  const [restoredInitialTab, setRestoredInitialTab] = useState(false);
   const appOpenLoggedRef = useRef(false);
+  const initialTabRestoreInFlightRef = useRef(false);
   const syncEngine = useSyncEngine();
 
   useEffect(() => {
@@ -29,15 +33,43 @@ export default function TabLayout() {
         if (!done && pathname !== "/onboarding") {
           // Redirect to onboarding only on first run (avoid loop if already on onboarding)
           router.replace("/onboarding");
+        } else if (done && !restoredInitialTab) {
+          const currentMainTab = mainTabFromPathname(pathname);
+          const lastMainTab = await loadLastMainTab();
+          if (currentMainTab === "index" && lastMainTab && lastMainTab !== "index") {
+            initialTabRestoreInFlightRef.current = true;
+            router.replace(`/${lastMainTab}` as any);
+          }
         }
       } finally {
+        if (isMounted) setRestoredInitialTab(true);
         if (isMounted) setReady(true);
       }
     })();
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [pathname, restoredInitialTab, router]);
+
+  useEffect(() => {
+    if (!ready || !restoredInitialTab) return;
+    let isMounted = true;
+    (async () => {
+      const done = await AsyncStorage.getItem("hasSeenOnboarding");
+      if (!isMounted || !done) return;
+
+      const currentMainTab = mainTabFromPathname(pathname);
+      if (!currentMainTab) return;
+      if (initialTabRestoreInFlightRef.current && currentMainTab === "index") return;
+      initialTabRestoreInFlightRef.current = false;
+      await saveLastMainTab(currentMainTab);
+    })().catch((err) => {
+      console.warn("[Navigation] Failed to save last main tab", err);
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [pathname, ready, restoredInitialTab]);
 
   useEffect(() => {
     if (!ready || appOpenLoggedRef.current) return;
@@ -46,7 +78,7 @@ export default function TabLayout() {
 
     (async () => {
       try {
-        const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+        const backendUrl = getApiBaseUrl();
         const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
         console.log("[Analytics] app_open env", { backendUrl, appEnv });
         if (!backendUrl) {
@@ -122,6 +154,7 @@ export default function TabLayout() {
             let iconName: keyof typeof MaterialIcons.glyphMap = "book";
 
             if (route.name === "index") iconName = "restaurant";
+            else if (route.name === "my-day") iconName = "insights";
             else if (route.name === "profile") iconName = "person-outline";
 
             return (
@@ -133,10 +166,9 @@ export default function TabLayout() {
               </View>
             );
           },
-          tabBarLabelStyle: ({ focused }) => ({
-            fontWeight: focused ? "600" : "400",
-            color: focused ? "#ffbd80ff" : "#fff",
-          }),
+          tabBarLabelStyle: {
+            fontWeight: "600",
+          },
         })}
       >
         <Tabs.Screen
@@ -159,6 +191,16 @@ export default function TabLayout() {
                 <MaterialIcons name="restaurant" size={22} color={color} />
                 <Text style={{ fontSize: 14, marginLeft: 4 }}>🔥</Text>
               </View>
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="my-day"
+          options={{
+            title: t("app_titles.my_day"),
+            tabBarLabel: t("app_titles.my_day"),
+            tabBarIcon: ({ color, size }) => (
+              <MaterialIcons name="insights" size={size} color={color} />
             ),
           }}
         />
@@ -192,6 +234,27 @@ export default function TabLayout() {
           options={{
             href: null, // ✅ hides from tab bar & deep links
             headerShown: false, // we'll render our own header inside the screen
+          }}
+        />
+        <Tabs.Screen
+          name="my-day/history"
+          options={{
+            href: null,
+            headerShown: false,
+          }}
+        />
+        <Tabs.Screen
+          name="my-day/trends"
+          options={{
+            href: null,
+            headerShown: false,
+          }}
+        />
+        <Tabs.Screen
+          name="my-day/weight"
+          options={{
+            href: null,
+            headerShown: false,
           }}
         />
       </Tabs>

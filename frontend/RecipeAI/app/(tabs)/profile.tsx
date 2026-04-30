@@ -17,19 +17,25 @@ import {
   Keyboard,
   Platform,
   Alert,
-  LayoutAnimation,
-  UIManager,
+  ToastAndroid,
 } from "react-native";
-// Enable LayoutAnimation on Android
-if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
-import { Stack, useRouter, useFocusEffect } from "expo-router";
+import { Stack, useRouter, useFocusEffect, useLocalSearchParams } from "expo-router";
 import i18n from "../../i18n";
 import { supportedLanguages, SupportedLanguage } from "../../i18n";
-import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { MaterialIcons } from "@expo/vector-icons";
+import * as Application from "expo-application";
+import HealthGoalsEditorModal from "../../components/HealthGoalsEditorModal";
+import EggIcon from "../../components/EggIcon";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
 import Constants from "expo-constants";
+import { getApiBaseUrl } from "../../lib/config/api";
+import {
+  claimEconomyReward,
+  fetchEconomySnapshot,
+  readCachedEconomySnapshot,
+  shouldHidePremiumPricing,
+  writeCachedEconomySnapshot,
+} from "../../lib/economy/client";
 import { useAuth } from "../../context/AuthContext";
 import { useSyncEngine as useSyncEngineHook } from "../../lib/sync/SyncEngine";
 import { getAuth, updateProfile, updatePassword } from "firebase/auth";
@@ -38,8 +44,26 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { saveUserPrefs, prefsEvents, PREFS_UPDATED } from "../../lib/prefs";
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImageManipulator from "expo-image-manipulator";
+import {
+  defaultMyDayProfile,
+  deriveSuggestedPlan,
+  formatHeightFromCm,
+  formatWeightFromKg,
+  loadMyDayProfile,
+  MeasurementSystem as MyDayMeasurementSystem,
+  MyDayGender,
+  MyDayGoalType,
+  MyDayPace,
+  MyDayPlan,
+  MyDayProfile,
+  parseHeightToCm,
+  parseWeightToKg,
+  saveMyDayProfile,
+} from "../../lib/myDay";
+import { addWeightLog } from "../../lib/myDayWeight";
 
 const PROFILE_KEY = "profile";
+const MY_DAY_OPEN_HEALTH_GOALS_KEY = "myDayOpenHealthGoals";
 
 import { storage } from "../../firebaseConfig";
 
@@ -69,10 +93,18 @@ const languageOptions = supportedLanguages.map(code => ({
 
 // Measurement system type
 type MeasurementSystem = "US" | "Metric";
+type AutoPlanField =
+  | "age"
+  | "height"
+  | "currentWeight"
+  | "targetWeight"
+  | "gender"
+  | "goalType"
+  | "pace";
 
 export default function Profile() {
-  const { bg, text, card, subText, border } = useThemeColors();
-  const { theme, toggleTheme } = useTheme();
+  const { bg, text, card, subText, border, modalBackdrop } = useThemeColors();
+  const { theme, setThemeMode } = useTheme();
   const { t } = useTranslation();
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   // Show destructive/dev-only controls only in dev builds or when explicitly enabled.
@@ -80,14 +112,18 @@ export default function Profile() {
 
   // Router and real authentication context (needed early for cookie balance)
   const router = useRouter();
+  const params = useLocalSearchParams<{ openHealthGoals?: string }>();
   const { user, logout } = useAuth();
   const auth = getAuth();
 
   // --- Cookies economy (balance UI) ---
-  const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+  const backendUrl = getApiBaseUrl();
   const [cookieBalance, setCookieBalance] = useState<number | null>(null);
+  const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
   const [cookieLoading, setCookieLoading] = useState(false);
   const [cookieInfoVisible, setCookieInfoVisible] = useState(false);
+  const [healthInfoVisible, setHealthInfoVisible] = useState(false);
+  const [foodPrefsInfoVisible, setFoodPrefsInfoVisible] = useState(false);
   const cookieBalanceRef = useRef<number | null>(null);
   // ✅ `auth.currentUser` isn't reactive, so we track uid in state to refresh economy correctly.
   const [economyUid, setEconomyUid] = useState<string | null>(auth.currentUser?.uid ?? null);
@@ -105,88 +141,41 @@ export default function Profile() {
 
 
   const loadCookieBalance = useCallback(async () => {
-    const cacheKey = `economy_cookie_balance_${economyUid || "anon"}`;
     // If backend is not configured, fallback to cached value only.
     if (!backendUrl) {
-      try {
-        const cached = await AsyncStorage.getItem(cacheKey);
-        if (cached != null && !Number.isNaN(Number(cached))) {
-          setCookieBalance(Number(cached));
-        }
-      } catch {
-        // ignore
+      const cached = await readCachedEconomySnapshot(economyUid);
+      if (cached) {
+        setCookieBalance(cached.balance);
+        setFreePremiumActionsRemaining(cached.freePremiumActionsRemaining);
       }
       return;
     }
 
     setCookieLoading(true);
     try {
-      // Economy is keyed by Firebase Auth uid on the backend.
-      // Always send an ID token so the backend can resolve `uid` and read/write
-      // `users/{uid}/economy/default`.
-      const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : undefined;
-      const headers: Record<string, string> = {};
-      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+      const snapshot = await fetchEconomySnapshot({
+        backendUrl,
+        appEnv,
+        auth,
+      });
 
-      // Try GET first; fallback to POST if GET is not supported.
-      let res: Response | null = null;
-      try {
-        const qs = `?env=${encodeURIComponent(appEnv)}`;
-        res = await fetch(`${backendUrl}/economy/balance${qs}`, {
-          method: "GET",
-          headers,
-        });
-      } catch {
-        res = null;
-      }
-
-      if (!res || res.status === 404 || res.status === 405) {
-        res = await fetch(`${backendUrl}/economy/balance`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
-          body: JSON.stringify({ env: appEnv }),
-        });
-      }
-
-      if (!res.ok) {
-        // Helpful debug: auth issues should show up here.
-        const bodyText = await res.text().catch(() => "");
-        throw new Error(`economy/balance status ${res.status} ${bodyText}`);
-      }
-
-      const data = await res.json().catch(() => ({}));
-      const next =
-        typeof (data as any)?.balance === "number"
-          ? (data as any).balance
-          : typeof (data as any)?.remaining === "number"
-            ? (data as any).remaining
-            : null;
-
-      if (typeof next === "number") {
-        setCookieBalance(next);
-        try {
-          await AsyncStorage.setItem(cacheKey, String(next));
-        } catch {
-          // ignore
-        }
+      if (snapshot) {
+        setCookieBalance(snapshot.balance);
+        setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+        await writeCachedEconomySnapshot(economyUid, snapshot);
       }
     } catch (e) {
       // fallback to cache
-      try {
-        const cached = await AsyncStorage.getItem(cacheKey);
-        if (cached != null && !Number.isNaN(Number(cached))) {
-          setCookieBalance(Number(cached));
-        }
-      } catch {
-        // ignore
+      const cached = await readCachedEconomySnapshot(economyUid);
+      if (cached) {
+        setCookieBalance(cached.balance);
+        setFreePremiumActionsRemaining(cached.freePremiumActionsRemaining);
       }
     } finally {
       setCookieLoading(false);
     }
   }, [backendUrl, appEnv, auth, economyUid, t]);
+
 
   // Refresh balance when the auth uid changes (e.g., anon sign-in completes).
   useEffect(() => {
@@ -239,6 +228,8 @@ export default function Profile() {
   const [modalAppInfo, setModalAppInfo] = useState(false);
   const syncEngine = useSyncEngineHook();
   const isAnon = !!auth.currentUser?.isAnonymous;
+  const currentLanguageRef = useRef<SupportedLanguage>("en");
+  const lastLocalLanguageChangeRef = useRef<{ language: SupportedLanguage; updatedAt: number } | null>(null);
   // Scroll ref to ensure focused inputs are always visible
   const scrollRef = useRef<ScrollView | null>(null);
 
@@ -257,11 +248,17 @@ export default function Profile() {
 
   // Track when we've loaded prefs from storage so we don't overwrite them immediately
   const [prefsHydrated, setPrefsHydrated] = useState(false);
+  const prefsHydratingRef = useRef(false);
+  const prefsPersistBlockedUntilRef = useRef(0);
 
   // Debounced sync trigger for preferences changes.
   // We mark preferences as dirty in the sync engine and then request a full sync.
   // This mirrors the snapshot->sync approach used in History.tsx for cookbooks.
   const prefsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    currentLanguageRef.current = language;
+  }, [language]);
 
   const buildPreferencesPayload = useCallback(() => {
     return {
@@ -341,10 +338,12 @@ export default function Profile() {
   const [contactError, setContactError] = useState("");
   const [contactSending, setContactSending] = useState(false);
 
-  // FAQ Modal state
-  const [faqModalVisible, setFaqModalVisible] = useState(false);
-  const [faqSearchQuery, setFaqSearchQuery] = useState("");
-  const [expandedFaqId, setExpandedFaqId] = useState<string | null>(null);
+  const [healthGoalsVisible, setHealthGoalsVisible] = useState(false);
+  const [myDayProfile, setMyDayProfile] = useState<MyDayProfile>(defaultMyDayProfile());
+  const [myDayDraft, setMyDayDraft] = useState<MyDayProfile>(defaultMyDayProfile());
+  const [manualPlanEdited, setManualPlanEdited] = useState(false);
+  const [dailyPlanMode, setDailyPlanMode] = useState<"auto" | "manual">("auto");
+  const [healthGoalsInitialStep, setHealthGoalsInitialStep] = useState(0);
 
   // Handles picking an image and sets a local URI (editPhotoURL)
   const pickImage = async () => {
@@ -395,7 +394,7 @@ export default function Profile() {
   // When opening modal, prefill fields
   useEffect(() => {
     if (modalEditProfile && user) {
-      setEditDisplayName(user.displayName || user.name || "");
+      setEditDisplayName(user.displayName || "");
       setEditPhotoURL(user.photoURL || "");
       setEditPassword("");
       setEditError("");
@@ -435,7 +434,7 @@ export default function Profile() {
   async function compressImageIfNeeded(uri: string): Promise<string> {
     try {
       const info = await FileSystem.getInfoAsync(uri);
-      const size = typeof info.size === "number" ? info.size : 0;
+      const size = info.exists && typeof info.size === "number" ? info.size : 0;
       const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3 MB
 
       // If we know the file is already under the limit, keep as-is
@@ -479,7 +478,7 @@ export default function Profile() {
 
   // Upload via backend to avoid RN/Hermes Blob issues. The server should write to Firebase Storage using Admin SDK and return a public URL.
   async function uploadProfileImageViaBackend(localUri: string, uid: string): Promise<string> {
-    const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/uploadProfilePhoto`;
+    const apiUrl = `${getApiBaseUrl()}/uploadProfilePhoto`;
     // Ensure file:// path
     const fileUri = await ensureFileUriForUpload(localUri);
 
@@ -679,7 +678,7 @@ export default function Profile() {
         const didChangePhoto = (normalizedPhotoURL || null) !== (auth.currentUser.photoURL || null);
 
         // If photo is being cleared, delete from Storage and force-clear Auth photoURL
-        if (!normalizedPhotoURL && (auth.currentUser.photoURL || user.photoURL)) {
+        if (!normalizedPhotoURL && (auth.currentUser.photoURL || user?.photoURL)) {
           try {
             await deleteProfileImageFromStorage(auth.currentUser.uid);
           } catch { }
@@ -779,6 +778,19 @@ export default function Profile() {
   // Load preferences from AsyncStorage
   useEffect(() => {
     (async () => {
+      prefsHydratingRef.current = true;
+      prefsPersistBlockedUntilRef.current = Date.now() + 2000;
+      setPrefsHydrated(false);
+      setDietary([]);
+      setAvoid([]);
+      setAvoidOther("");
+      setMeasurement("Metric");
+      setDarkMode(theme === "dark");
+      setLanguage(
+        supportedLanguages.includes(i18n.language as SupportedLanguage)
+          ? (i18n.language as SupportedLanguage)
+          : "en"
+      );
       const [
         storedDietary,
         storedAvoid,
@@ -788,6 +800,7 @@ export default function Profile() {
         storedAvoidOther,
         storedMeasureSystem,
         storedThemeMode,
+        storedSyncPrefsRaw,
       ] = await Promise.all([
         AsyncStorage.getItem("dietary"),
         AsyncStorage.getItem("avoid"),
@@ -797,14 +810,22 @@ export default function Profile() {
         AsyncStorage.getItem("avoidOther"),
         AsyncStorage.getItem("measureSystem"),
         AsyncStorage.getItem("themeMode"),
+        AsyncStorage.getItem("sync_prefs"),
       ]);
 
+      let syncPrefs: any = null;
+      try {
+        syncPrefs = storedSyncPrefsRaw ? JSON.parse(storedSyncPrefsRaw) : null;
+      } catch {
+        syncPrefs = null;
+      }
+
       // Default to empty array if parse fails or value is null
-      let parsedDietary: string[] = [];
-      let parsedAvoid: string[] = [];
+      let parsedDietary: string[] = Array.isArray(syncPrefs?.userDietary) ? syncPrefs.userDietary : [];
+      let parsedAvoid: string[] = Array.isArray(syncPrefs?.userAvoid) ? syncPrefs.userAvoid : [];
 
       try {
-        if (storedDietary) {
+        if (!parsedDietary.length && storedDietary) {
           const val = JSON.parse(storedDietary);
           parsedDietary = Array.isArray(val) ? val : [];
         }
@@ -812,7 +833,7 @@ export default function Profile() {
         parsedDietary = [];
       }
       try {
-        if (storedAvoid) {
+        if (!parsedAvoid.length && storedAvoid) {
           const val = JSON.parse(storedAvoid);
           parsedAvoid = Array.isArray(val) ? val : [];
         }
@@ -848,7 +869,12 @@ export default function Profile() {
       setAvoid(filteredAvoid);
 
       // Measurement: accept both Profile-style ("US"/"Metric") and onboarding-style ("imperial"/"metric")
-      const measurementSource = storedMeasurement || storedMeasureSystem;
+      const measurementSource =
+        syncPrefs?.userMeasurement === "imperial"
+          ? "US"
+          : syncPrefs?.userMeasurement === "metric"
+            ? "Metric"
+            : storedMeasurement || storedMeasureSystem;
       if (measurementSource) {
         if (measurementSource === "US" || measurementSource === "Metric") {
           setMeasurement(measurementSource as MeasurementSystem);
@@ -863,30 +889,50 @@ export default function Profile() {
       }
 
       // Theme: accept both "theme" and "themeMode"
-      const themeSource = storedTheme || storedThemeMode;
+      const themeSource =
+        syncPrefs?.themeMode === "dark"
+          ? "dark"
+          : syncPrefs?.themeMode === "light" || syncPrefs?.themeMode === "system"
+            ? "light"
+            : storedTheme || storedThemeMode;
       if (themeSource) {
-        setDarkMode(themeSource === "dark");
+        const wantDark = themeSource === "dark";
+        setDarkMode(wantDark);
+        const wantTheme = wantDark ? "dark" : "light";
+        setThemeMode(wantTheme);
+      } else {
+        setDarkMode(theme === "dark");
       }
 
       // Language
-      if (storedLanguage) {
-        const validLanguage = supportedLanguages.includes(storedLanguage as SupportedLanguage)
-          ? (storedLanguage as SupportedLanguage)
+      const languageSource =
+        typeof syncPrefs?.userLanguage === "string" ? syncPrefs.userLanguage : storedLanguage;
+      if (languageSource) {
+        const validLanguage = supportedLanguages.includes(languageSource as SupportedLanguage)
+          ? (languageSource as SupportedLanguage)
           : "en";
         setLanguage(validLanguage);
-        i18n.changeLanguage(validLanguage);
+        await i18n.changeLanguage(validLanguage);
       } else {
-        setLanguage("en");
-        i18n.changeLanguage("en");
+        setLanguage(
+          supportedLanguages.includes(i18n.language as SupportedLanguage)
+            ? (i18n.language as SupportedLanguage)
+            : "en"
+        );
       }
 
-      if (storedAvoidOther) {
+      if (typeof syncPrefs?.userAvoidOther === "string") {
+        setAvoidOther(syncPrefs.userAvoidOther);
+      } else if (storedAvoidOther) {
         setAvoidOther(storedAvoidOther);
       }
-      // Mark prefs as hydrated so later effects can safely persist changes
-      setPrefsHydrated(true);
+      // Let the state setters above flush before persistence effects are re-enabled.
+      setTimeout(() => {
+        prefsHydratingRef.current = false;
+        setPrefsHydrated(true);
+      }, 0);
     })();
-  }, []);
+  }, [user?.uid]);
 
   // Load local photo URI from AsyncStorage on mount
   useEffect(() => {
@@ -903,13 +949,56 @@ export default function Profile() {
     })();
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      const storedMyDay = await loadMyDayProfile();
+      setMyDayProfile(storedMyDay);
+      setMyDayDraft(storedMyDay);
+    })();
+  }, []);
+
+  useEffect(() => {
+    setMyDayProfile((prev) => ({
+      ...prev,
+      height:
+        prev.heightCm != null
+          ? formatHeightFromCm(prev.heightCm, measurement as MyDayMeasurementSystem)
+          : prev.height,
+      currentWeight:
+        prev.currentWeightKg != null
+          ? formatWeightFromKg(prev.currentWeightKg, measurement as MyDayMeasurementSystem)
+          : prev.currentWeight,
+      targetWeight:
+        prev.targetWeightKg != null
+          ? formatWeightFromKg(prev.targetWeightKg, measurement as MyDayMeasurementSystem)
+          : prev.targetWeight,
+    }));
+    if (!healthGoalsVisible) {
+      setMyDayDraft((prev) => ({
+        ...prev,
+        height:
+          prev.heightCm != null
+            ? formatHeightFromCm(prev.heightCm, measurement as MyDayMeasurementSystem)
+            : prev.height,
+        currentWeight:
+          prev.currentWeightKg != null
+            ? formatWeightFromKg(prev.currentWeightKg, measurement as MyDayMeasurementSystem)
+            : prev.currentWeight,
+        targetWeight:
+          prev.targetWeightKg != null
+            ? formatWeightFromKg(prev.targetWeightKg, measurement as MyDayMeasurementSystem)
+            : prev.targetWeight,
+      }));
+    }
+  }, [healthGoalsVisible, measurement]);
+
   // Persist preferences
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
 
     // Persist to central prefs (used by other screens)
     // Send both userDietary and dietary for backwards compatibility.
-    saveUserPrefs({ userDietary: dietary, dietary });
+    saveUserPrefs({ userDietary: dietary });
 
     // ALSO persist to the legacy AsyncStorage keys that this screen hydrates from
     // so selections survive app restarts even if other code reads these keys.
@@ -922,11 +1011,11 @@ export default function Profile() {
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [dietary, prefsHydrated]);
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
 
     // Persist to central prefs (used by other screens)
     // Send both userAvoid and avoid for backwards compatibility.
-    saveUserPrefs({ userAvoid: avoid, avoid });
+    saveUserPrefs({ userAvoid: avoid });
 
     // ALSO persist to the legacy AsyncStorage keys that this screen hydrates from
     // so selections survive app restarts.
@@ -939,12 +1028,19 @@ export default function Profile() {
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [avoid, prefsHydrated]);
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
     saveUserPrefs({ userMeasurement: measurement === "US" ? "imperial" : "metric" });
+    AsyncStorage.multiSet([
+      ["measurement", measurement],
+      ["measureSystem", measurement],
+      ["userMeasurement", measurement === "US" ? "imperial" : "metric"],
+    ]).catch(() => {
+      // ignore local preference write failures
+    });
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
   }, [measurement, prefsHydrated]);
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
     // Persist to central prefs (for AI Kitchen, etc.)
     saveUserPrefs({ userAvoidOther: avoidOther });
     // Also persist directly to AsyncStorage so reloads keep the text
@@ -957,7 +1053,7 @@ export default function Profile() {
   // Theme toggle integration
   // Theme toggle integration
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
 
     const mode = darkMode ? "dark" : "light";
     AsyncStorage.setItem("theme", mode);
@@ -971,7 +1067,7 @@ export default function Profile() {
 
   // Language persist
   useEffect(() => {
-    if (!prefsHydrated) return;
+    if (!prefsHydrated || prefsHydratingRef.current || Date.now() < prefsPersistBlockedUntilRef.current) return;
     AsyncStorage.setItem("userLanguage", language as SupportedLanguage);
     saveUserPrefs({ userLanguage: language });
     requestPreferencesSync({ reason: "prefs-change", debounceMs: 250 });
@@ -982,7 +1078,19 @@ export default function Profile() {
     const onPrefs = (changed: any) => {
       if (changed.userLanguage !== undefined) {
         const lng = changed.userLanguage as SupportedLanguage;
-        if (lng && lng !== language) {
+        const incomingUpdatedAt = typeof changed.updatedAt === "number" ? changed.updatedAt : null;
+        const localLanguageChange = lastLocalLanguageChangeRef.current;
+        const isOlderThanRecentLocalChoice =
+          !!localLanguageChange &&
+          incomingUpdatedAt !== null &&
+          incomingUpdatedAt < localLanguageChange.updatedAt &&
+          lng !== localLanguageChange.language;
+
+        if (isOlderThanRecentLocalChoice) {
+          return;
+        }
+
+        if (lng && lng !== currentLanguageRef.current) {
           setLanguage(lng);
           i18n.changeLanguage(lng);
         }
@@ -1110,8 +1218,11 @@ export default function Profile() {
     languageOptions.find((opt) => opt.code === code) || languageOptions[0];
   const currentLanguageObj = getLanguageOption(language);
 
-  // App version from Constants (use only expoConfig.version, fallback to "1.0.0")
-  const appVersion = Constants?.expoConfig?.version || "1.0.0";
+  // Prefer the native version shown by the installed app; fall back to Expo config in dev.
+  const appVersion =
+    Application.nativeApplicationVersion ||
+    Constants?.expoConfig?.version ||
+    t("common.unknown", { defaultValue: "Unknown" });
 
   // Open in-app contact form instead of jumping straight to email app
   const handleContactSupport = () => {
@@ -1200,7 +1311,7 @@ export default function Profile() {
     try {
       setContactSending(true);
 
-      const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/support/contact`;
+      const apiUrl = `${getApiBaseUrl()}/support/contact`;
       const res = await fetch(apiUrl, {
         method: "POST",
         headers: {
@@ -1257,45 +1368,6 @@ export default function Profile() {
     }
   };
 
-  // Helper to get dietary/avoid option object by key
-  function getDietaryOption(key: string) {
-    return dietaryOptions[key];
-  }
-  function getAvoidOption(key: string) {
-    return avoidOptions[key];
-  }
-
-  // Helper for dietary selected text
-  function getDietarySelectedText() {
-    if (!dietary || dietary.length === 0) {
-      return t("common.none_selected_dietary");
-    }
-    return dietary.map(d => {
-      const opt = getDietaryOption(d);
-      return opt ? `${opt.icon} ${opt.label}` : d;
-    }).join(", ");
-  }
-  // Helper for avoid selected text
-  function getAvoidSelectedText() {
-    if (!avoid || avoid.length === 0) {
-      return t("common.none_selected_avoid");
-    }
-    return avoid.map(a => {
-      const opt = getAvoidOption(a);
-      if (a === "other" && avoidOther && avoidOther.trim().length > 0) {
-        // Sanitize & truncate input
-        const maxOtherLength = 50;
-        let safeOther = avoidOther.trim();
-        safeOther = safeOther.replace(/[^a-zA-Z0-9 ,.;:!?áéíóúàèìòùçãõâêîôûÁÉÍÓÚÀÈÌÒÙÇÃÕÂÊÎÔÛ-]/g, "");
-        if (safeOther.length > maxOtherLength) {
-          safeOther = safeOther.substring(0, maxOtherLength) + "…";
-        }
-        return opt ? `${opt.icon} ${opt.label}: ${safeOther}` : `Other: ${safeOther}`;
-      }
-      return opt ? `${opt.icon} ${opt.label}` : a;
-    }).join(", ");
-  }
-
   function arraysEqual(a: string[], b: string[]) {
     if (a === b) return true;
     if (!a || !b) return false;
@@ -1305,6 +1377,204 @@ export default function Profile() {
     }
     return true;
   }
+
+  const buildAutoPlanProfile = useCallback(
+    (draft: MyDayProfile) => {
+      const suggested = deriveSuggestedPlan(draft, measurement as MyDayMeasurementSystem);
+      if (!suggested) return { ...draft, plan: draft.plan ?? null };
+      return {
+        ...draft,
+        plan: suggested,
+        isCustomizedPlan: false,
+      };
+    },
+    [measurement]
+  );
+
+  const updateMyDayDraft = <K extends keyof MyDayProfile>(key: K, value: MyDayProfile[K]) => {
+    setMyDayDraft((prev) => {
+      const normalizedValue =
+        key === "gender" && value === "nonbinary" ? ("" as MyDayProfile[K]) : value;
+      const next = { ...prev, [key]: normalizedValue };
+      if ((["age", "height", "currentWeight", "targetWeight", "gender", "goalType", "pace"] as AutoPlanField[]).includes(key as AutoPlanField)) {
+        if (dailyPlanMode === "auto") {
+          setManualPlanEdited(false);
+          return buildAutoPlanProfile({ ...next, isCustomizedPlan: false });
+        }
+        return next;
+      }
+      return next;
+    });
+  };
+
+  const openHealthGoalsEditor = useCallback((initialStep = 0) => {
+    const sanitizedProfile =
+      myDayProfile.gender === "nonbinary" ? { ...myDayProfile, gender: "" as MyDayGender } : myDayProfile;
+    const draftToEdit =
+      sanitizedProfile.plan || sanitizedProfile.isCustomizedPlan
+        ? sanitizedProfile
+        : buildAutoPlanProfile(sanitizedProfile);
+    setMyDayDraft(draftToEdit);
+    setManualPlanEdited(Boolean(draftToEdit.isCustomizedPlan && draftToEdit.plan));
+    setDailyPlanMode(draftToEdit.isCustomizedPlan ? "manual" : "auto");
+    setHealthGoalsInitialStep(initialStep);
+    setHealthGoalsVisible(true);
+  }, [buildAutoPlanProfile, myDayProfile]);
+
+  const updateDraftPlan = (key: keyof MyDayPlan, value: string) => {
+    const parsed = Number(value.replace(",", "."));
+    console.log("[Profile][HealthGoals] updateDraftPlan", {
+      key,
+      rawValue: value,
+      parsed,
+      previousPlan: myDayDraft.plan,
+    });
+    setManualPlanEdited(true);
+    setDailyPlanMode("manual");
+    setMyDayDraft((prev) => ({
+      ...prev,
+      plan: {
+        calories: prev.plan?.calories ?? 0,
+        protein: prev.plan?.protein ?? 0,
+        carbs: prev.plan?.carbs ?? 0,
+        fat: prev.plan?.fat ?? 0,
+        [key]: Number.isFinite(parsed) ? parsed : 0,
+      },
+      isCustomizedPlan: true,
+    }));
+  };
+
+  const hasUsableManualPlan = (plan: MyDayPlan | null | undefined) => {
+    if (!plan) return false;
+    return [plan.calories, plan.protein, plan.carbs, plan.fat].every(
+      (value) => Number.isFinite(value) && value > 0
+    );
+  };
+
+  const saveHealthGoals = async () => {
+    try {
+      console.log("[Profile][HealthGoals] saveHealthGoals:start", {
+        manualPlanEdited,
+        draft: myDayDraft,
+        measurement,
+      });
+      Keyboard.dismiss();
+      const currentWeight = Number(myDayDraft.currentWeight.replace(",", "."));
+      const parsedTargetWeight = Number(myDayDraft.targetWeight.replace(",", "."));
+      const normalizedTargetWeight =
+        myDayDraft.goalType === "maintain"
+          ? myDayDraft.currentWeight
+          : myDayDraft.goalType === "lose" && Number.isFinite(currentWeight) && currentWeight > 0
+            ? Number.isFinite(parsedTargetWeight) && parsedTargetWeight > 0 && parsedTargetWeight < currentWeight
+              ? myDayDraft.targetWeight
+              : String(Number((currentWeight - 1).toFixed(2)))
+            : myDayDraft.goalType === "gain" && Number.isFinite(currentWeight) && currentWeight > 0
+              ? Number.isFinite(parsedTargetWeight) && parsedTargetWeight > currentWeight
+                ? myDayDraft.targetWeight
+                : String(Number((currentWeight + 1).toFixed(2)))
+              : myDayDraft.targetWeight;
+      const autoPlan = deriveSuggestedPlan(myDayDraft, measurement as MyDayMeasurementSystem);
+      const shouldKeepManualPlan = dailyPlanMode === "manual" && manualPlanEdited && hasUsableManualPlan(myDayDraft.plan);
+      const nextProfile: MyDayProfile = {
+        ...myDayDraft,
+        heightCm: parseHeightToCm(myDayDraft.height, measurement as MyDayMeasurementSystem),
+        targetWeight: normalizedTargetWeight,
+        currentWeightKg: parseWeightToKg(myDayDraft.currentWeight, measurement as MyDayMeasurementSystem),
+        targetWeightKg: parseWeightToKg(normalizedTargetWeight, measurement as MyDayMeasurementSystem),
+        plan: shouldKeepManualPlan ? myDayDraft.plan : autoPlan ?? myDayDraft.plan,
+        isCustomizedPlan: shouldKeepManualPlan,
+        updatedAt: new Date().toISOString(),
+      };
+
+      console.log("[Profile][HealthGoals] saveHealthGoals:resolved", {
+        autoPlan,
+        shouldKeepManualPlan,
+        nextProfile,
+      });
+
+      await saveMyDayProfile(nextProfile, measurement as MyDayMeasurementSystem);
+      if (typeof (syncEngine as any)?.markMyDayProfileDirty === "function") {
+        await (syncEngine as any).markMyDayProfileDirty(nextProfile);
+      }
+      if (Number.isFinite(currentWeight) && currentWeight > 0) {
+        const createdWeightLog = await addWeightLog(currentWeight, new Date(), measurement as MyDayMeasurementSystem);
+        if (typeof (syncEngine as any)?.markMyDayWeightDirty === "function") {
+          await (syncEngine as any).markMyDayWeightDirty({
+            id: createdWeightLog.id,
+            createdAt: createdWeightLog.createdAt,
+            dayKey: createdWeightLog.dayKey,
+            weight: String(createdWeightLog.value),
+            normalizedWeightKg:
+              Number.isFinite(createdWeightLog.valueKg) ? Number(createdWeightLog.valueKg) : null,
+          });
+        }
+      }
+      try {
+        if (backendUrl) {
+          const rewardRes = await claimEconomyReward({
+            backendUrl,
+            appEnv,
+            auth,
+            rewardKey: "profile_health_goals_v1",
+          });
+          if (typeof rewardRes?.cookies === "number") {
+            setCookieBalance(rewardRes.cookies);
+            if (typeof rewardRes?.freePremiumActionsRemaining === "number") {
+              setFreePremiumActionsRemaining(rewardRes.freePremiumActionsRemaining);
+            }
+            await writeCachedEconomySnapshot(economyUid, {
+              balance: rewardRes.cookies,
+              freePremiumActionsRemaining:
+                typeof rewardRes?.freePremiumActionsRemaining === "number"
+                  ? rewardRes.freePremiumActionsRemaining
+                  : freePremiumActionsRemaining,
+            });
+          }
+        }
+      } catch (rewardErr) {
+        console.warn("[Profile] health goals reward claim failed", rewardErr);
+      }
+      console.log("[Profile][HealthGoals] saveHealthGoals:persisted");
+      setMyDayProfile(nextProfile);
+      setMyDayDraft(nextProfile);
+      setManualPlanEdited(shouldKeepManualPlan);
+      setDailyPlanMode(shouldKeepManualPlan ? "manual" : "auto");
+      setTimeout(() => {
+        setHealthGoalsVisible(false);
+      }, 80);
+      console.log("[Profile][HealthGoals] saveHealthGoals:done");
+    } catch (error) {
+      console.warn("[Profile] saveHealthGoals error", error);
+      Alert.alert(
+        t("profile.health_goals_title", { defaultValue: "Health & Goals" }),
+        t("profile.health_save_error", { defaultValue: "We couldn't save your Health & Goals right now. Please try again." })
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (params.openHealthGoals === "1") {
+      openHealthGoalsEditor();
+      router.replace("/profile" as any);
+    }
+  }, [openHealthGoalsEditor, params.openHealthGoals, router]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        const shouldOpen = await AsyncStorage.getItem(MY_DAY_OPEN_HEALTH_GOALS_KEY);
+        if (active && shouldOpen === "1") {
+          await AsyncStorage.removeItem(MY_DAY_OPEN_HEALTH_GOALS_KEY);
+          openHealthGoalsEditor();
+        }
+      })();
+
+      return () => {
+        active = false;
+      };
+    }, [openHealthGoalsEditor])
+  );
 
   // Generic helper to send dev/analytics events to the backend
   const sendBackendEvent = async (eventType: string, payload: any = {}) => {
@@ -1317,7 +1587,7 @@ export default function Profile() {
         return;
       }
 
-      const apiUrl = `${process.env.EXPO_PUBLIC_API_URL}/events`;
+      const apiUrl = `${getApiBaseUrl()}/events`;
 
       const body = {
         type: eventType,
@@ -1389,8 +1659,6 @@ export default function Profile() {
   // Section title color: brighten in dark mode for visibility
   const sectionTitleColor =
     theme === "dark" ? "#f0f0f0" : subText;
-  const selectedLabelColor = theme === "dark" ? "#ddd" : "#888";
-  const selectedTextColor = theme === "dark" ? "#ddd" : "#888";
 
 
   // Reset onboarding state, clear related prefs in AsyncStorage and open onboarding once (no force flag)
@@ -1430,146 +1698,6 @@ export default function Profile() {
     }
   };
 
-  const handleToggleFaq = (id: string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpandedFaqId((prev) => (prev === id ? null : id));
-  };
-
-  const faqItems = [
-    {
-      id: "faq.what_is_app",
-      question: t("faq.what_is_app") || "What is MyCookbook AI?",
-      answer:
-        t("faq.what_is_app_answer") ||
-        "MyCookbook AI helps you organize your recipes, generate new ideas with AI, and adapt meals to your dietary preferences and ingredients you already have at home.",
-    },
-    {
-      id: "faq.do_i_need_account",
-      question: t("faq.do_i_need_account") || "Do I need an account to use the app?",
-      answer:
-        t("faq.do_i_need_account_answer") ||
-        "You can explore the app as a guest, but creating an account lets you sync your recipes and preferences across devices and keeps your data safe if you change phones.",
-    },
-    {
-      id: "faq.where_are_recipes_stored",
-      question: t("faq.where_are_recipes_stored") || "Where are my recipes stored?",
-      answer:
-        t("faq.where_are_recipes_stored_answer") ||
-        "Your recipes are stored securely in our cloud when you are logged in, and locally on your device for quick access. We do not share your recipes with other users.",
-    },
-    {
-      id: "faq.ai_kitchen_preferences",
-      question: t("faq.ai_kitchen_preferences") || "How does AI Kitchen use my food preferences?",
-      answer:
-        t("faq.ai_kitchen_preferences_answer") ||
-        "AI Kitchen reads your dietary restrictions and ingredients to avoid from your Profile to suggest better recipes. You can change these preferences in your Profile at any time.",
-    },
-    {
-      id: "faq.ai_kitchen_one_time_changes",
-      question: t("faq.ai_kitchen_one_time_changes") || "Do changes in AI Kitchen update my Profile?",
-      answer:
-        t("faq.ai_kitchen_one_time_changes_answer") ||
-        "No. Any changes to dietary restrictions or ingredients to avoid inside AI Kitchen apply only to that single AI request. Your Profile remains the source of truth for your long-term preferences.",
-    },
-    {
-      id: "faq.cookies_what",
-      question: t("faq.cookies_what") || "What are Cookies and what are they used for?",
-      answer:
-        t("faq.cookies_what_answer") ||
-        "Cookies are credits used for premium actions in MyCookbook AI, such as generating AI recipes, importing recipes from Instagram Reels, and creating additional cookbooks beyond the free limit. Your cookie balance is shown in your Profile.",
-    },
-    {
-      id: "faq.cookies_charged",
-      question: t("faq.cookies_charged") || "When do Cookies get deducted and how can I get more?",
-      answer:
-        t("faq.cookies_charged_answer") ||
-        "The first cookbook you create is free. Additional cookbooks deduct 1 Cookie. Instagram Reel imports deduct 2 Cookies only when we create a valid draft. AI recipe generation also uses Cookies. You can get more Cookies from the Store, and we may occasionally offer bonus Cookies through promotions.",
-    },
-    {
-      id: "faq.import_file_app",
-      question:
-        t("faq.import_file_app") ||
-        "How does Import from File / App work?",
-      answer:
-        t("faq.import_file_app_answer") ||
-        "You can import recipes from supported backup or export files, including My Recipe Box (.rtk), Paprika (.paprikarecipes), supported recipe ZIP exports, HTML, and CSV. Open My Recipes, tap New Recipe, then choose Import from File / App. If the file is invalid, no recipes are imported.",
-    },
-    {
-      id: "faq.instagram_reel_import",
-      question:
-        t("faq.instagram_reel_import") ||
-        "How does Instagram Reel import work?",
-      answer:
-        t("faq.instagram_reel_import_answer") ||
-        "Paste a public Instagram Reel link into Import from URL. We analyze the Reel and create a recipe draft for you to review before saving. This import costs 2 Cookies only when a valid draft is created.",
-    },
-    {
-      id: "faq.measurement_system",
-      question: t("faq.measurement_system") || "Which measurement systems are supported?",
-      answer:
-        t("faq.measurement_system_answer") ||
-        "You can choose between US (cups, ounces, pounds) and Metric (grams, milliliters, kilograms) in your Profile. AI Kitchen will try to generate recipes using your preferred system.",
-    },
-    {
-      id: "faq.language_change",
-      question: t("faq.language_change") || "How do I change the app language?",
-      answer:
-        t("faq.language_change_answer") ||
-        "Go to Profile → General → Language and pick your preferred language. Most of the interface and messages will adapt immediately.",
-    },
-    {
-      id: "faq.dark_mode",
-      question: t("faq.dark_mode") || "How do I enable dark mode?",
-      answer:
-        t("faq.dark_mode_answer") ||
-        "Go to Profile → General and toggle Dark Mode. The whole app will switch between light and dark themes.",
-    },
-    {
-      id: "faq.offline",
-      question: t("faq.offline") || "Does the app work offline?",
-      answer:
-        t("faq.offline_answer") ||
-        "Most of your saved recipes are available offline. However, AI features, image uploads and sync actions require an internet connection.",
-    },
-    {
-      id: "faq.ai_unique_recipes",
-      question: t("faq.ai_unique_recipes") || "Will AI always generate completely unique recipes?",
-      answer:
-        t("faq.ai_unique_recipes_answer") ||
-        "AI generates recipes based on patterns it has learned and your inputs. Some recipes may be similar to well-known dishes, and you can always edit ingredients or steps after saving.",
-    },
-    {
-      id: "faq.privacy",
-      question: t("faq.privacy") || "Are my photos and recipes private?",
-      answer:
-        t("faq.privacy_answer") ||
-        "Yes. If you use the app as a guest, your data stays on this device. If you are signed in, your recipes and photos are linked to your account for sync. We do not make your recipes public or searchable by other users.",
-    },
-    {
-      id: "faq.free_or_paid",
-      question: t("faq.free_or_paid") || "Is MyCookbook AI free?",
-      answer:
-        t("faq.free_or_paid_answer") ||
-        "Yes, the core experience is free. Some premium actions use Cookies, such as AI generation, Instagram Reel imports, and extra cookbooks beyond the free limit. We always show the cost before charging.",
-    },
-    {
-      id: "faq.report_bug",
-      question: t("faq.report_bug") || "How can I report a bug or suggest a feature?",
-      answer:
-        t("faq.report_bug_answer") ||
-        "Use the Contact Support option in the Help & Support section of your Profile. Tell us what happened, which device you are using and, if possible, steps to reproduce the issue.",
-    },
-  ];
-
-  const normalizedFaqQuery = faqSearchQuery.trim().toLowerCase();
-  const visibleFaqItems = normalizedFaqQuery
-    ? faqItems.filter((item) => {
-      const q = item.question.toLowerCase();
-      const a = item.answer.toLowerCase();
-      return q.includes(normalizedFaqQuery) || a.includes(normalizedFaqQuery);
-    })
-    : faqItems;
-
   return (
     <View style={[styles.container, { backgroundColor: bg }]}>
       <Stack.Screen
@@ -1583,7 +1711,23 @@ export default function Profile() {
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
-          <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.authentication")}</Text>
+          <View style={styles.sectionTitleRow}>
+            <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>
+              {t("profile.authentication")}
+            </Text>
+            {!!user && !isAnon ? (
+              <TouchableOpacity
+                style={styles.authHeaderAction}
+                activeOpacity={0.7}
+                onPress={logout}
+              >
+                <MaterialIcons name="logout" size={18} color={subText} />
+                <Text style={[styles.authHeaderActionText, { color: subText }]}>
+                  {t("profile.logout")}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
 
           {(!user || isAnon) ? (
             <View>
@@ -1601,68 +1745,67 @@ export default function Profile() {
             </View>
           ) : (
             <View>
-              {/* User Info Block with Profile Picture */}
-              <View style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "flex-start",
-                paddingVertical: 16,
-                borderBottomWidth: StyleSheet.hairlineWidth,
-                borderBottomColor: border,
-              }}>
-                {(auth.currentUser?.photoURL || localPhotoUri) ? (
-                  <View
-                    style={{
-                      width: 56,
-                      height: 56,
-                      borderRadius: 28,
-                      overflow: "hidden",
-                      backgroundColor: "#ddd",
-                      justifyContent: "center",
-                      alignItems: "center",
-                    }}
-                  >
-                    <Image
-                      source={{ uri: (auth.currentUser?.photoURL || localPhotoUri) as string }}
-                      style={{ width: 56, height: 56, borderRadius: 28 }}
-                      resizeMode="cover"
-                    />
-                  </View>
-                ) : (
-                  <MaterialIcons name="account-circle" size={56} color={text} />
-                )}
-                <View style={{ marginLeft: 16 }}>
-                  {getDisplayName(user) ? (
-                    <>
-                      <Text style={{ color: text, fontWeight: "600", fontSize: 18 }}>
-                        {getDisplayName(user)}
-                      </Text>
-                      <Text style={{ color: subText, fontSize: 14 }}>{user.email}</Text>
-                    </>
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  paddingVertical: 16,
+                }}
+              >
+                <View style={styles.authSummaryInfo}>
+                  {(auth.currentUser?.photoURL || localPhotoUri) ? (
+                    <View
+                      style={{
+                        width: 56,
+                        height: 56,
+                        borderRadius: 28,
+                        overflow: "hidden",
+                        backgroundColor: "#ddd",
+                        justifyContent: "center",
+                        alignItems: "center",
+                      }}
+                    >
+                      <Image
+                        source={{ uri: (auth.currentUser?.photoURL || localPhotoUri) as string }}
+                        style={{ width: 56, height: 56, borderRadius: 28 }}
+                        resizeMode="cover"
+                      />
+                    </View>
                   ) : (
-                    <Text style={{ color: text, fontWeight: "600", fontSize: 16 }}>
-                      {user.email}
-                    </Text>
+                    <View style={[styles.authFallbackAvatar, { backgroundColor: "#FCE7E1" }]}>
+                      <MaterialIcons name="person" size={30} color="#E27D60" />
+                    </View>
                   )}
+                  <View style={styles.authSummaryCopy}>
+                    {getDisplayName(user) ? (
+                      <>
+                        <Text numberOfLines={1} style={{ color: text, fontWeight: "600", fontSize: 18 }}>
+                          {getDisplayName(user)}
+                        </Text>
+                        <Text numberOfLines={1} style={{ color: subText, fontSize: 14 }}>
+                          {user.email}
+                        </Text>
+                      </>
+                    ) : (
+                      <Text numberOfLines={2} style={{ color: text, fontWeight: "600", fontSize: 16 }}>
+                        {user.email}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.authActionsColumn}>
+                  <TouchableOpacity
+                    style={styles.authIconButton}
+                    activeOpacity={0.85}
+                    onPress={() => setModalEditProfile(true)}
+                    hitSlop={8}
+                  >
+                    <MaterialIcons name="edit" size={20} color={subText} />
+                  </TouchableOpacity>
                 </View>
               </View>
-              {/* Logout and Edit Profile */}
-              <TouchableOpacity
-                style={[styles.row, { borderBottomColor: border }]}
-                activeOpacity={0.7}
-                onPress={() => setModalEditProfile(true)}
-              >
-                <MaterialIcons name="edit" size={22} color={text} />
-                <Text style={[styles.rowText, { color: text }]}>{t("profile.edit_profile") || "Edit Profile"}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.row, { borderBottomColor: "transparent" }]}
-                activeOpacity={0.7}
-                onPress={logout}
-              >
-                <MaterialIcons name="logout" size={22} color={text} />
-                <Text style={[styles.rowText, { color: text }]}>{t("profile.logout")}</Text>
-              </TouchableOpacity>
             </View>
           )}
         </View>
@@ -1674,7 +1817,7 @@ export default function Profile() {
           onRequestClose={() => setModalEditProfile(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setModalEditProfile(false)}
           >
             <KeyboardAvoidingView
@@ -1714,6 +1857,44 @@ export default function Profile() {
                   {editError ? (
                     <Text style={{ color: "#C00", marginBottom: 10 }}>{editError}</Text>
                   ) : null}
+                  <View style={styles.editProfilePhotoSection}>
+                    <Pressable
+                      style={[
+                        styles.editProfilePhotoAvatar,
+                        {
+                          backgroundColor: "#eee",
+                          borderColor: border,
+                        },
+                      ]}
+                      onPress={pickImage}
+                    >
+                      {editPhotoURL ? (
+                        <Image
+                          source={{ uri: editPhotoURL }}
+                          style={{ width: 60, height: 60, borderRadius: 30 }}
+                        />
+                      ) : (
+                        <View style={[styles.authFallbackAvatar, { backgroundColor: "#FCE7E1" }]}>
+                          <MaterialIcons name="person" size={30} color="#E27D60" />
+                        </View>
+                      )}
+                    </Pressable>
+                    <TouchableOpacity
+                      onPress={pickImage}
+                      style={[styles.editProfilePhotoAction, { borderColor: border, backgroundColor: bg }]}
+                      activeOpacity={0.85}
+                    >
+                      <MaterialIcons name="edit" size={16} color={text} />
+                      <Text style={[styles.editProfilePhotoActionText, { color: text }]}>
+                        {t("profile.edit_profile") || "Edit"}
+                      </Text>
+                    </TouchableOpacity>
+                    {uploadProgress !== null && (
+                      <Text style={[styles.editProfilePhotoProgress, { color: subText }]}>
+                        {Math.round(uploadProgress * 100)}%
+                      </Text>
+                    )}
+                  </View>
                   <View style={{ marginBottom: 18 }}>
                     <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
                       {t("profile.display_name") || "Display Name"}
@@ -1746,57 +1927,6 @@ export default function Profile() {
                         selectTextOnFocus={true}
                       />
                     </Pressable>
-                  </View>
-                  <View style={{ marginBottom: 18 }}>
-                    <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
-                      {t("profile.profile_photo") || "Profile Photo"}
-                    </Text>
-                    <Pressable
-                      style={{
-                        width: 60,
-                        height: 60,
-                        borderRadius: 30,
-                        backgroundColor: "#eee",
-                        justifyContent: "center",
-                        alignItems: "center",
-                        borderWidth: 1,
-                        borderColor: border,
-                      }}
-                      onPress={pickImage}
-                    >
-                      {editPhotoURL ? (
-                        <Image
-                          source={{ uri: editPhotoURL }}
-                          style={{ width: 60, height: 60, borderRadius: 30 }}
-                        />
-                      ) : (
-                        <MaterialIcons name="account-circle" size={40} color="#888" />
-                      )}
-                    </Pressable>
-                    {editPhotoURL ? (
-                      <TouchableOpacity
-                        onPress={removeImage}
-                        style={{ marginTop: 8 }}
-                      >
-                        <Text style={{ color: "#E27D60", fontWeight: "500" }}>
-                          {t("profile.remove_photo") || "Remove Photo"}
-                        </Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity
-                        onPress={pickImage}
-                        style={{ marginTop: 8 }}
-                      >
-                        <Text style={{ color: "#E27D60", fontWeight: "500" }}>
-                          {t("profile.change_photo") || "Change Photo"}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                    {uploadProgress !== null && (
-                      <Text style={{ marginTop: 6, color: subText, fontSize: 12 }}>
-                        {Math.round(uploadProgress * 100)}%
-                      </Text>
-                    )}
                   </View>
                   <View style={{ marginBottom: 18 }}>
                     <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
@@ -1886,87 +2016,65 @@ export default function Profile() {
 
         {/* Cookies / Economy */}
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
-          <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
-            <View style={{ flex: 1, paddingRight: 12 }}>
-              <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
-                {t("economy.cookies_title", { defaultValue: "Cookies" })}
-              </Text>
-              <Text style={{ fontSize: 13, color: subText, marginTop: 2, flexShrink: 1, flexWrap: "wrap" }}>
-                {t("economy.economy_explainer", {
-                  defaultValue: "Used for AI features and adding extra cookbooks.",
-                })}
-              </Text>
-              {/* Bonus line moved below balance row */}
-            </View>
+          <View style={styles.cookieHeaderRow}>
+            <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
+                {t("economy.cookies_title", { defaultValue: "Eggs" })}
+            </Text>
             <TouchableOpacity
               onPress={() => setCookieInfoVisible(true)}
-              style={{ padding: 6 }}
+              style={styles.cookieInfoButton}
               activeOpacity={0.7}
+              hitSlop={8}
             >
               <MaterialIcons name="info-outline" size={20} color={subText} />
             </TouchableOpacity>
           </View>
 
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginTop: 12,
-              paddingTop: 10,
-              borderTopWidth: StyleSheet.hairlineWidth,
-              borderTopColor: border,
-            }}
+          <Pressable
+            onPress={() => router.push("/economy/store")}
+            style={({ pressed }) => [
+              styles.cookieSettingsRow,
+              {
+                borderBottomColor: border,
+                borderBottomWidth: (!user || isAnon) ? StyleSheet.hairlineWidth : 0,
+                opacity: pressed ? 0.78 : 1,
+              },
+            ]}
           >
-            <Text style={{ fontSize: 13, color: subText }}>
-              {t("economy.cookies_balance", { defaultValue: "Balance" })}
-            </Text>
-            <View style={{ flexDirection: "row", alignItems: "center" }}>
-              <Text style={{ color: text, fontSize: 18, fontWeight: "800" }}>
-                {cookieLoading ? "…" : cookieBalance === null ? "—" : cookieBalance}
-              </Text>
-              <MaterialCommunityIcons
-                name="cookie"
-                size={18}
-                color={subText}
-                style={{ marginLeft: 6, marginTop: 1 }}
-              />
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.cookieActionButton,
-                  { borderColor: "#E27D60", opacity: pressed ? 0.85 : 1 },
-                ]}
-                onPress={() => {
-                  router.push("/economy/store");
-                }}
-                hitSlop={8}
-              >
-                <Text style={styles.cookieActionButtonText}>
-                  {t("economy.get_more_cookies", { defaultValue: "Add more" })}
-                </Text>
-              </Pressable>
+            <View style={styles.cookieSettingsIcon}>
+              <EggIcon size={24} />
             </View>
-          </View>
+            <View style={styles.cookieSettingsCopy}>
+              <Text style={[styles.cookieSettingsTitle, { color: text }]}>
+                {cookieLoading
+                  ? t("economy.loading_balance", { defaultValue: "Checking balance..." })
+                  : t("economy.profile_cookie_summary", {
+                      count: cookieBalance ?? 0,
+                      defaultValue: "{{count}} Eggs",
+                    })}
+              </Text>
+              <Text style={[styles.cookieSettingsSubtitle, { color: subText }]}>
+                {shouldHidePremiumPricing(freePremiumActionsRemaining)
+                  ? t("economy.free_premium_actions_remaining", {
+                      count: freePremiumActionsRemaining ?? 0,
+                      defaultValue: "{{count}} free premium actions remaining",
+                    })
+                  : t("economy.profile_cookie_manage_hint", { defaultValue: "Manage your balance and top up" })}
+              </Text>
+            </View>
+            <MaterialIcons name="chevron-right" size={22} color={subText} />
+          </Pressable>
 
           {(!user || isAnon) ? (
             <Pressable
               onPress={() => router.push("/auth/signup")}
-              style={({ pressed }) => ({
-                marginTop: 8,
-                opacity: pressed ? 0.85 : 1,
-              })}
+              style={({ pressed }) => [styles.cookieBonusRow, { opacity: pressed ? 0.78 : 1 }]}
               hitSlop={8}
             >
-              <Text
-                style={{
-                  fontSize: 13,
-                  color: "#E27D60",
-                  fontWeight: "600",
-                }}
-              >
-                {t("economy.bonus_create_account_line", {
-                  defaultValue: "🎁 Create an account and log in once to get +10 free cookies.",
+              <MaterialIcons name="card-giftcard" size={16} color="#E27D60" />
+              <Text style={styles.cookieBonusText}>
+                {t("economy.profile_signup_bonus_short", {
+                  defaultValue: "Create an account and get 10 free Eggs.",
                 })}
               </Text>
             </Pressable>
@@ -1981,7 +2089,7 @@ export default function Profile() {
           onRequestClose={() => setCookieInfoVisible(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setCookieInfoVisible(false)}
           >
             <View
@@ -1993,7 +2101,7 @@ export default function Profile() {
             >
               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                 <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 12 }]}>
-                  {t("economy.cookies_what", { defaultValue: "What are cookies?" })}
+                  {t("economy.cookies_what", { defaultValue: "What are Eggs?" })}
                 </Text>
                 <Pressable
                   style={{ marginLeft: 10, marginTop: -6 }}
@@ -2008,14 +2116,14 @@ export default function Profile() {
                 {(() => {
                   const isLoggedIn = !!user && !isAnon;
                   const key = isLoggedIn
-                    ? "economy.cookies_what_body_logged_in"
-                    : "economy.cookies_what_body_logged_out";
+                    ? "economy.cookies_what_body_logged_in_v2"
+                    : "economy.cookies_what_body_logged_out_v2";
 
                   const defaultLoggedIn =
-                    "Cookies are credits used for AI-powered features and for creating additional cookbooks beyond the free limit. You can earn some for free (we run promotions from time to time) and top up at any time.";
+                    "Eggs are used for premium AI features after your free premium actions are used up. You can buy more at any time, and you can also earn free Eggs by completing key milestones in the app.";
 
                   const defaultLoggedOut =
-                    "Cookies are credits used for AI-powered features and for creating additional cookbooks beyond the free limit. Create an account and sign in to earn extra cookies for free — and you can also top up at any time.";
+                    "Eggs are used for premium AI features after your free premium actions are used up. Create an account and sign in to unlock your account bonus, and you can also earn free Eggs by completing key milestones in the app.";
 
                   return t(key, {
                     defaultValue: isLoggedIn ? defaultLoggedIn : defaultLoggedOut,
@@ -2026,11 +2134,135 @@ export default function Profile() {
           </Pressable>
         </Modal>
 
+        <Modal
+          visible={healthInfoVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setHealthInfoVisible(false)}
+        >
+          <Pressable
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
+            onPress={() => setHealthInfoVisible(false)}
+          >
+            <View
+              style={[styles.modalContent, { backgroundColor: card, maxHeight: "70%" }]}
+              onStartShouldSetResponder={() => true}
+            >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
+                  {t("profile.health_goals_title", { defaultValue: "Health & Goals" })}
+                </Text>
+                <Pressable style={{ marginLeft: 10, marginTop: -6 }} onPress={() => setHealthInfoVisible(false)} hitSlop={12}>
+                  <MaterialIcons name="close" size={26} color={subText} />
+                </Pressable>
+              </View>
+              <Text style={{ color: subText, fontSize: 14, lineHeight: 20 }}>
+                {t("profile.health_goals_explainer", {
+                  defaultValue:
+                    "These settings power My Day calorie targets, macro guidance, progress charts, and personalized nutrition insights. Complete About You, Your Goal, and Daily Plan to make meal tracking more accurate.",
+                })}
+              </Text>
+            </View>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={foodPrefsInfoVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setFoodPrefsInfoVisible(false)}
+        >
+          <Pressable
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
+            onPress={() => setFoodPrefsInfoVisible(false)}
+          >
+            <View
+              style={[styles.modalContent, { backgroundColor: card, maxHeight: "70%" }]}
+              onStartShouldSetResponder={() => true}
+            >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
+                  {t("profile.food_preferences", { defaultValue: "Food Preferences" })}
+                </Text>
+                <Pressable style={{ marginLeft: 10, marginTop: -6 }} onPress={() => setFoodPrefsInfoVisible(false)} hitSlop={12}>
+                  <MaterialIcons name="close" size={26} color={subText} />
+                </Pressable>
+              </View>
+              <Text style={{ color: subText, fontSize: 14, lineHeight: 20 }}>
+                {t("profile.food_preferences_explainer", {
+                  defaultValue:
+                    "Your dietary restrictions and ingredients to avoid are used to personalize recipe suggestions, imports, and AI-powered meal features so results better match what you can and want to eat.",
+                })}
+              </Text>
+            </View>
+          </Pressable>
+        </Modal>
+
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
-          <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.food_preferences")}</Text>
-          <Text style={{ fontSize: 13, color: subText, marginBottom: 8 }}>
-            {t("profile.food_preferences_explainer")}
-          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
+              {t("profile.health_goals_title", { defaultValue: "Health & Goals" })}
+            </Text>
+            <TouchableOpacity onPress={() => setHealthInfoVisible(true)} style={{ padding: 4 }} activeOpacity={0.7}>
+              <MaterialIcons name="info-outline" size={20} color={subText} />
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[styles.healthRowLink, { borderBottomColor: border }]}
+            onPress={() => openHealthGoalsEditor(0)}
+          >
+            <View style={styles.healthRowCopy}>
+              <View style={styles.healthRowTitleWrap}>
+                <MaterialIcons name="person-outline" size={22} color={text} style={{ marginTop: 1 }} />
+                <Text style={[styles.healthRowTitle, { color: text }]}>
+                  {t("profile.health_about_you", { defaultValue: "About You" })}
+                </Text>
+              </View>
+            </View>
+            <MaterialIcons name="chevron-right" size={22} color={subText} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[styles.healthRowLink, { borderBottomColor: border }]}
+            onPress={() => openHealthGoalsEditor(1)}
+          >
+            <View style={styles.healthRowCopy}>
+              <View style={styles.healthRowTitleWrap}>
+                <MaterialIcons name="flag" size={22} color={text} style={{ marginTop: 1 }} />
+                <Text style={[styles.healthRowTitle, { color: text }]}>
+                  {t("profile.health_your_goal", { defaultValue: "Your Goal" })}
+                </Text>
+              </View>
+            </View>
+            <MaterialIcons name="chevron-right" size={22} color={subText} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[styles.healthRowLink, { borderBottomColor: "transparent" }]}
+            onPress={() => openHealthGoalsEditor(2)}
+          >
+            <View style={styles.healthRowCopy}>
+              <View style={styles.healthRowTitleWrap}>
+                <MaterialIcons name="insights" size={22} color={text} style={{ marginTop: 1 }} />
+                <Text style={[styles.healthRowTitle, { color: text }]}>
+                  {t("profile.health_daily_plan", { defaultValue: "Daily Plan" })}
+                </Text>
+              </View>
+            </View>
+            <MaterialIcons name="chevron-right" size={22} color={subText} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={[styles.sectionCard, { backgroundColor: card }]}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>{t("profile.food_preferences")}</Text>
+            <TouchableOpacity onPress={() => setFoodPrefsInfoVisible(true)} style={{ padding: 4 }} activeOpacity={0.7}>
+              <MaterialIcons name="info-outline" size={20} color={subText} />
+            </TouchableOpacity>
+          </View>
           {/* Dietary Restrictions */}
           <View style={{ borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: border }}>
             <Pressable
@@ -2038,22 +2270,12 @@ export default function Profile() {
               android_ripple={{ color: "#00000010" }}
               onPress={() => setModalDietary(true)}
             >
-              <View style={[styles.row, { borderBottomColor: "transparent", alignItems: "center" }]}>
+              <View style={styles.foodPreferenceTitleRow}>
                 <MaterialIcons name="restaurant-menu" size={22} color={text} style={{ marginTop: 2 }} />
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.rowText, { color: text }]}>{t("profile.dietary_restrictions")}</Text>
                 </View>
-              </View>
-              <View style={[
-                styles.selectedOptionsContainer,
-                { paddingBottom: 7 }
-              ]}>
-                <Text style={[styles.selectedLabel, { color: selectedLabelColor }]}>
-                  {t("common.selected")}
-                </Text>
-                <Text style={[styles.selectedOptionsText, { color: selectedTextColor }]}>
-                  {getDietarySelectedText()}
-                </Text>
+                <MaterialIcons name="chevron-right" size={22} color={subText} />
               </View>
             </Pressable>
           </View>
@@ -2064,22 +2286,12 @@ export default function Profile() {
             android_ripple={{ color: "#00000010" }}
             onPress={() => setModalAvoid(true)}
           >
-            <View style={[styles.row, { borderBottomColor: "transparent", alignItems: "center" }]}>
+            <View style={styles.foodPreferenceTitleRow}>
               <MaterialIcons name="no-food" size={22} color={text} style={{ marginTop: 2 }} />
               <View style={{ flex: 1 }}>
                 <Text style={[styles.rowText, { color: text }]}>{t("profile.ingredients_to_avoid")}</Text>
               </View>
-            </View>
-            <View style={[
-              styles.selectedOptionsContainer,
-              { paddingBottom: 7 }
-            ]}>
-              <Text style={[styles.selectedLabel, { color: selectedLabelColor }]}>
-                {t("common.selected")}
-              </Text>
-              <Text style={[styles.selectedOptionsText, { color: selectedTextColor }]}>
-                {getAvoidSelectedText()}
-              </Text>
+              <MaterialIcons name="chevron-right" size={22} color={subText} />
             </View>
           </Pressable>
         </View>
@@ -2090,7 +2302,7 @@ export default function Profile() {
           onRequestClose={() => setModalDietary(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setModalDietary(false)}
           >
             <View
@@ -2146,7 +2358,7 @@ export default function Profile() {
           onRequestClose={() => setModalAvoid(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setModalAvoid(false)}
           >
             <View
@@ -2231,6 +2443,33 @@ export default function Profile() {
           </Pressable>
         </Modal>
 
+        <HealthGoalsEditorModal
+          visible={healthGoalsVisible}
+          draft={myDayDraft}
+          measurement={measurement as MyDayMeasurementSystem}
+          planMode={dailyPlanMode}
+          initialStep={healthGoalsInitialStep}
+          onClose={() => setHealthGoalsVisible(false)}
+          onSave={() => {
+            Keyboard.dismiss();
+            console.log("[Profile][HealthGoals] save button pressed");
+            setTimeout(() => {
+              saveHealthGoals();
+            }, 60);
+          }}
+          onUpdateField={updateMyDayDraft}
+          onUpdatePlan={updateDraftPlan}
+          onPlanModeChange={(nextMode) => {
+            setDailyPlanMode(nextMode);
+            if (nextMode === "auto") {
+              setManualPlanEdited(false);
+              setMyDayDraft((prev) => buildAutoPlanProfile({ ...prev, isCustomizedPlan: false }));
+            } else {
+              setManualPlanEdited(true);
+            }
+          }}
+        />
+
         {/* General / Other */}
         <View style={[styles.sectionCard, { backgroundColor: card }]}>
           <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.general")}</Text>
@@ -2249,9 +2488,7 @@ export default function Profile() {
 
                   // Keep ThemeContext in sync without relying on effects (avoids loops)
                   const wantTheme = next ? "dark" : "light";
-                  if (theme !== wantTheme) {
-                    toggleTheme();
-                  }
+                  setThemeMode(wantTheme);
                 }}
               />
             </View>
@@ -2312,7 +2549,7 @@ export default function Profile() {
           <TouchableOpacity
             style={[styles.row, { borderBottomColor: border }]}
             activeOpacity={0.7}
-            onPress={() => setFaqModalVisible(true)}
+            onPress={() => router.push("/faq" as any)}
           >
             <MaterialIcons name="help-outline" size={22} color={text} />
             <Text style={[styles.rowText, { color: text }]}>
@@ -2373,7 +2610,7 @@ export default function Profile() {
           onRequestClose={() => setModalLanguage(false)}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setModalLanguage(false)}
           >
             <View
@@ -2404,6 +2641,7 @@ export default function Profile() {
                   }}
                   onPress={() => {
                     const lng = option.code as SupportedLanguage;
+                    lastLocalLanguageChangeRef.current = { language: lng, updatedAt: Date.now() };
                     setLanguage(lng);
                     i18n.changeLanguage(lng);
                     saveUserPrefs({ userLanguage: lng });
@@ -2427,172 +2665,6 @@ export default function Profile() {
           </Pressable>
         </Modal>
 
-        <Modal
-          visible={faqModalVisible}
-          animationType="slide"
-          transparent
-          onRequestClose={() => setFaqModalVisible(false)}
-        >
-          <Pressable
-            style={styles.modalOverlay}
-            onPress={() => setFaqModalVisible(false)}
-          >
-            <View
-              style={[styles.modalContent, { backgroundColor: card }]}
-              onStartShouldSetResponder={() => true}
-            >
-              <View
-                style={{
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginBottom: 8,
-                }}
-              >
-                <Text
-                  style={[
-                    styles.sectionTitle,
-                    { color: sectionTitleColor, marginBottom: 4 },
-                  ]}
-                >
-                  {t("profile.faq") || "Frequently Asked Questions"}
-                </Text>
-                <Pressable
-                  style={{ marginLeft: 10, marginTop: -6 }}
-                  onPress={() => setFaqModalVisible(false)}
-                  hitSlop={12}
-                >
-                  <MaterialIcons name="close" size={26} color={subText} />
-                </Pressable>
-              </View>
-
-              {/* FAQ Search Bar */}
-              <View
-                style={{
-                  marginBottom: 10,
-                  borderRadius: 8,
-                  borderWidth: StyleSheet.hairlineWidth,
-                  borderColor: border,
-                  backgroundColor: bg,
-                  flexDirection: "row",
-                  alignItems: "center",
-                  paddingHorizontal: 10,
-                  paddingVertical: 4,
-                }}
-              >
-                <MaterialIcons
-                  name="search"
-                  size={20}
-                  color={subText}
-                  style={{ marginRight: 6 }}
-                />
-                <TextInput
-                  style={{
-                    flex: 1,
-                    color: text,
-                    fontSize: 14,
-                    paddingVertical: 4,
-                  }}
-                  placeholder={t("faq.search_placeholder") || "Search questions"}
-                  placeholderTextColor={subText}
-                  value={faqSearchQuery}
-                  onChangeText={setFaqSearchQuery}
-                  returnKeyType="search"
-                />
-                {faqSearchQuery.length > 0 && (
-                  <Pressable
-                    onPress={() => setFaqSearchQuery("")}
-                    hitSlop={8}
-                  >
-                    <MaterialIcons name="close" size={18} color={subText} />
-                  </Pressable>
-                )}
-              </View>
-
-              <ScrollView
-                style={{ maxHeight: "80%" }}
-                contentContainerStyle={{ paddingBottom: 10 }}
-                keyboardShouldPersistTaps="handled"
-              >
-                {visibleFaqItems.length === 0 ? (
-                  <Text
-                    style={{
-                      color: subText,
-                      fontSize: 14,
-                      fontStyle: "italic",
-                      paddingVertical: 8,
-                    }}
-                  >
-                    {t("faq.no_results") || "No questions found for your search."}
-                  </Text>
-                ) : (
-                  visibleFaqItems.map((item) => {
-                    const isExpanded = expandedFaqId === item.id;
-                    return (
-                      <View
-                        key={item.id}
-                        style={{
-                          marginBottom: 10,
-                          borderRadius: 10,
-                          borderWidth: StyleSheet.hairlineWidth,
-                          borderColor: border,
-                          backgroundColor: theme === "dark" ? "#111827" : "#f9fafb",
-                          overflow: "hidden",
-                        }}
-                      >
-                        <Pressable
-                          onPress={() => handleToggleFaq(item.id)}
-                          android_ripple={{ color: "#00000010" }}
-                          style={{
-                            paddingHorizontal: 10,
-                            paddingVertical: 10,
-                            flexDirection: "row",
-                            alignItems: "center",
-                          }}
-                        >
-                          <Text
-                            style={{
-                              flex: 1,
-                              color: text,
-                              fontWeight: "600",
-                              fontSize: 15,
-                            }}
-                          >
-                            {item.question}
-                          </Text>
-                          <MaterialIcons
-                            name={isExpanded ? "expand-less" : "expand-more"}
-                            size={22}
-                            color={subText}
-                          />
-                        </Pressable>
-                        {isExpanded && (
-                          <View
-                            style={{
-                              paddingHorizontal: 12,
-                              paddingBottom: 10,
-                            }}
-                          >
-                            <Text
-                              style={{
-                                color: subText,
-                                fontSize: 14,
-                                lineHeight: 20,
-                              }}
-                            >
-                              {item.answer}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
-                    );
-                  })
-                )}
-              </ScrollView>
-            </View>
-          </Pressable>
-        </Modal>
-
         {/* App Info Modal */}
         <Modal
           visible={modalAppInfo}
@@ -2600,7 +2672,7 @@ export default function Profile() {
           transparent
           onRequestClose={() => setModalAppInfo(false)}
         >
-          <View style={styles.modalOverlay}>
+          <View style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}>
             <View style={[styles.modalContent, { backgroundColor: card, minHeight: 180 }]}>
               <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 12 }]}>
                 {t("profile.app_info")}
@@ -2639,7 +2711,7 @@ export default function Profile() {
           }}
         >
           <Pressable
-            style={styles.modalOverlay}
+            style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => {
               if (!contactSending) {
                 setContactModalVisible(false);
@@ -2829,6 +2901,11 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     // color set inline
   },
+  sectionTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
@@ -2842,17 +2919,100 @@ const styles = StyleSheet.create({
     marginLeft: 12,
     flex: 1,
   },
+  authSummaryInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 12,
+  },
+  authSummaryCopy: {
+    marginLeft: 16,
+    flex: 1,
+    minWidth: 0,
+  },
+  authFallbackAvatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  authActionsColumn: {
+    alignItems: "flex-end",
+    justifyContent: "center",
+  },
+  authHeaderAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 6,
+  },
+  authHeaderActionText: {
+    marginLeft: 6,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  authIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editProfilePhotoSection: {
+    marginBottom: 18,
+    alignItems: "center",
+  },
+  editProfilePhotoAvatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+  },
+  editProfilePhotoAction: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    minWidth: 96,
+  },
+  editProfilePhotoActionText: {
+    marginLeft: 6,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  editProfilePhotoProgress: {
+    marginTop: 6,
+    fontSize: 12,
+    textAlign: "center",
+  },
   // Modal and chip styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.25)",
     justifyContent: "flex-end",
   },
   modalContent: {
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
-    padding: 20,
+    padding: 16,
     minHeight: 320,
+  },
+  modalHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  modalActionRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    marginTop: 12,
+    paddingTop: 6,
   },
   chipGroup: {
     flexDirection: "row",
@@ -2875,6 +3035,129 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 8,
   },
+  inlineLink: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  healthInlineValue: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginLeft: 12,
+    marginTop: -2,
+  },
+  healthSummaryCard: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+  },
+  healthGroup: {
+    marginTop: 10,
+  },
+  healthGroupTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    marginBottom: 8,
+  },
+  healthSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 12,
+  },
+  healthSummaryBlock: {
+    flex: 1,
+  },
+  healthSummaryLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  healthSummaryValue: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  healthPlanSummary: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 12,
+  },
+  healthPlanText: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  healthRowLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  healthRowCopy: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  healthRowTitleWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  healthRowTitle: {
+    fontSize: 15,
+    fontWeight: "400",
+    marginLeft: 12,
+    flex: 1,
+  },
+  foodPreferenceTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingTop: 14,
+    paddingBottom: 14,
+    minHeight: 48,
+  },
+  formSectionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  formRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 10,
+  },
+  formFieldHalf: {
+    flex: 1,
+  },
+  formLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  formInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    fontSize: 14,
+  },
+  optionRowWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 10,
+  },
+  optionChip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  healthPlanEditor: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 4,
+  },
   measurementToggleGroup: {
     flexDirection: "row",
     gap: 8,
@@ -2886,42 +3169,52 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     marginLeft: 2,
   },
-  selectedOptionsContainer: {
-    width: "100%",
-    marginTop: 0,
-    marginBottom: 4,
-    marginLeft: 34,
-    flexDirection: "column",
-    alignItems: "flex-start",
-    paddingRight: 12,
-    maxWidth: "95%",
-    // border styles removed
+  cookieHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
-  selectedLabel: {
-    color: "#888",
-    fontSize: 13,
-    fontWeight: "bold",
+  cookieInfoButton: {
+    padding: 6,
   },
-  selectedOptionsText: {
-    color: "#888",
-    fontSize: 13,
-    marginLeft: 0,
+  cookieSettingsRow: {
+    marginTop: 8,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  cookieSettingsIcon: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cookieSettingsCopy: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 12,
+  },
+  cookieSettingsTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  cookieSettingsSubtitle: {
     marginTop: 2,
-    flexShrink: 1,
-    width: "100%",
+    fontSize: 13,
     lineHeight: 18,
   },
-  cookieActionButton: {
-    marginLeft: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 999,
-    borderWidth: 1,
-    backgroundColor: "transparent",
+  cookieBonusRow: {
+    paddingTop: 9,
+    paddingBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
   },
-  cookieActionButtonText: {
+  cookieBonusText: {
+    marginLeft: 7,
+    flex: 1,
     color: "#E27D60",
-    fontWeight: "800",
     fontSize: 13,
-  }
+    fontWeight: "800",
+    lineHeight: 18,
+  },
 });

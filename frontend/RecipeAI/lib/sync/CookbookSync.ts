@@ -1,10 +1,11 @@
 // lib/sync/CookbookSync.ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth } from "../../firebaseConfig";
+import { getApiBaseUrl } from "../config/api";
 import type { CookbookDoc, LocalEntity } from "./types";
 import { resolveByUpdatedAt } from "./conflictStrategy";
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || "http://10.0.2.2:3000";
+const API_BASE_URL = getApiBaseUrl() || "http://10.0.2.2:3000";
 
 
 const AS_KEY_COOKBOOKS = "sync_cookbooks";

@@ -13,6 +13,7 @@ import {
   Modal,
   TouchableWithoutFeedback,
   Pressable,
+  ActivityIndicator,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -20,10 +21,31 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { useThemeColors } from "../../../context/ThemeContext";
 import { getAuth, signInAnonymously } from "firebase/auth";
 import { getDeviceId } from "../../../utils/deviceId";
+import { getApiBaseUrl } from "../../../lib/config/api";
+import {
+  fetchEconomyCatalogBundle,
+  fetchEconomySnapshot,
+  shouldHidePremiumPricing,
+  writeCachedEconomySnapshot,
+  type EconomyCatalogOffer,
+} from "../../../lib/economy/client";
 import AppCard from "../../../components/AppCard";
-import { MaterialIcons } from "@expo/vector-icons";
+import InsufficientCookiesModal from "../../../components/InsufficientCookiesModal";
+import EggIcon from "../../../components/EggIcon";
+import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { syncEngine } from "../../../lib/sync/SyncEngine";
+import {
+  RecipeNutritionInfo,
+  getRecipeCaloriesPerServing,
+} from "../../../lib/recipes/nutrition";
+import { normalizeRecipeDifficulty } from "../../../lib/recipes/difficulty";
+import {
+  buildRecipeMealLoggingRepresentation,
+  estimateRecipeNutrition,
+  resolveRecipeNutritionEstimate,
+  SavedRecipe,
+} from "../../../lib/myDayRecipes";
 
 const defaultImage = require("../../../assets/default_recipe.png");
 
@@ -42,6 +64,17 @@ interface Recipe {
   image?: string;
   cookbooks?: (string | { id: string; name: string })[];
   isDeleted?: boolean;
+  nutritionInfo?: RecipeNutritionInfo | null;
+  nutritionEstimateMeta?: {
+    ingredientsSignature: string;
+    perServing: {
+      calories: string;
+      protein: string;
+      carbs: string;
+      fat: string;
+    };
+  } | null;
+  mealLoggingRepresentation?: SavedRecipe["mealLoggingRepresentation"];
 }
 
 interface Cookbook {
@@ -57,39 +90,36 @@ interface Cookbook {
 export default function RecipeDetail() {
   const insets = useSafeAreaInsets();
   const auth = getAuth();
-  const { id, recipe, from } = useLocalSearchParams<{ id?: string; recipe?: string; from?: string }>();
+  const { id, recipe, from, tempRecipeKey } = useLocalSearchParams<{
+    id?: string;
+    recipe?: string;
+    from?: string;
+    tempRecipeKey?: string;
+  }>();
   const [currentRecipe, setCurrentRecipe] = useState<Recipe | null>(null);
   const [servings, setServings] = useState<number>(1);
   const [cookbookNames, setCookbookNames] = useState<string[]>([]);
   const [isSaved, setIsSaved] = useState(false);
+  const [isEstimatingNutrition, setIsEstimatingNutrition] = useState(false);
   const router = useRouter();
   const { bg, text, subText } = useThemeColors();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // economy / cookies gating (cookbook creation)
-  const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+  const backendUrl = getApiBaseUrl();
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   const isDark = bg !== "#fff";
 
-  const [insufficientModal, setInsufficientModal] = useState<{ visible: boolean; remaining: number }>(
-    { visible: false, remaining: 0 }
+  const [insufficientModal, setInsufficientModal] = useState<{
+    visible: boolean;
+    remaining: number;
+    context: "cookbook" | "nutrition_estimate";
+  }>(
+    { visible: false, remaining: 0, context: "cookbook" }
   );
-
-  const [offerCookies5, setOfferCookies5] = useState<
-    | null
-    | {
-        id: string;
-        title: string;
-        subtitle?: string | null;
-        price: number;
-        currency: string;
-        cookies: number;
-        badges?: string[];
-        isPromo?: boolean;
-        bonusCookies?: number;
-        mostPurchased?: boolean;
-      }
-  >(null);
+  const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
+  const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
+  const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
   const editRecipe = () => {
     if (!currentRecipe) return;
     router.push({
@@ -99,97 +129,53 @@ export default function RecipeDetail() {
   };
 
 
-  const goToStore = (highlightOfferId?: string) => {
+  const goToStore = (highlightOfferId?: string, autoBuy = false) => {
     try {
       router.push({
         pathname: "/economy/store",
-        params: highlightOfferId ? { highlight: highlightOfferId } : undefined,
+        params: highlightOfferId
+          ? autoBuy
+            ? { highlight: highlightOfferId, autoBuy: "1" }
+            : { highlight: highlightOfferId }
+          : undefined,
       } as any);
     } catch {
       router.push("/economy/store" as any);
     }
   };
 
-  const openInsufficientCookiesModal = async (remaining: number | null | undefined) => {
+  const openInsufficientCookiesModal = async (
+    remaining: number | null | undefined,
+    context: "cookbook" | "nutrition_estimate" = "cookbook"
+  ) => {
     const rem = typeof remaining === "number" ? remaining : 0;
 
-    // Fetch offer cookies_5 so the modal matches the Store cards.
-    if (!offerCookies5 && backendUrl) {
+    if ((!featuredOffer || availableRewardsCount === 0) && backendUrl) {
       try {
-        const currentUser = auth.currentUser;
-        const idToken = currentUser ? await currentUser.getIdToken() : null;
-        const deviceId = await getDeviceId().catch(() => null);
-        const userId = currentUser?.uid ?? null;
-
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          "x-app-env": appEnv,
-        };
-        if (idToken) headers.Authorization = `Bearer ${idToken}`;
-        if (deviceId) headers["x-device-id"] = deviceId;
-        if (userId) headers["x-user-id"] = userId;
-
-        const res = await fetch(`${backendUrl}/economy/catalog`, { headers });
-        const data = await res.json().catch(() => null);
-        const root = (data as any)?.data ?? data;
-        const rawOffers: any[] =
-          (root?.catalog?.offers && Array.isArray(root.catalog.offers) ? root.catalog.offers : null) ||
-          (root?.offers && Array.isArray(root.offers) ? root.offers : null) ||
-          [];
-
-        const o5 = rawOffers.find(
-          (o: any) => String(o?.id ?? o?.offerId ?? o?.productId ?? "").trim() === "cookies_5"
+        const catalog = await fetchEconomyCatalogBundle({ backendUrl, appEnv, auth });
+        const featured = catalog.offers.find((offer) => String(offer.id).trim() === "cookies_15");
+        if (featured) setFeaturedOffer(featured);
+        setAvailableRewardsCount(
+          Array.isArray(catalog.bonuses)
+            ? catalog.bonuses.filter((bonus) => bonus?.status === "available").length
+            : 0
         );
-
-        if (o5) {
-          const currency = String(o5?.currency ?? root?.catalog?.currency ?? root?.currency ?? "USD").toUpperCase();
-          setOfferCookies5({
-            id: "cookies_5",
-            title: String(o5?.title ?? o5?.name ?? "").trim() || "5 Cookies",
-            subtitle:
-              (typeof o5?.subtitle === "string"
-                ? o5.subtitle
-                : typeof o5?.description === "string"
-                  ? o5.description
-                  : null) ?? null,
-            price: typeof o5?.price === "number" ? o5.price : Number(o5?.amount ?? 0),
-            currency,
-            cookies: Math.max(0, Math.floor(Number(o5?.cookies ?? o5?.cookieAmount ?? o5?.qty ?? 0))),
-            badges: Array.isArray(o5?.badges) ? o5.badges.filter((b: any) => typeof b === "string") : undefined,
-            isPromo: typeof o5?.isPromo === "boolean" ? o5.isPromo : undefined,
-            bonusCookies: typeof o5?.bonusCookies === "number" ? o5.bonusCookies : undefined,
-            mostPurchased: typeof o5?.mostPurchased === "boolean" ? o5.mostPurchased : undefined,
-          });
-        }
       } catch {
         // ignore
       }
     }
 
-    setInsufficientModal({ visible: true, remaining: rem });
+    setInsufficientModal({ visible: true, remaining: rem, context });
   };
 
   const fetchCookieBalanceSafe = async (): Promise<number | null> => {
     try {
-      if (!backendUrl) return null;
-      const currentUser = auth.currentUser;
-      const idToken = currentUser ? await currentUser.getIdToken() : null;
-      const deviceId = await getDeviceId().catch(() => null);
-      const userId = currentUser?.uid ?? null;
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "x-app-env": appEnv,
-      };
-      if (idToken) headers.Authorization = `Bearer ${idToken}`;
-      if (deviceId) headers["x-device-id"] = deviceId;
-      if (userId) headers["x-user-id"] = userId;
-
-      const res = await fetch(`${backendUrl}/economy/balance`, { method: "GET", headers });
-      if (!res.ok) return null;
-      const data = await res.json().catch(() => null);
-      const bal = (data as any)?.balance;
-      return typeof bal === "number" ? bal : null;
+      const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth });
+      if (!snapshot) return null;
+      setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+      await writeCachedEconomySnapshot(auth.currentUser?.uid, snapshot);
+      if (shouldHidePremiumPricing(snapshot.freePremiumActionsRemaining)) return null;
+      return snapshot.balance;
     } catch {
       return null;
     }
@@ -203,6 +189,25 @@ export default function RecipeDetail() {
     await openInsufficientCookiesModal(bal);
     return false;
   };
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          const snapshot = await fetchEconomySnapshot({ backendUrl, appEnv, auth });
+          if (!snapshot || cancelled) return;
+          setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+          await writeCachedEconomySnapshot(auth.currentUser?.uid, snapshot);
+        } catch {
+          // ignore
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [backendUrl, appEnv])
+  );
 
   const ensureAuthUid = async (): Promise<{ uid: string; token: string } | null> => {
     try {
@@ -220,16 +225,37 @@ export default function RecipeDetail() {
     }
   };
 
-  const consumeCookbookCookieIfNeeded = async (): Promise<boolean> => {
+  const buildIngredientsSignature = (lines: unknown) => {
+    if (Array.isArray(lines)) {
+      return lines
+        .map((line) => String(line || "").trim())
+        .filter(Boolean)
+        .join("|");
+    }
+
+    if (typeof lines === "string") {
+      return lines
+        .split(/\r?\n/)
+        .map((line) => String(line || "").trim())
+        .filter(Boolean)
+        .join("|");
+    }
+
+    return "";
+  };
+
+  const requestNutritionEstimateEconomy = async (
+    mode: "preview" | "commit"
+  ): Promise<boolean> => {
     try {
       if (!backendUrl) {
-        console.warn("[RecipeDetail] No backend URL configured; skipping economy consume for cookbook");
+        console.warn("[RecipeDetail] No backend URL configured; skipping economy consume for nutrition estimate");
         return true;
       }
 
       const authInfo = await ensureAuthUid();
       if (!authInfo?.token) {
-        console.warn("[RecipeDetail] Missing auth token for economy consume; blocking cookbook creation");
+        console.warn("[RecipeDetail] Missing auth token for nutrition estimate consume; blocking estimate");
         Alert.alert(
           t("common.error", "Error"),
           t("economy.auth_required", "Please sign in again and try one more time.")
@@ -252,17 +278,14 @@ export default function RecipeDetail() {
       if (deviceId) headers["x-device-id"] = deviceId;
       if (authInfo.uid) headers["x-user-id"] = authInfo.uid;
 
-      const res = await fetch(`${backendUrl}/economy/consume`, {
+      const res = await fetch(`${backendUrl}/recipes/estimate-nutrition/charge`, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          action: "create_cookbook",
-          uid: authInfo.uid,
-        }),
+        body: JSON.stringify({ uid: authInfo.uid, preview: mode === "preview" }),
       });
 
       if (res.status === 404) {
-        const ok = await ensureHasCookiesOrPrompt(1);
+        const ok = await ensureHasCookiesOrPrompt(2);
         return ok;
       }
 
@@ -275,7 +298,7 @@ export default function RecipeDetail() {
         } catch {
           // ignore
         }
-        await openInsufficientCookiesModal(remaining);
+        await openInsufficientCookiesModal(remaining, "nutrition_estimate");
         return false;
       }
 
@@ -299,27 +322,14 @@ export default function RecipeDetail() {
       if (res.ok) {
         try {
           const data = await res.json().catch(() => null);
-          const allowedFlag = (data as any)?.allowed;
-          const successFlag = (data as any)?.success;
-
           const remaining =
             typeof (data as any)?.remaining === "number"
               ? (data as any).remaining
               : typeof (data as any)?.balance === "number"
                 ? (data as any).balance
                 : null;
-
-          if (allowedFlag === false || successFlag === false) {
-            await openInsufficientCookiesModal(remaining);
-            return false;
-          }
-
           if (typeof remaining === "number") {
-            try {
-              await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
-            } catch {
-              // ignore
-            }
+            await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
           }
         } catch {
           // ignore
@@ -338,14 +348,14 @@ export default function RecipeDetail() {
 
       Alert.alert(
         t("common.error", "Error"),
-        message || t("wizard.error_generate", "Something went wrong. Please try again.")
+        message || "We couldn't estimate the nutrition values right now."
       );
       return false;
     } catch (err) {
-      console.warn("[RecipeDetail] economy/consume exception; blocking cookbook creation to avoid bypass", err);
+      console.warn("[RecipeDetail] nutrition estimate consume exception; blocking estimate", err);
       Alert.alert(
         t("common.error", "Error"),
-        t("economy.try_again", "Couldn't verify your Cookie balance. Please try again.")
+        t("economy.try_again", "Couldn't verify your Egg balance. Please try again.")
       );
       return false;
     }
@@ -373,8 +383,20 @@ export default function RecipeDetail() {
             }
           }
 
-          // 2) Also parse recipe param if present (may come from navigation)
-          if (recipe) {
+          // 2) Try a temporary local recipe handoff key (used by AI Kitchen)
+          if (tempRecipeKey) {
+            try {
+              const tempStored = await AsyncStorage.getItem(tempRecipeKey as string);
+              if (tempStored) {
+                paramRecipe = JSON.parse(tempStored) as Recipe;
+              }
+            } catch (e) {
+              console.warn("[RecipeDetail] Failed to load temp recipe param:", e);
+            }
+          }
+
+          // 3) Also parse recipe param if present (may come from navigation)
+          if (!paramRecipe && recipe) {
             try {
               paramRecipe = JSON.parse(recipe as string) as Recipe;
             } catch (e) {
@@ -382,7 +404,7 @@ export default function RecipeDetail() {
             }
           }
 
-          // 3) Merge both, preferring storedRecipe but falling back to paramRecipe for any missing fields
+          // 4) Merge both, preferring storedRecipe but falling back to paramRecipe for any missing fields
           let merged: Recipe | null = null;
           if (storedRecipe && paramRecipe) {
             merged = {
@@ -531,7 +553,9 @@ export default function RecipeDetail() {
   }
 
   const handleBack = () => {
-    if (from === "history") {
+    if (from === "ai-kitchen") {
+      router.replace("/");
+    } else if (from === "history") {
       router.replace("/(tabs)/history");
     } else if (from && from.startsWith("cookbook:")) {
       const cookbookId = from.split(":")[1];
@@ -543,10 +567,10 @@ export default function RecipeDetail() {
 
   const deleteRecipe = async () => {
     if (!currentRecipe) return;
-    Alert.alert("Delete Recipe", "Are you sure?", [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(t("recipes.delete_recipe_confirm"), t("recipes.delete_recipe_desc"), [
+      { text: t("common.cancel"), style: "cancel" },
       {
-        text: "Delete",
+        text: t("common.delete"),
         style: "destructive",
         onPress: async () => {
           // Mark deleted locally (dirty) + trigger a full sync.
@@ -566,7 +590,7 @@ export default function RecipeDetail() {
 
           // 🔹 Analytics: manual recipe deleted (reuses /analytics-event)
           try {
-            const backendUrl = process.env.EXPO_PUBLIC_API_URL;
+            const backendUrl = getApiBaseUrl();
             if (backendUrl && currentRecipe) {
               const currentUser = auth.currentUser;
               const userId = currentUser?.uid ?? null;
@@ -645,7 +669,7 @@ const shareRecipe = async () => {
       title: currentRecipe.title,
     });
   } catch (error) {
-    Alert.alert("Error", "Failed to share recipe");
+    Alert.alert(t("common.error_generic"), t("recipes.share_error"));
   }
 };
 
@@ -701,12 +725,6 @@ const saveRecipe = async () => {
           let updatedCookbooks = [...existingCookbooks];
 
           for (const missingId of missingIds) {
-            const allowed = await consumeCookbookCookieIfNeeded();
-            if (!allowed) {
-              // Do not proceed with saving the recipe if cookbook creation is blocked.
-              return;
-            }
-
             const fromObj = cookbookObjsInRecipe.find((o) => o.id === missingId);
             const name = (fromObj?.name || "").trim() || t("recipes.cookbook");
             const now = Date.now();
@@ -835,11 +853,197 @@ const saveRecipe = async () => {
       }
     }
 
-    Alert.alert("Success", "Recipe saved successfully");
+    Alert.alert(t("common.done"), t("recipes.save_success"));
     setIsSaved(true);
   } catch (error) {
-    Alert.alert("Error", "Failed to save recipe");
+    Alert.alert(t("common.error_generic"), t("recipes.save_error"));
     console.error("Failed to save recipe:", error);
+  }
+};
+
+const estimateNutritionForRecipe = async () => {
+  if (!currentRecipe || !Array.isArray(currentRecipe.ingredients) || currentRecipe.ingredients.length === 0) {
+    return;
+  }
+
+  let recipeForEstimate: SavedRecipe | null = null;
+  try {
+    const allowed = await requestNutritionEstimateEconomy("preview");
+    if (!allowed) return;
+
+    setIsEstimatingNutrition(true);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    recipeForEstimate = {
+      id: currentRecipe.id,
+      title: currentRecipe.title,
+      servings: Math.max(Number(currentRecipe.servings) || 1, 1),
+      ingredients: currentRecipe.ingredients || [],
+      nutritionInfo: null,
+      nutrition: null,
+    };
+    let nutrition;
+    let mealLoggingRepresentation = buildRecipeMealLoggingRepresentation(recipeForEstimate, 8);
+    try {
+      const resolved = await resolveRecipeNutritionEstimate(recipeForEstimate, i18n.language);
+      nutrition = resolved.nutrition;
+      mealLoggingRepresentation = resolved.mealLoggingRepresentation;
+    } catch (error) {
+      console.warn("[RecipeDetail] resolveRecipeNutritionEstimate failed, using local fallback", error);
+      nutrition = estimateRecipeNutrition(recipeForEstimate);
+    }
+
+    const committed = await requestNutritionEstimateEconomy("commit");
+    if (!committed) return;
+
+    const nutritionInfo: RecipeNutritionInfo = {
+      perServing: {
+        calories: nutrition.caloriesPerServing,
+        protein: nutrition.proteinPerServing,
+        carbs: nutrition.carbsPerServing,
+        fat: nutrition.fatPerServing,
+      },
+      source: "estimated",
+      updatedAt: new Date().toISOString(),
+    };
+
+    const updatedRecipe: Recipe = {
+      ...currentRecipe,
+      nutritionInfo,
+      mealLoggingRepresentation,
+      nutritionEstimateMeta: {
+        ingredientsSignature: buildIngredientsSignature(currentRecipe.ingredients),
+        perServing: {
+          calories: String(nutritionInfo.perServing.calories ?? ""),
+          protein: String(nutritionInfo.perServing.protein ?? ""),
+          carbs: String(nutritionInfo.perServing.carbs ?? ""),
+          fat: String(nutritionInfo.perServing.fat ?? ""),
+        },
+      },
+    };
+
+    setCurrentRecipe(updatedRecipe);
+
+    try {
+      const stored = await AsyncStorage.getItem("recipes");
+      const arr: Recipe[] = stored ? JSON.parse(stored) : [];
+      const next = arr.map((recipe) => (recipe.id === updatedRecipe.id ? updatedRecipe : recipe));
+      await AsyncStorage.setItem("recipes", JSON.stringify(next));
+
+      if (syncEngine && typeof (syncEngine as any).saveLocalRecipesSnapshot === "function") {
+        try {
+          await (syncEngine as any).saveLocalRecipesSnapshot(next);
+        } catch {
+          // ignore and keep local AsyncStorage copy
+        }
+      }
+
+      if (syncEngine && typeof (syncEngine as any).markRecipeDirty === "function") {
+        const nowTs = Date.now();
+        const difficultyForSync =
+          updatedRecipe.difficulty === "Easy"
+            ? "easy"
+            : updatedRecipe.difficulty === "Moderate"
+            ? "medium"
+            : "hard";
+
+        const costForSync =
+          updatedRecipe.cost === "Cheap"
+            ? "low"
+            : updatedRecipe.cost === "Medium"
+            ? "medium"
+            : updatedRecipe.cost === "Expensive"
+            ? "high"
+            : null;
+
+        const cookbookIds = Array.isArray(updatedRecipe.cookbooks)
+          ? updatedRecipe.cookbooks
+              .map((cb: any) => (typeof cb === "string" ? cb : cb?.id))
+              .filter((v: any) => typeof v === "string" && v.trim().length > 0)
+          : [];
+
+        const createdAtTs = (() => {
+          const v = (updatedRecipe as any)?.createdAt;
+          if (typeof v === "number") return v;
+          if (typeof v === "string") {
+            const ms = Date.parse(v);
+            return Number.isFinite(ms) ? ms : nowTs;
+          }
+          return nowTs;
+        })();
+
+        const imageUrlForSync =
+          typeof updatedRecipe.image === "string" && updatedRecipe.image.trim()
+            ? updatedRecipe.image.trim()
+            : null;
+
+        await (syncEngine as any).markRecipeDirty({
+          id: updatedRecipe.id,
+          title: updatedRecipe.title,
+          imageUrl: imageUrlForSync,
+          cookingTimeMinutes: updatedRecipe.cookingTime || 30,
+          servings: updatedRecipe.servings || 2,
+          difficulty: difficultyForSync,
+          ...(costForSync !== null ? { cost: costForSync } : {}),
+          ingredients: Array.isArray(updatedRecipe.ingredients) ? [...updatedRecipe.ingredients] : [],
+          steps: Array.isArray(updatedRecipe.steps) ? [...updatedRecipe.steps] : [],
+          cookbookIds,
+          tags: Array.isArray(updatedRecipe.tags) ? [...updatedRecipe.tags] : [],
+          nutritionInfo: updatedRecipe.nutritionInfo ?? null,
+          createdAt: createdAtTs,
+          updatedAt: nowTs,
+          isDeleted: false,
+        });
+
+        if (typeof (syncEngine as any).syncAll === "function") {
+          await (syncEngine as any).syncAll("manual", { bypassThrottle: true });
+        } else if (typeof (syncEngine as any).requestSync === "function") {
+          (syncEngine as any).requestSync("manual");
+        }
+      }
+    } catch (persistError) {
+      console.warn("[RecipeDetail] estimateNutritionForRecipe persistence warning", persistError);
+    }
+  } catch (error) {
+    console.warn("[RecipeDetail] estimateNutritionForRecipe failed", error);
+    if (recipeForEstimate && currentRecipe) {
+      try {
+        const fallback = estimateRecipeNutrition(recipeForEstimate);
+        const fallbackNutritionInfo: RecipeNutritionInfo = {
+          perServing: {
+            calories: fallback.caloriesPerServing,
+            protein: fallback.proteinPerServing,
+            carbs: fallback.carbsPerServing,
+            fat: fallback.fatPerServing,
+          },
+          source: "estimated",
+          updatedAt: new Date().toISOString(),
+        };
+
+        const fallbackRecipe: Recipe = {
+          ...currentRecipe,
+          nutritionInfo: fallbackNutritionInfo,
+          mealLoggingRepresentation: buildRecipeMealLoggingRepresentation(recipeForEstimate, 8),
+          nutritionEstimateMeta: {
+            ingredientsSignature: buildIngredientsSignature(currentRecipe.ingredients),
+            perServing: {
+              calories: String(fallbackNutritionInfo.perServing.calories ?? ""),
+              protein: String(fallbackNutritionInfo.perServing.protein ?? ""),
+              carbs: String(fallbackNutritionInfo.perServing.carbs ?? ""),
+              fat: String(fallbackNutritionInfo.perServing.fat ?? ""),
+            },
+          },
+        };
+
+        setCurrentRecipe(fallbackRecipe);
+        return;
+      } catch (fallbackError) {
+        console.warn("[RecipeDetail] local fallback estimate failed", fallbackError);
+      }
+    }
+    Alert.alert(t("common.error_generic"), t("recipes.nutrition_estimate_error"));
+  } finally {
+    setIsEstimatingNutrition(false);
   }
 };
 
@@ -878,20 +1082,19 @@ const getRecipeImageSource = () => {
 const imageSource = getRecipeImageSource();
 
 
-// Mappings for difficulty and cost
+// Mappings for difficulty
 const difficultyMap = {
   Easy: t("difficulty.easy"),
   Moderate: t("difficulty.moderate"),
   Challenging: t("difficulty.challenging"),
 };
-const costMap = {
-  Cheap: t("cost.cheap"),
-  Medium: t("cost.medium"),
-  Expensive: t("cost.expensive"),
-};
 
 // Use map to always show emoji label
-const difficultyDisplay = currentRecipe ? (difficultyMap[currentRecipe.difficulty] || currentRecipe.difficulty) : "";
+const normalizedDifficulty = currentRecipe ? normalizeRecipeDifficulty(currentRecipe.difficulty) : "Easy";
+const difficultyDisplay = currentRecipe
+  ? difficultyMap[normalizedDifficulty] || normalizedDifficulty
+  : "";
+const caloriesPerServing = getRecipeCaloriesPerServing(currentRecipe);
 
 return (
   <SafeAreaView style={{ flex: 1, backgroundColor: bg }}>
@@ -948,15 +1151,24 @@ return (
           {/* Quick Info */}
           <AppCard>
             <View style={styles.quickInfo}>
-              <Text style={[styles.quickInfoText, { color: text }]}>
-                ⏱ {currentRecipe.cookingTime} min
-              </Text>
-              <Text style={[styles.quickInfoText, { color: text }]}>
-                {difficultyDisplay}
-              </Text>
-              <Text style={[styles.quickInfoText, { color: text }]}>
-                {costMap[currentRecipe.cost]}
-              </Text>
+              <View style={styles.quickInfoItem}>
+                <Text style={[styles.quickInfoText, { color: text }]}>
+                  ⏱ {currentRecipe.cookingTime} min
+                </Text>
+              </View>
+              <View style={styles.quickInfoItem}>
+                <Text style={[styles.quickInfoText, { color: text }]}>
+                  {difficultyDisplay}
+                </Text>
+              </View>
+              {caloriesPerServing !== null ? (
+                <View style={styles.quickInfoItem}>
+                  <MaterialCommunityIcons name="fire" size={16} color="#E27D60" />
+                  <Text style={[styles.quickInfoText, { color: text }]}>
+                    {`${Math.round(caloriesPerServing)} kcal`}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </AppCard>
 
@@ -966,7 +1178,7 @@ return (
           </Text>
           <AppCard>
             <View style={styles.servingsRow}>
-              <Text style={[styles.servingsLabel, { color: text }]}>
+              <Text style={styles.servingsLabel}>
                 {t("recipes.servings", { count: servings })}
               </Text>
               <View style={{ flexDirection: "row" }}>
@@ -986,6 +1198,7 @@ return (
                 </TouchableOpacity>
               </View>
             </View>
+            <View style={[styles.servingsDivider, { backgroundColor: `${text}1F` }]} />
             {currentRecipe.ingredients.map((ing, i) => (
               <Text key={i} style={[styles.text, { color: text }]}>
                 • {scaleIngredient(ing)}
@@ -1000,10 +1213,128 @@ return (
           <AppCard>
             {currentRecipe.steps.map((step, i) => (
               <Text key={i} style={[styles.text, { color: text }]}>
-                {step}
+                • {step}
               </Text>
             ))}
           </AppCard>
+
+          {currentRecipe.nutritionInfo ? (
+            <>
+              <Text style={[styles.sectionTitle, { color: text }]}>
+                {t("recipes.nutrition_info", { defaultValue: "Nutrition per serving" })}
+              </Text>
+              <AppCard>
+                <View style={styles.nutritionGrid}>
+                  {[
+                    {
+                      key: "calories",
+                      label: t("recipes.nutrition_calories", { defaultValue: "Calories" }),
+                      value: currentRecipe.nutritionInfo.perServing.calories,
+                      unit: "kcal",
+                    },
+                    {
+                      key: "protein",
+                      label: t("recipes.nutrition_protein", { defaultValue: "Protein" }),
+                      value: currentRecipe.nutritionInfo.perServing.protein,
+                      unit: "g",
+                    },
+                    {
+                      key: "carbs",
+                      label: t("recipes.nutrition_carbs", { defaultValue: "Carbs" }),
+                      value: currentRecipe.nutritionInfo.perServing.carbs,
+                      unit: "g",
+                    },
+                    {
+                      key: "fat",
+                      label: t("recipes.nutrition_fat", { defaultValue: "Fat" }),
+                      value: currentRecipe.nutritionInfo.perServing.fat,
+                      unit: "g",
+                    },
+                  ].map((item) => (
+                    <View key={item.key} style={styles.nutritionItem}>
+                      <Text style={[styles.nutritionLabel, { color: subText }]}>{item.label}</Text>
+                      <View style={styles.nutritionValueRow}>
+                        <Text style={[styles.nutritionValue, { color: text }]}>
+                          {item.value ?? "—"}
+                        </Text>
+                        <Text style={[styles.nutritionUnit, { color: subText }]}>{item.unit}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </AppCard>
+            </>
+          ) : (
+            <>
+              <Text style={[styles.sectionTitle, { color: text }]}>
+                {t("recipes.nutrition_info", { defaultValue: "Nutrition per serving" })}
+              </Text>
+              <AppCard>
+                <Text style={[styles.nutritionEmptyText, { color: subText }]}>
+                  {t("recipes.nutrition_estimate_prompt", {
+                    defaultValue: "Estimate the nutrition values automatically from this recipe's ingredients.",
+                  })}
+                </Text>
+                <TouchableOpacity
+                  disabled={isEstimatingNutrition}
+                  onPress={estimateNutritionForRecipe}
+                  activeOpacity={0.85}
+                  style={[
+                    styles.estimateButton,
+                    {
+                      backgroundColor: isEstimatingNutrition
+                        ? isDark
+                          ? "#3b4352"
+                          : "#d7dce5"
+                        : bg !== "#fff"
+                        ? "#E27D60"
+                        : "#293a53",
+                      borderColor: isEstimatingNutrition
+                        ? isDark
+                          ? "#3b4352"
+                          : "#d7dce5"
+                        : bg !== "#fff"
+                        ? "#E27D60"
+                        : "#293a53",
+                      opacity: isEstimatingNutrition ? 0.7 : 1,
+                      alignSelf: "flex-start",
+                    },
+                  ]}
+                >
+                  {isEstimatingNutrition ? (
+                    <View style={styles.estimateButtonLoadingContent}>
+                      <ActivityIndicator size="small" color="#fff" />
+                      <Text style={[styles.estimateButtonText, { color: "#fff" }]}>
+                        {t("recipes.nutrition_estimate_loading_cta", {
+                          defaultValue: "Checking ingredients",
+                        })}
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+                      <Text style={[styles.estimateButtonText, { color: "#fff" }]}>
+                        {t("recipes.ai_estimate", { defaultValue: "AI Estimate" })}
+                      </Text>
+                      {shouldHidePremiumPricing(freePremiumActionsRemaining) ? null : (
+                        <>
+                          <EggIcon size={14} variant="mono" tintColor="#fff" />
+                          <Text style={[styles.estimateButtonCost, { color: "#fff" }]}>1</Text>
+                        </>
+                      )}
+                    </>
+                  )}
+                </TouchableOpacity>
+                {isEstimatingNutrition ? (
+                  <Text style={[styles.nutritionEstimateLoadingText, { color: subText }]}>
+                    {t("recipes.nutrition_estimate_loading_help", {
+                      defaultValue:
+                        "We’re checking this recipe’s ingredients. If some aren’t in our nutrition catalog yet, we’ll use AI to estimate them for you.",
+                    })}
+                  </Text>
+                ) : null}
+              </AppCard>
+            </>
+          )}
 
           {/* Cookbook */}
           <Text style={[styles.sectionTitle, { color: text }]}>
@@ -1076,129 +1407,31 @@ return (
         </Animated.View>
 
         {/* Insufficient cookies modal (cookbooks) */}
-        <Modal
+        <InsufficientCookiesModal
           visible={insufficientModal.visible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-        >
-          <Pressable
-            style={styles.modalBackdrop}
-            onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-          />
-          <View style={styles.modalCenter}>
-            <View
-              style={[
-                styles.modalCard,
-                {
-                  backgroundColor: isDark ? "#1f2430" : "#fff",
-                  borderColor: isDark ? "#ffffff22" : "#00000012",
-                },
-              ]}
-            >
-              <TouchableOpacity
-                onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-                style={styles.modalCloseBtn}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
-              </TouchableOpacity>
-
-              <Text style={[styles.modalTitleCookies, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                {t("economy.insufficient_title", "Not enough Cookies")}
-              </Text>
-
-              <Text style={[styles.modalBodyCookies, { color: isDark ? "#ddd" : "#444" }]}>
-                {t("economy.insufficient_cookbook_body_short", {
-                  remaining: insufficientModal.remaining,
-                  defaultValue: `You need 1 Cookie to create a new cookbook. You have ${insufficientModal.remaining}.`,
-                })}
-              </Text>
-
-              {offerCookies5 ? (
-                <View
-                  style={[
-                    styles.modalOfferCard,
-                    {
-                      backgroundColor: isDark ? "#171b24" : "#fff",
-                      borderColor: isDark ? "#ffffff22" : "#00000012",
-                    },
-                  ]}
-                >
-                  <View style={styles.modalOfferLeft}>
-                    <View style={styles.modalOfferTopRow}>
-                      <View style={styles.modalOfferTopLeft}>
-                        <Text style={[styles.modalOfferTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                          🍪 {offerCookies5.cookies} {t("economy.cookies", "Cookies")}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <Text style={[styles.modalOfferPriceLine, { color: isDark ? "#ddd" : "#666" }]}>
-                      {offerCookies5.subtitle
-                        ? `${offerCookies5.subtitle} | ${offerCookies5.price.toFixed(2)} ${String(
-                            offerCookies5.currency || "USD"
-                          ).toUpperCase()}`
-                        : `${offerCookies5.price.toFixed(2)} ${String(
-                            offerCookies5.currency || "USD"
-                          ).toUpperCase()}`}
-                    </Text>
-                  </View>
-
-                  <View style={styles.modalOfferRight}>
-                    <TouchableOpacity
-                      style={styles.buyBtnCookies}
-                      onPress={() => {
-                        setInsufficientModal((s) => ({ ...s, visible: false }));
-                        goToStore("cookies_5");
-                      }}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={styles.buyBtnTextCookies}>{t("economy.buy", "Buy")}</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ) : null}
-
-              <View style={styles.modalActionsRow}>
-                <TouchableOpacity
-                  style={[
-                    styles.modalActionBtn,
-                    {
-                      backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                      borderColor: isDark ? "#ffffff22" : "#00000012",
-                    },
-                  ]}
-                  onPress={() => {
-                    setInsufficientModal((s) => ({ ...s, visible: false }));
-                    goToStore();
-                  }}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                    {t("economy.offers_button", "Other offers")}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.modalActionBtn,
-                    {
-                      backgroundColor: isDark ? "#2b3141" : "#eef1f6",
-                      borderColor: isDark ? "#ffffff22" : "#00000012",
-                    },
-                  ]}
-                  onPress={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.modalActionText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                    {t("wizard.button_back", "Back")}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          isDark={isDark}
+          title={t("economy.insufficient_title", "Not enough Eggs")}
+          body={
+            insufficientModal.context === "nutrition_estimate"
+              ? `You need 1 Egg to estimate recipe nutrition values. Currently, you have ${insufficientModal.remaining} Eggs.`
+              : `You need 1 Egg to create a new cookbook. Currently, you have ${insufficientModal.remaining} Eggs.`
+          }
+          featuredOffer={featuredOffer}
+          availableRewardsCount={availableRewardsCount}
+          onClose={() => setInsufficientModal((s) => ({ ...s, visible: false }))}
+          onBuyOffer={() => {
+            setInsufficientModal((s) => ({ ...s, visible: false }));
+            goToStore("cookies_15", true);
+          }}
+          onOpenStore={() => {
+            setInsufficientModal((s) => ({ ...s, visible: false }));
+            goToStore("cookies_15");
+          }}
+        onOpenRewards={() => {
+          setInsufficientModal((s) => ({ ...s, visible: false }));
+          goToStore();
+        }}
+      />
       </>
     )}
   </SafeAreaView>
@@ -1216,7 +1449,18 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   title: { fontSize: 24, fontWeight: "bold", marginBottom: 4 },
-  quickInfo: { flexDirection: "row", justifyContent: "space-between" },
+  quickInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    flexWrap: "wrap",
+    gap: 38,
+  },
+  quickInfoItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
   quickInfoText: { fontSize: 14 },
   sectionTitle: { fontSize: 18, fontWeight: "600", marginTop: 0, marginBottom: 6 },
   text: { fontSize: 16, marginBottom: 6, lineHeight: 22 },
@@ -1263,9 +1507,83 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 10,
   },
+  sectionHint: {
+    fontSize: 13,
+    marginTop: -8,
+    marginBottom: 8,
+  },
+  nutritionGrid: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  nutritionItem: {
+    width: "24%",
+    alignItems: "center",
+  },
+  nutritionLabel: {
+    fontSize: 13,
+    fontWeight: "500",
+    marginBottom: 6,
+    textAlign: "center",
+  },
+  nutritionValue: {
+    fontSize: 18,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  nutritionValueRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "center",
+  },
+  nutritionEmptyText: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  nutritionEstimateLoadingText: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 10,
+    marginBottom: 0,
+  },
+  nutritionUnit: {
+    fontSize: 13,
+    fontWeight: "500",
+    marginLeft: 4,
+    textAlign: "center",
+  },
+  estimateButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 5,
+  },
+  estimateButtonLoadingContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  estimateButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  estimateButtonCost: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
   servingsLabel: {
     fontSize: 16,
     fontWeight: "600",
+    color: "#E27D60",
+  },
+  servingsDivider: {
+    height: 1,
+    width: "100%",
+    marginBottom: 12,
   },
   stepper: {
     fontSize: 20,

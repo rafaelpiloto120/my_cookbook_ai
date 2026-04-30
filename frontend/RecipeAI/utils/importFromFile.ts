@@ -5,6 +5,10 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "./deviceId";
 import i18n from "../i18n";
+import {
+  RecipeNutritionInfo,
+  normalizeRecipeNutritionInfo,
+} from "../lib/recipes/nutrition";
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = [".rtk", ".paprikarecipes", ".zip", ".html", ".htm", ".csv"];
@@ -39,6 +43,7 @@ export type ImportedRecipe = {
   imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
   isDeleted?: boolean;
+  nutritionInfo?: RecipeNutritionInfo | null;
 };
 
 export type ImportCookbookTarget = {
@@ -71,7 +76,7 @@ function getFileNameFromUri(uri: string) {
   return parts[parts.length - 1] || "import";
 }
 
-function getCandidateFileName(file: File): string {
+function getCandidateFileName(file: any): string {
   const runtimeName =
     (file as any)?.name ||
     (file as any)?.fileName ||
@@ -200,6 +205,9 @@ function normalizeImportedRecipe(
         updatedAt: now,
         image: materializedImage || undefined,
         imageUrl: materializedImage || undefined,
+        nutritionInfo: normalizeRecipeNutritionInfo(
+          (raw as any)?.nutritionInfo ?? (raw as any)?.nutrition
+        ),
         cookbooks: safeCookbooks,
         isDeleted: false,
       };
@@ -246,7 +254,7 @@ async function persistImportedRecipes(
   return next;
 }
 
-async function pickImportFile(): Promise<File> {
+async function pickImportFile(): Promise<any> {
   const picked = await File.pickFileAsync(undefined, "*/*");
   const file = Array.isArray(picked) ? picked[0] : picked;
 
@@ -290,7 +298,7 @@ async function pickImportFile(): Promise<File> {
 }
 
 async function uploadImportFile(
-  file: File,
+  file: any,
   backendUrl: string,
   appEnv = "local"
 ): Promise<{ count: number; format: string; recipes: ImportedRecipe[]; fileName: string }> {

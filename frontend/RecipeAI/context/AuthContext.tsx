@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import {
   onAuthStateChanged,
   signOut,
@@ -13,6 +14,7 @@ import {
   User,
 } from "firebase/auth";
 import { auth } from "../firebaseConfig";
+import { LAST_MAIN_TAB_KEY } from "../lib/navigation/lastMainTab";
 import { syncEngine } from "../lib/sync/SyncEngine";
 
 type AuthContextValue = {
@@ -30,9 +32,13 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState("Preparing your session...");
   const hasTriedAnonRef = useRef(false);
   const lastUidRef = useRef<string | null>(null);
   const postAuthSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const logoutAnonBootstrapRef = useRef(false);
+  const managedAuthTransitionRef = useRef(false);
+  const managedAuthTransitionUidRef = useRef<string | null>(null);
 
   const schedulePostAuthSync = useCallback((uid: string) => {
     // Avoid re-scheduling for the same uid (can happen with repeated auth events)
@@ -119,6 +125,103 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   }, []);
 
+  const clearUserOwnedLocalCaches = useCallback(async () => {
+    const keys = [
+      "recipes",
+      "sync_recipes",
+      "cookbooks",
+      "sync_cookbooks",
+      "sync_prefs",
+      "sync_prefs_meta",
+      "dietary",
+      "userDietary",
+      "avoid",
+      "userAvoid",
+      "avoidOther",
+      "userAvoidOther",
+      "measurement",
+      "measureSystem",
+      "userMeasurement",
+      "theme",
+      "themeMode",
+      "@theme",
+      "userLanguage",
+      "language",
+      "myDayProfile",
+      "sync_myday_profile",
+      "sync_myday_profile_meta",
+      "myDayMeals",
+      "sync_myday_meals",
+      "myDayWeightLogs",
+      "sync_myday_weights",
+      LAST_MAIN_TAB_KEY,
+    ];
+
+    try {
+      await AsyncStorage.multiRemove(keys);
+      console.log("[AuthContext] Cleared user-owned local caches", { keyCount: keys.length });
+    } catch (err) {
+      console.warn("[AuthContext] Failed to clear user-owned local caches", err);
+    }
+  }, []);
+
+  const finishManagedAuthTransition = useCallback(
+    async (nextUser: User, message?: string) => {
+      managedAuthTransitionRef.current = true;
+      managedAuthTransitionUidRef.current = nextUser.uid;
+      setLoading(true);
+      if (message) setLoadingMessage(message);
+
+      if (postAuthSyncTimerRef.current) {
+        clearTimeout(postAuthSyncTimerRef.current);
+        postAuthSyncTimerRef.current = null;
+      }
+
+      lastUidRef.current = null;
+
+      await clearUserOwnedLocalCaches();
+      await safeClearFirestoreCache();
+
+      try {
+        await syncEngine.handleAuthStateChanged({
+          uid: nextUser.uid,
+          isAnonymous: nextUser.isAnonymous ?? false,
+        });
+      } catch (err) {
+        console.warn("[AuthContext] Managed auth transition sync failed", err);
+      } finally {
+        setUser(nextUser);
+        managedAuthTransitionRef.current = false;
+        schedulePostAuthSync(nextUser.uid);
+        managedAuthTransitionUidRef.current = null;
+        setLoading(false);
+        setLoadingMessage("Preparing your session...");
+      }
+    },
+    [clearUserOwnedLocalCaches, safeClearFirestoreCache, schedulePostAuthSync]
+  );
+
+  const cancelManagedAuthTransition = useCallback(async () => {
+    managedAuthTransitionRef.current = false;
+    managedAuthTransitionUidRef.current = null;
+    setLoading(false);
+    setLoadingMessage("Preparing your session...");
+
+    const current = auth.currentUser;
+    setUser(current ?? null);
+
+    if (current) {
+      try {
+        await syncEngine.handleAuthStateChanged({
+          uid: current.uid,
+          isAnonymous: current.isAnonymous ?? false,
+        });
+      } catch (err) {
+        console.warn("[AuthContext] Failed to resume sync after cancelled auth transition", err);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     console.log("[AuthContext] mounting AuthProvider");
 
@@ -128,6 +231,22 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         uid: firebaseUser?.uid ?? null,
         isAnonymous: firebaseUser?.isAnonymous ?? null,
       });
+
+      if (
+        managedAuthTransitionRef.current &&
+        firebaseUser &&
+        firebaseUser.isAnonymous !== true
+      ) {
+        console.log("[AuthContext] Managed auth transition in progress; deferring default auth handling");
+        return;
+      }
+
+      // If logout already owns the anonymous bootstrap, don't start a second guest account here.
+      if (!firebaseUser && logoutAnonBootstrapRef.current) {
+        setUser(null);
+        console.log("[AuthContext] No user during logout bootstrap; waiting for explicit anonymous sign-in");
+        return;
+      }
 
       // If there's no user yet, attempt a one-time anonymous sign-in
       if (!firebaseUser && !hasTriedAnonRef.current) {
@@ -149,6 +268,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       setUser(firebaseUser ?? null);
       setLoading(false);
+      setLoadingMessage("Preparing your session...");
 
       // Notify sync engine about auth state changes (including UID + anonymous flag)
       syncEngine
@@ -247,14 +367,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           console.log(
             "[AuthContext] credential/email already in use during login; signing in instead"
           );
-          const signInResult = await signInWithEmailAndPassword(auth, email, password);
-          console.log("[AuthContext] signInWithEmailAndPassword (fallback) success", {
-            uid: signInResult.user.uid,
-            email: signInResult.user.email,
-            isAnonymous: signInResult.user.isAnonymous,
-          });
-          setUser(signInResult.user);
-          return signInResult.user;
+          setLoading(true);
+          setLoadingMessage("Loading your account...");
+          managedAuthTransitionRef.current = true;
+          try {
+            await safeStopSyncEngine("anonymous-to-existing-account-login");
+            const signInResult = await signInWithEmailAndPassword(auth, email, password);
+            console.log("[AuthContext] signInWithEmailAndPassword (fallback) success", {
+              uid: signInResult.user.uid,
+              email: signInResult.user.email,
+              isAnonymous: signInResult.user.isAnonymous,
+            });
+            await finishManagedAuthTransition(signInResult.user, "Loading your account...");
+            return signInResult.user;
+          } catch (fallbackErr) {
+            await cancelManagedAuthTransition();
+            throw fallbackErr;
+          }
         }
 
         console.warn("[AuthContext] linkWithCredential (login) failed", error);
@@ -293,14 +422,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           console.log(
             "[AuthContext] Google credential already in use; signing in instead"
           );
-          const signInResult = await signInWithCredential(auth, googleCredential);
-          console.log("[AuthContext] signInWithCredential (Google fallback) success", {
-            uid: signInResult.user.uid,
-            email: signInResult.user.email,
-            isAnonymous: signInResult.user.isAnonymous,
-          });
-          setUser(signInResult.user);
-          return signInResult.user;
+          setLoading(true);
+          setLoadingMessage("Loading your account...");
+          managedAuthTransitionRef.current = true;
+          try {
+            await safeStopSyncEngine("anonymous-to-existing-account-google-login");
+            const signInResult = await signInWithCredential(auth, googleCredential);
+            console.log("[AuthContext] signInWithCredential (Google fallback) success", {
+              uid: signInResult.user.uid,
+              email: signInResult.user.email,
+              isAnonymous: signInResult.user.isAnonymous,
+            });
+            await finishManagedAuthTransition(signInResult.user, "Loading your account...");
+            return signInResult.user;
+          } catch (fallbackErr) {
+            await cancelManagedAuthTransition();
+            throw fallbackErr;
+          }
         }
 
         console.warn("[AuthContext] Google linkWithCredential failed", error);
@@ -320,6 +458,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const logout = async () => {
     console.log("[AuthContext] logout initiated");
+    logoutAnonBootstrapRef.current = true;
+    setLoading(true);
+    setLoadingMessage("Setting up a fresh session...");
 
     // Stop any pending post-auth sync timer
     if (postAuthSyncTimerRef.current) {
@@ -365,6 +506,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (err) {
       console.warn("[AuthContext] post-logout anonymous sign-in failed", err);
       // Even if anonymous sign-in fails, user is logged out and local data is cleared.
+    } finally {
+      logoutAnonBootstrapRef.current = false;
     }
   };
 
@@ -372,7 +515,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     <AuthContext.Provider
       value={{ user, setUser, signup, login, loginWithGoogle, logout, loading }}
     >
-      {children}
+      {loading ? (
+        <View style={styles.loadingGate}>
+          <ActivityIndicator size="large" color="#E4795B" />
+          <Text style={styles.loadingTitle}>{loadingMessage}</Text>
+          <Text style={styles.loadingSubtitle}>
+            This should only take a moment.
+          </Text>
+        </View>
+      ) : (
+        children
+      )}
     </AuthContext.Provider>
   );
 };
@@ -384,3 +537,27 @@ export const useAuth = () => {
   }
   return ctx;
 };
+
+const styles = StyleSheet.create({
+  loadingGate: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF8F4",
+    paddingHorizontal: 28,
+  },
+  loadingTitle: {
+    marginTop: 18,
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#263341",
+    textAlign: "center",
+  },
+  loadingSubtitle: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#5E6B78",
+    textAlign: "center",
+  },
+});

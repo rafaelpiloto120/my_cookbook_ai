@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Moda
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Stack, useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { syncIngredientCatalog } from "../../lib/ingredients/catalogSync";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
 import { useTranslation } from "react-i18next";
@@ -77,7 +78,6 @@ function getLanguageLabelAndFlag(code: SupportedLanguage): { label: string; flag
     case "pt-BR": return { label: "Português (BR)", flag: "🇧🇷" };
     case "fr": return { label: "Français", flag: "🇫🇷" };
     case "de": return { label: "Deutsch", flag: "🇩🇪" };
-    case "it": return { label: "Italiano", flag: "🇮🇹" };
     default: return { label: code, flag: "" };
   }
 }
@@ -155,7 +155,7 @@ export default function Onboarding() {
   const { t } = useTranslation();
   const router = useRouter();
   const { bg, isDark } = useThemeColors();
-  const { theme, toggleTheme } = useTheme();
+  const { setThemeMode: applyThemeMode } = useTheme();
 
   useEffect(() => {
     if (Platform.OS !== "android") return;
@@ -327,13 +327,10 @@ export default function Onboarding() {
 
     // Ensure ThemeContext matches the selected themeMode immediately,
     // so the user sees dark/light mode applied as soon as onboarding finishes.
-    const shouldBeDark = themeMode === "dark";
-    if ((shouldBeDark && theme !== "dark") || (!shouldBeDark && theme !== "light")) {
-      try {
-        toggleTheme();
-      } catch {
-        // best-effort: even if this fails, the stored preference is correct
-      }
+    try {
+      await applyThemeMode(themeMode === "dark" ? "dark" : "light");
+    } catch {
+      // best-effort: even if this fails, the stored preference is correct
     }
 
     // Mark onboarding done
@@ -350,6 +347,7 @@ export default function Onboarding() {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist
       await ensureDefaultCookbooks();
+      await syncIngredientCatalog({ force: true });
       // We cannot reliably sync from onboarding because AuthProvider may not be mounted yet.
       // Instead, set a flag so AuthContext can trigger a sync right after auth is ready.
       try {
@@ -372,6 +370,7 @@ export default function Onboarding() {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist yet
       await ensureDefaultCookbooks();
+      await syncIngredientCatalog({ force: true });
       try {
         await AsyncStorage.setItem("post_onboarding_sync", JSON.stringify({
           ts: Date.now(),
@@ -391,6 +390,7 @@ export default function Onboarding() {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist yet
       await ensureDefaultCookbooks();
+      await syncIngredientCatalog({ force: true });
       try {
         await AsyncStorage.setItem("post_onboarding_sync", JSON.stringify({
           ts: Date.now(),
@@ -491,7 +491,7 @@ export default function Onboarding() {
       <Stack.Screen
         options={{
           headerShown: false,
-          title: t("onboarding.title", "Welcome to MyCookbook AI"),
+          title: t("onboarding.title", "Welcome to Cook N'Eat AI"),
           headerStyle: {
             backgroundColor: HEADER_BG,
             ...(Platform.OS === "android"
@@ -502,15 +502,8 @@ export default function Onboarding() {
           },
           headerTintColor: "#fff",
           headerTitleAlign: "center",
-          headerTitleContainerStyle:
-            Platform.OS === "android" ? { marginTop: ANDROID_STATUS_BAR_HEIGHT } : undefined,
           headerBackVisible: true,
           headerRight: () => null,
-          // On Android we manually account for the status bar via header height + headerStatusBarHeight.
-          // Keeping headerTopInsetEnabled=true can still place the header under the status bar on some configs.
-          headerTopInsetEnabled: Platform.OS !== "android",
-          headerStatusBarHeight:
-            Platform.OS === "android" ? ANDROID_STATUS_BAR_HEIGHT : undefined,
         }}
       />
 
@@ -538,11 +531,11 @@ export default function Onboarding() {
               <View style={styles.introHero}>
                 <Image
                   source={require("../../assets/images/icon.png")}
-                  style={{ width: 128, height: 128, borderRadius: 28, marginBottom: 16 }}
+                  style={{ width: 164, height: 164, borderRadius: 36, marginBottom: 16 }}
                   resizeMode="contain"
                 />
                 <Text style={[styles.h1, { color: "#fff", textAlign: "center" }]}>
-                  {t("onboarding.title", "Welcome to MyCookbook AI")}
+                  {t("onboarding.title", "Welcome to Cook N'Eat AI")}
                 </Text>
                 <Text style={styles.sloganText}>
                   {t("common.slogan", "Your smart kitchen companion")}
@@ -582,9 +575,15 @@ export default function Onboarding() {
                   variant="cta"
                   fullWidth
                 />
-                <Text style={{ color: "#fff", opacity: 0.9, fontSize: 13, textAlign: "center", marginTop: 10 }}>
-                  {tr("onboarding.change_later_note", "You can change these anytime later in your Profile area.")}
-                </Text>
+                <TouchableOpacity
+                  activeOpacity={0.82}
+                  onPress={handleSignInInstead}
+                  style={styles.signInPrompt}
+                >
+                  <Text style={styles.signInPromptText}>
+                    {tr("onboarding.already_have_account_prompt", "Already have an account? Sign in")}
+                  </Text>
+                </TouchableOpacity>
               </View>
               {/* Language modal list (like Profile) */}
               <Modal
@@ -732,7 +731,7 @@ export default function Onboarding() {
 
               {avoid.includes("other") && (
                 <TextInput
-                  ref={(r) => (avoidOtherInputRef.current = r)}
+                  ref={(r) => { avoidOtherInputRef.current = r; }}
                   style={[
                     styles.input,
                     {
@@ -770,7 +769,7 @@ export default function Onboarding() {
                 {tt(
                   t,
                   "onboarding.final_prefs_explainer",
-                  "You're almost ready! Set your appearance, measurement units, and, if you like, create or sign in to a free account now or later from your Profile."
+                  "You're almost ready! Set your appearance, measurement units, and, if you like, create a free account now or later from your Profile."
                 )}
               </Text>
               {/* Appearance */}
@@ -829,23 +828,15 @@ export default function Onboarding() {
                 <Text style={[styles.p, { color: "#fff", fontSize: 15, marginBottom: 14 }]}>
                   {tr(
                     "onboarding.account_explainer",
-                    "Save your cookbooks and preferences across devices and get ready for future premium features."
+                    "Allows automatic sync for your recipes, cookbooks, meals, weights, Health & Goals, and preferences. Your kitchen stays backed up and ready to use across devices."
                   )}
                 </Text>
-                <View style={{ flexDirection: "row" }}>
-                  <AppButton
-                    label={tr("onboarding.account_create", "Create account")}
-                    onPress={handleCreateAccount}
-                    variant="cta"
-                    style={{ flex: 1, marginRight: 8 }}
-                  />
-                  <AppButton
-                    label={tr("onboarding.account_signin", "Sign in")}
-                    onPress={handleSignInInstead}
-                    variant="secondary"
-                    style={{ flex: 1, marginLeft: 8 }}
-                  />
-                </View>
+                <AppButton
+                  label={tr("onboarding.account_create", "Create account")}
+                  onPress={handleCreateAccount}
+                  variant="cta"
+                  fullWidth
+                />
               </View>
 
               {/* Footer */}
@@ -914,6 +905,19 @@ const styles = StyleSheet.create({
   },
   introBottom: {
     marginTop: 16,
+  },
+  signInPrompt: {
+    marginTop: 12,
+    alignItems: "center",
+    paddingVertical: 6,
+  },
+  signInPromptText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "600",
+    opacity: 0.95,
+    textAlign: "center",
+    textDecorationLine: "underline",
   },
   sloganText: {
     color: "#fff",

@@ -15,6 +15,8 @@ export interface CookbookDoc {
   imageUrl?: string | null;      // Optional cover image
   createdAt: number;             // ms since epoch
   updatedAt: number;             // ms since epoch
+  isDefault?: boolean;           // legacy flag kept for compatibility
+  source?: string;               // legacy/source marker kept for compatibility
   isDeleted?: boolean;           // soft-delete flag (optional for future)
 }
 
@@ -23,6 +25,21 @@ export interface CookbookDoc {
 export type Difficulty = "easy" | "medium" | "hard" | "unknown";
 
 export type CostLevel = "low" | "medium" | "high" | "unknown";
+
+export type RecipeNutritionSource = "imported" | "ai_generated" | "manual" | "estimated";
+
+export interface RecipeNutritionPerServing {
+  calories: number | null;
+  protein: number | null;
+  carbs: number | null;
+  fat: number | null;
+}
+
+export interface RecipeNutritionInfo {
+  perServing: RecipeNutritionPerServing;
+  source: RecipeNutritionSource;
+  updatedAt: number | string;
+}
 
 export interface Ingredient {
   id: string;                    // local identifier
@@ -49,6 +66,7 @@ export interface RecipeDoc {
   difficulty?: Difficulty;
   servings?: number | null;
   cost?: CostLevel;
+  nutritionInfo?: RecipeNutritionInfo | null;
 
   ingredients: Ingredient[];
   steps: InstructionStep[];
@@ -72,6 +90,72 @@ export interface PreferencesDoc {
   themeMode: ThemeMode;
   userLanguage: string;          // "en", "pt", "pt-BR", etc.
   updatedAt: number;             // ms since epoch
+}
+
+// ---------- My Day ----------
+
+export interface MyDayPlanDoc {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}
+
+export interface MyDayProfileDoc {
+  age: string;
+  height: string;
+  heightCm?: number | null;
+  currentWeight: string;
+  targetWeight: string;
+  currentWeightKg?: number | null;
+  targetWeightKg?: number | null;
+  gender: string;
+  goalType: string;
+  pace: string;
+  plan: MyDayPlanDoc | null;
+  isCustomizedPlan: boolean;
+  updatedAt: number;
+  schemaVersion: number;
+}
+
+export type MyDayMealSource = "photo" | "text" | "recipe" | "manual";
+
+export interface MyDayMealIngredientDoc {
+  name: string;
+  quantity: string;
+  unit: string;
+}
+
+export interface MyDayMealDoc {
+  id: string;
+  title: string;
+  source: MyDayMealSource;
+  createdAt: string;
+  dayKey: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  rawInput?: string;
+  photoUri?: string;
+  recipeId?: string;
+  servingMultiplier?: number;
+  ingredients?: MyDayMealIngredientDoc[];
+  updatedAt: number;
+  schemaVersion: number;
+  isDeleted?: boolean;
+}
+
+export interface MyDayWeightLogDoc {
+  id: string;
+  createdAt: string;
+  dayKey: string;
+  weight: string;
+  normalizedWeightKg: number | null;
+  note?: string;
+  updatedAt: number;
+  schemaVersion: number;
+  isDeleted?: boolean;
 }
 
 // ---------- Generic sync helpers ----------

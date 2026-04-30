@@ -7,6 +7,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { useTranslation } from "react-i18next";
 import { useThemeColors } from "../context/ThemeContext";
 
 type DraftRecipe = {
@@ -150,9 +151,10 @@ function normalizeRecipeDraft(params: Record<string, string | string[] | undefin
 }
 
 export default function ImportRecipeLinkScreen() {
-  const params = useLocalSearchParams<Record<string, string | string[] | undefined>>();
+  const params = useLocalSearchParams();
   const router = useRouter();
   const { bg, text, subText, card } = useThemeColors();
+  const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
   const hasHandledRef = useRef(false);
 
@@ -168,20 +170,21 @@ export default function ImportRecipeLinkScreen() {
         router.replace({ pathname: "/add-recipe", params: { draftKey } } as any);
       } catch (err: any) {
         setError(
-          err?.message ||
-            "We could not open this recipe in MyCookbook AI. Please try again."
+          t("recipes.import_link_unavailable_body", {
+            defaultValue: "We could not open this recipe in Cook N'Eat AI. Please try again.",
+          })
         );
       }
     };
 
     handleImport();
-  }, [params, router]);
+  }, [params, router, t]);
 
   return (
     <View style={[styles.container, { backgroundColor: bg }]}>
       <Stack.Screen
         options={{
-          title: "Import Recipe",
+          title: t("recipes.import_recipe_title", { defaultValue: "Import Recipe" }),
           headerStyle: { backgroundColor: "#293a53" },
           headerTintColor: "#fff",
           headerTitleAlign: "center",
@@ -191,15 +194,22 @@ export default function ImportRecipeLinkScreen() {
       <View style={[styles.card, { backgroundColor: card }]}>
         {error ? (
           <>
-            <Text style={[styles.title, { color: text }]}>Import unavailable</Text>
+            <Text style={[styles.title, { color: text }]}>
+              {t("recipes.import_unavailable_title", { defaultValue: "Import unavailable" })}
+            </Text>
             <Text style={[styles.body, { color: subText }]}>{error}</Text>
           </>
         ) : (
           <>
             <ActivityIndicator size="large" color="#E27D60" />
-            <Text style={[styles.title, { color: text }]}>Opening recipe draft</Text>
+            <Text style={[styles.title, { color: text }]}>
+              {t("recipes.import_opening_draft_title", { defaultValue: "Opening recipe draft" })}
+            </Text>
             <Text style={[styles.body, { color: subText }]}>
-              We are sending this recipe to MyCookbook AI so you can review and save it.
+              {t("recipes.import_opening_draft_body", {
+                defaultValue:
+                  "We are sending this recipe to Cook N'Eat AI so you can review and save it.",
+              })}
             </Text>
           </>
         )}
