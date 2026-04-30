@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cook N'Eat AI",
     "slug": "mycookbook-ai",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": ["recipeai", "mycookbookai"],
@@ -13,9 +13,10 @@
       "bundleIdentifier": "ai.mycookbook.app"
     },
     "android": {
+      "icon": "./assets/images/android-icon.png",
       "adaptiveIcon": {
         "backgroundColor": "#F8F2DF",
-        "foregroundImage": "./assets/images/icon.png"
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
