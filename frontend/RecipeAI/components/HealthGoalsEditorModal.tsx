@@ -571,7 +571,7 @@ export default function HealthGoalsEditorModal({
                             onPress={() => onPlanModeChange("auto")}
                           >
                             <MaterialIcons name="auto-awesome" size={14} color={planMode === "auto" ? "#fff" : text} />
-                            <Text style={{ color: planMode === "auto" ? "#fff" : text, fontWeight: "700", fontSize: 14 }}>
+                            <Text style={[styles.modeButtonText, { color: planMode === "auto" ? "#fff" : text }]}>
                               {t("profile.health_plan_auto", { defaultValue: "Automatic" })}
                             </Text>
                           </TouchableOpacity>
@@ -581,7 +581,7 @@ export default function HealthGoalsEditorModal({
                             onPress={() => onPlanModeChange("manual")}
                           >
                             <MaterialIcons name="edit-note" size={15} color={planMode === "manual" ? "#fff" : text} />
-                                <Text style={{ color: planMode === "manual" ? "#fff" : text, fontWeight: "700", fontSize: 14 }}>
+                            <Text style={[styles.modeButtonText, { color: planMode === "manual" ? "#fff" : text }]}>
                               {t("profile.health_plan_manual", { defaultValue: "Manual" })}
                             </Text>
                           </TouchableOpacity>
@@ -944,17 +944,26 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     marginTop: 6,
     marginBottom: 12,
-    alignSelf: "flex-start",
+    alignSelf: "stretch",
   },
   modeButton: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     gap: 4,
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 7,
+    paddingHorizontal: 8,
     paddingVertical: 6,
-    maxWidth: 108,
+    minHeight: 34,
+  },
+  modeButtonText: {
+    flexShrink: 1,
+    fontWeight: "700",
+    fontSize: 13,
+    lineHeight: 16,
+    textAlign: "center",
   },
   planGrid: {
     marginTop: 0,

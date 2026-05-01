@@ -76,6 +76,7 @@ const DEFAULT_SERVING_HINTS: {
   match: RegExp;
   quantity: number;
   unit: string;
+  countableUnit?: boolean;
 }[] = [
   { match: /\b(yogurt sauce|molho de iogurte)\b/i, quantity: 30, unit: "g" },
   { match: /\b(tomato sauce|molho de tomate|salsa de tomate)\b/i, quantity: 125, unit: "g" },
@@ -104,7 +105,7 @@ const DEFAULT_SERVING_HINTS: {
   { match: /\b(milk|leite|leche|lait|milch)\b/i, quantity: 200, unit: "ml" },
   { match: /\b(cola|coke|refrigerante|refresco)\b/i, quantity: 330, unit: "ml" },
   { match: /\b(soup|sopa|soupe|suppe)\b/i, quantity: 300, unit: "ml" },
-  { match: /\b(egg|eggs|ovo|ovos|huevo|huevos)\b/i, quantity: 50, unit: "g" },
+  { match: /\b(egg|eggs|ovo|ovos|huevo|huevos)\b/i, quantity: 50, unit: "g", countableUnit: true },
   { match: /\b(pasta|massa)\b/i, quantity: 180, unit: "g" },
   { match: /\b(naan)\b/i, quantity: 70, unit: "g" },
   { match: /\b(wrap|tortilla|tortilha)\b/i, quantity: 60, unit: "g" },
@@ -303,6 +304,38 @@ function parseSpecialQuantityPrefix(part: string) {
   return null;
 }
 
+function hasExplicitQuantity(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  return (
+    /^(\d+(?:[.,]\d+)?|\d+\/\d+|\d+\s+\d+\/\d+|½|¼|¾|⅓|⅔)\s*(kg|g|mg|ml|l|oz|lb|lbs|cup|cups|tbsp|tsp|tablespoon|tablespoons|teaspoon|teaspoons|x)?\b/i.test(trimmed) ||
+    /^(one|two|three|four|five|six|seven|eight|nine|ten|um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(trimmed) ||
+    /^(?:a\s+)?(?:half|little|handful|piece|slice|bowl|bit)\b/i.test(trimmed) ||
+    /^(?:um|uma)\s+(?:meio|meia|pouco|punhado|peda[cç]o|fatia|tigela)\b/i.test(trimmed)
+  );
+}
+
+function isPluralServingPhrase(name: string, serving: { match?: RegExp; countableUnit?: boolean }) {
+  if (!serving.countableUnit || !serving.match) return false;
+  const match = serving.match;
+
+  const tokens = name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return tokens.some((token) => token.length > 2 && token.endsWith("s") && match.test(token));
+}
+
+function quantityForImplicitServing(name: string, serving: { match?: RegExp; quantity: number; countableUnit?: boolean }) {
+  const multiplier = isPluralServingPhrase(name, serving) ? 2 : 1;
+  return Math.round(serving.quantity * multiplier);
+}
+
 function joinTitleSegments(parts: string[]) {
   if (parts.length === 0) return "Meal";
   if (parts.length === 1) return titleFromInput(parts[0]);
@@ -395,7 +428,7 @@ export function parseMealTextIngredients(input: string, language?: string): MyDa
     const serving = defaultServingForIngredient(baseName);
     return {
       name: displayNameForCatalogEntry(catalogEntry, baseName, language),
-      quantity: serving ? String(serving.quantity) : "1",
+      quantity: serving ? String(quantityForImplicitServing(baseName, serving)) : "1",
       unit: serving?.unit || "serving",
     };
   }));
@@ -604,10 +637,11 @@ async function resolveIngredientsWithAiFallback(
       const sourceText = (sourceTexts[index] || ingredient.name).trim().toLowerCase();
       const resolved = resolvedBySource[sourceText];
       if (!resolved?.localEntry || !resolved?.resolvedQuantity) return ingredient;
+      const preserveLocalQuantity = hasExplicitQuantity(sourceText);
       return {
         name: displayNameForCatalogEntry(resolved.localEntry, ingredient.name, language),
-        quantity: String(resolved.resolvedQuantity.quantity),
-        unit: String(resolved.resolvedQuantity.unit || ingredient.unit).toLowerCase(),
+        quantity: preserveLocalQuantity ? ingredient.quantity : String(resolved.resolvedQuantity.quantity),
+        unit: preserveLocalQuantity ? ingredient.unit : String(resolved.resolvedQuantity.unit || ingredient.unit).toLowerCase(),
       };
     });
 

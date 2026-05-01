@@ -8,15 +8,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../context/AuthContext";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
-import { sendPasswordResetEmail, GoogleAuthProvider, signInWithCredential } from "firebase/auth";
+import { sendPasswordResetEmail } from "firebase/auth";
 import { auth } from "../../firebaseConfig";
-import * as WebBrowser from "expo-web-browser";
-import * as Google from "expo-auth-session/providers/google";
-import Constants from "expo-constants";
-
-WebBrowser.maybeCompleteAuthSession();
-
-const SHOW_GOOGLE_LOGIN = false;
+import {
+  GoogleSignin,
+  isCancelledResponse,
+  isSuccessResponse,
+  statusCodes,
+} from "@react-native-google-signin/google-signin";
+import Svg, { Path } from "react-native-svg";
 
 // ---- Input hardening helpers ----
 const INVISIBLE_REGEX = /[\u200B-\u200D\uFEFF\u202E\u202D\u202A\u202B\u202C]/g; // zero-width & bidi controls
@@ -35,6 +35,25 @@ const sanitizePasswordInput = (s: string) => stripDangerous(s).slice(0, 256);
 // Final email clean on submit
 const sanitizeOnSubmitEmail = (s: string) => sanitizeEmailInput(s);
 const isValidEmail = (v: string) => /[^\s@]+@[^\s@]+\.[^\s@]+/.test(v);
+
+const GOOGLE_EMAIL_EXISTS_CODES = new Set([
+  "auth/email-already-in-use",
+  "auth/account-exists-with-different-credential",
+]);
+
+function getEmailFromGoogleIdToken(idToken: string) {
+  try {
+    const [, payload] = idToken.split(".");
+    if (!payload) return "";
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const decoded = JSON.parse(atob(padded));
+    return typeof decoded?.email === "string" ? sanitizeEmailInput(decoded.email) : "";
+  } catch {
+    return "";
+  }
+}
+
 // --- Map Firebase Auth error codes to user-friendly messages ---
 const getFriendlyAuthError = (code: string, t: any) => {
   const map: Record<string, string> = {
@@ -51,11 +70,34 @@ const getFriendlyAuthError = (code: string, t: any) => {
 };
 // --------------------------------
 
+function GoogleLogo({ size = 20 }: { size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        fill="#4285F4"
+        d="M23.64 12.2c0-.82-.07-1.43-.23-2.06H12v3.75h6.69c-.13.93-.86 2.34-2.47 3.29l-.02.13 3.59 2.78.25.02c2.28-2.1 3.6-5.2 3.6-7.91z"
+      />
+      <Path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.96-1.07 7.95-2.9l-3.78-2.93c-1.01.7-2.37 1.2-4.17 1.2-3.18 0-5.88-2.1-6.84-5l-.13.01-3.73 2.89-.05.13C3.22 21.3 7.27 24 12 24z"
+      />
+      <Path
+        fill="#FBBC05"
+        d="M5.16 14.37A7.39 7.39 0 0 1 4.76 12c0-.82.15-1.62.39-2.37l-.01-.16-3.78-2.93-.12.06A11.94 11.94 0 0 0 0 12c0 1.94.47 3.77 1.25 5.4l3.91-3.03z"
+      />
+      <Path
+        fill="#EA4335"
+        d="M12 4.63c2.25 0 3.77.97 4.64 1.79l3.39-3.31C17.95 1.17 15.24 0 12 0 7.27 0 3.22 2.7 1.25 6.6l3.9 3.03C6.12 6.73 8.82 4.63 12 4.63z"
+      />
+    </Svg>
+  );
+}
+
 export default function SignInScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ mode?: string }>();
   const initialMode: AuthMode = params?.mode === "signup" ? "signup" : "signin";
-  const { login, signup } = useAuth();
+  const { login, signup, loginWithGoogle } = useAuth();
   const { bg, text, subText, card, border } = useThemeColors();
 
   const [email, setEmail] = useState("");
@@ -70,47 +112,18 @@ export default function SignInScreen() {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
+  const [pendingGoogleIdToken, setPendingGoogleIdToken] = useState<string | null>(null);
   const { t } = useTranslation();
 
-  // Google Auth: configure ID token flow using native Android / Expo clients
-  const androidClientId = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
-  const expoClientId = process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID; // optional for Expo Go
-
-  const [request, response, promptAsync] = Google.useAuthRequest({
-    androidClientId: androidClientId || undefined,
-    clientId: expoClientId || undefined,
-    responseType: "id_token",
-    scopes: ["openid", "email", "profile"],
-  });
+  const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
 
   useEffect(() => {
-    const handleGoogleResponse = async () => {
-      if (!response || response.type !== "success") return;
-
-      const idToken = (response.params as any)?.id_token;
-      if (!idToken) {
-        Alert.alert(t("auth.error_title"), t("auth.google_not_configured"));
-        return;
-      }
-
-      try {
-        setGoogleLoading(true);
-        const credential = GoogleAuthProvider.credential(idToken);
-        await signInWithCredential(auth, credential);
-        Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
-        router.replace("/(tabs)/profile");
-      } catch (err: any) {
-        console.error("Google sign in error:", err?.code, err?.message || err);
-        const code = err?.code || "";
-        const message = getFriendlyAuthError(code, t);
-        Alert.alert(t("auth.error_title"), message);
-      } finally {
-        setGoogleLoading(false);
-      }
-    };
-
-    handleGoogleResponse();
-  }, [response, router, t]);
+    if (!webClientId) return;
+    GoogleSignin.configure({
+      webClientId,
+      scopes: ["openid", "email", "profile"],
+    });
+  }, [webClientId]);
 
   const handleForgotPassword = async () => {
     if (!email || !email.trim()) {
@@ -149,7 +162,18 @@ export default function SignInScreen() {
         Alert.alert(t("auth.account_created_title"), t("auth.account_created_body"));
       } else {
         await login(emailClean, password);
-        Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
+        if (pendingGoogleIdToken) {
+          await loginWithGoogle(pendingGoogleIdToken);
+          setPendingGoogleIdToken(null);
+          Alert.alert(
+            t("auth.google_linked_title", { defaultValue: "Google linked" }),
+            t("auth.google_linked_body", {
+              defaultValue: "You can now sign in with Google or with your password.",
+            })
+          );
+        } else {
+          Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
+        }
       }
       router.replace("/(tabs)/profile");
     } catch (err: any) {
@@ -163,16 +187,53 @@ export default function SignInScreen() {
   };
 
   const handleGoogleSignIn = async () => {
-    if (!request) {
+    if (!webClientId) {
       Alert.alert(t("auth.error_title"), t("auth.google_not_configured"));
       return;
     }
 
+    let selectedGoogleIdToken: string | null = null;
     try {
       setGoogleLoading(true);
-      await promptAsync();
-    } catch (err) {
-      console.error("Google prompt error:", err);
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const response = await GoogleSignin.signIn();
+      if (isCancelledResponse(response)) return;
+      if (!isSuccessResponse(response) || !response.data.idToken) {
+        Alert.alert(t("auth.error_title"), t("auth.google_not_configured"));
+        return;
+      }
+
+      const idToken = response.data.idToken;
+      selectedGoogleIdToken = idToken;
+      await loginWithGoogle(idToken);
+      setPendingGoogleIdToken(null);
+      Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
+      router.replace("/(tabs)/profile");
+    } catch (err: any) {
+      console.error("Google sign in error:", err?.code, err?.message || err);
+      if (err?.code === statusCodes.SIGN_IN_CANCELLED || err?.code === statusCodes.IN_PROGRESS) return;
+      if (GOOGLE_EMAIL_EXISTS_CODES.has(err?.code || "")) {
+        const fallbackEmail = getEmailFromGoogleIdToken(selectedGoogleIdToken || "");
+        if (fallbackEmail) setEmail(fallbackEmail);
+        setPassword("");
+        setIsSignup(false);
+        setPendingGoogleIdToken(selectedGoogleIdToken);
+        Alert.alert(
+          t("auth.google_link_password_title", { defaultValue: "Confirm your password" }),
+          t("auth.google_link_password_body", {
+            defaultValue:
+              "This email already has a password account. Sign in with your password once and we’ll link Google to it.",
+          })
+        );
+        return;
+      }
+      const message =
+        err?.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE
+          ? t("auth.google_play_services_unavailable", {
+              defaultValue: "Google Play Services is not available or needs to be updated.",
+            })
+          : getFriendlyAuthError(err?.code || "", t);
+      Alert.alert(t("auth.error_title"), message);
     } finally {
       setGoogleLoading(false);
     }
@@ -313,19 +374,22 @@ export default function SignInScreen() {
             )}
           </TouchableOpacity>
 
-          {SHOW_GOOGLE_LOGIN && (
-            <TouchableOpacity
-              style={[styles.googleButton, (loading || googleLoading) && { opacity: 0.6 }]}
-              onPress={handleGoogleSignIn}
-              disabled={loading || googleLoading}
-            >
-              {googleLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
+          <TouchableOpacity
+            style={[styles.googleButton, (loading || googleLoading) && { opacity: 0.6 }]}
+            onPress={handleGoogleSignIn}
+            disabled={loading || googleLoading}
+          >
+            {googleLoading ? (
+              <ActivityIndicator color="#1f2933" />
+            ) : (
+              <View style={styles.googleButtonContent}>
+                <View style={styles.googleLogoMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+                  <GoogleLogo size={18} />
+                </View>
                 <Text style={styles.googleButtonText}>{t("auth.google_button")}</Text>
-              )}
-            </TouchableOpacity>
-          )}
+              </View>
+            )}
+          </TouchableOpacity>
 
           <TouchableOpacity onPress={() => setIsSignup(!isSignup)} disabled={loading || googleLoading}>
             <Text style={[styles.switchText, { color: text }]}>
@@ -389,14 +453,40 @@ const styles = StyleSheet.create({
   },
   googleButton: {
     width: "100%",
-    backgroundColor: "#4285F4",
-    padding: 14,
+    backgroundColor: "#fff",
+    paddingVertical: 13,
+    paddingHorizontal: 16,
     borderRadius: 10,
     alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#d6dce5",
     marginBottom: 20,
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   buttonText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
-  googleButtonText: { color: "#fff", fontWeight: "600", fontSize: 16 },
+  googleButtonContent: {
+    width: "100%",
+    minHeight: 22,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  googleLogoMark: {
+    width: 24,
+    height: 24,
+    borderRadius: 999,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "#edf0f4",
+  },
+  googleButtonText: { color: "#1f2933", fontWeight: "700", fontSize: 16 },
   switchText: { color: "#293a53", marginTop: 10, fontSize: 15, textAlign: "center" },
   linkText: { color: "#E27D60", fontWeight: "600" },
 });

@@ -405,6 +405,33 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const googleCredential = GoogleAuthProvider.credential(idToken);
     const current = auth.currentUser;
 
+    if (current && !current.isAnonymous) {
+      console.log("[AuthContext] Linking signed-in user with Google credentials");
+      try {
+        const result = await linkWithCredential(current, googleCredential);
+        console.log("[AuthContext] linkWithCredential (Google signed-in user) success", {
+          uid: result.user.uid,
+          email: result.user.email,
+          isAnonymous: result.user.isAnonymous,
+        });
+        setUser(result.user);
+        return result.user;
+      } catch (error: any) {
+        if (
+          error?.code === "auth/provider-already-linked" ||
+          error?.code === "auth/credential-already-in-use"
+        ) {
+          console.log("[AuthContext] Google provider already linked/in use; signing in with Google");
+          const result = await signInWithCredential(auth, googleCredential);
+          setUser(result.user);
+          return result.user;
+        }
+
+        console.warn("[AuthContext] Google linkWithCredential for signed-in user failed", error);
+        throw error;
+      }
+    }
+
     // If current user is anonymous, attempt to link Google credential
     if (current && current.isAnonymous) {
       console.log("[AuthContext] Linking anonymous user with Google credentials");
@@ -418,7 +445,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         setUser(result.user);
         return result.user;
       } catch (error: any) {
-        if (error?.code === "auth/credential-already-in-use") {
+        if (
+          error?.code === "auth/credential-already-in-use" ||
+          error?.code === "auth/email-already-in-use" ||
+          error?.code === "auth/account-exists-with-different-credential"
+        ) {
           console.log(
             "[AuthContext] Google credential already in use; signing in instead"
           );
@@ -437,7 +468,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             return signInResult.user;
           } catch (fallbackErr) {
             await cancelManagedAuthTransition();
-            throw fallbackErr;
+            throw error;
           }
         }
 

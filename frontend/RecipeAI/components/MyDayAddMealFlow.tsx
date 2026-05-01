@@ -104,6 +104,7 @@ const API_BASE_URL = getApiBaseUrl() || "http://10.0.2.2:3000";
 const REVIEW_DEFAULT_VISIBLE_COUNT = 6;
 const RECIPE_PICKER_PAGE_SIZE = 20;
 const MAX_MEAL_PHOTO_DIMENSION = 1400;
+const CAMERA_OPEN_TIMEOUT_MS = 4500;
 const GRAMS_PER_OUNCE = 28.349523125;
 const ML_PER_FLUID_OUNCE = 29.5735295625;
 const POUNDS_PER_KILOGRAM = 2.2046226218;
@@ -360,6 +361,21 @@ async function persistMealPhotoPreview(uri: string): Promise<string> {
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
 export default function MyDayAddMealFlow({
   visible,
   targetDate,
@@ -404,6 +420,8 @@ export default function MyDayAddMealFlow({
   const [selectedRecipe, setSelectedRecipe] = useState<SavedRecipe | null>(null);
   const [reviewSaveInFlight, setReviewSaveInFlight] = useState(false);
   const reviewSaveInFlightRef = useRef(false);
+  const [photoPickerInFlight, setPhotoPickerInFlight] = useState(false);
+  const photoPickerInFlightRef = useRef(false);
   const [healthMeasurement, setHealthMeasurement] = useState<MeasurementSystem>("Metric");
   const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
   const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
@@ -448,6 +466,8 @@ export default function MyDayAddMealFlow({
   };
 
   const closeAll = () => {
+    photoPickerInFlightRef.current = false;
+    setPhotoPickerInFlight(false);
     setOptionsVisible(false);
     setTextLogVisible(false);
     setPhotoSourceVisible(false);
@@ -668,30 +688,63 @@ export default function MyDayAddMealFlow({
   };
 
   const pickMealPhotoFromSource = async (source: "camera" | "library") => {
+    if (photoPickerInFlightRef.current) return;
+    photoPickerInFlightRef.current = true;
+    setPhotoPickerInFlight(true);
     try {
-      setPhotoSourceVisible(false);
-      setPhotoReviewLoading(true);
+      console.log("[MyDayAddMealFlow] photo source selected", { source });
+      setPhotoReviewLoading(false);
       resetReview();
-      const permission =
-        source === "camera"
-          ? await ImagePicker.requestCameraPermissionsAsync()
-          : await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert(
-          t("my_day.photo_permission_title", { defaultValue: "Permission required" }),
-          source === "camera"
-            ? t("my_day.photo_permission_camera_body", { defaultValue: "We need camera access to take a meal photo." })
-            : t("my_day.photo_permission_gallery_body", { defaultValue: "We need gallery access to choose a meal photo." })
-        );
-        return;
+      if (source === "library") {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert(
+            t("my_day.photo_permission_title", { defaultValue: "Permission required" }),
+            t("my_day.photo_permission_gallery_body", { defaultValue: "We need gallery access to choose a meal photo." })
+          );
+          closeAll();
+          return;
+        }
       }
+
+      const pickerOptions = {
+        allowsEditing: false,
+        quality: 0.8,
+        mediaTypes: ["images"] as ImagePicker.MediaType[],
+      };
       const result =
         source === "camera"
-          ? await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.8, mediaTypes: ImagePicker.MediaTypeOptions.Images })
-          : await ImagePicker.launchImageLibraryAsync({ allowsEditing: false, quality: 0.8, mediaTypes: ImagePicker.MediaTypeOptions.Images });
-      if (result.canceled || !result.assets?.[0]?.uri) return;
+          ? await withTimeout(
+              ImagePicker.launchCameraAsync({ ...pickerOptions, legacy: true }),
+              CAMERA_OPEN_TIMEOUT_MS,
+              "Camera did not open in time."
+            )
+          : await ImagePicker.launchImageLibraryAsync(pickerOptions);
+      console.log("[MyDayAddMealFlow] photo picker returned", {
+        source,
+        canceled: result.canceled,
+        hasAsset: !!result.assets?.[0]?.uri,
+      });
+      if (result.canceled || !result.assets?.[0]?.uri) {
+        if (source === "camera") {
+          Alert.alert(
+            t("my_day.photo_camera_unavailable_title", { defaultValue: "Camera didn’t open" }),
+            t("my_day.photo_camera_unavailable_body", {
+              defaultValue: "Try again, or choose a photo from your library instead.",
+            })
+          );
+        }
+        return;
+      }
+
+      setPhotoSourceVisible(false);
+      setPhotoReviewLoading(true);
       const allowed = await requestPremiumAction("meal_photo_log", "preview");
-      if (!allowed) return;
+      if (!allowed) {
+        setPhotoReviewLoading(false);
+        setPhotoSourceVisible(true);
+        return;
+      }
       const compressedPhotoUri = await compressMealPhotoIfNeeded(result.assets[0].uri);
       const persistedPhotoUri = await persistMealPhotoPreview(compressedPhotoUri);
       const analysis = await analyzeMealPhoto(persistedPhotoUri);
@@ -700,6 +753,7 @@ export default function MyDayAddMealFlow({
           t("my_day.photo_not_food_title", { defaultValue: "This doesn’t look like a meal" }),
           t("my_day.photo_not_food_body", { defaultValue: "Try another photo with a clearer meal or plated food." })
         );
+        setPhotoSourceVisible(true);
         return;
       }
       const safeIngredients = sanitizeReviewIngredients(analysis.ingredients);
@@ -708,6 +762,7 @@ export default function MyDayAddMealFlow({
           t("common.error_generic", { defaultValue: "Something went wrong" }),
           t("my_day.photo_identify_error_body", { defaultValue: "We couldn't identify the main ingredients in this meal photo." })
         );
+        setPhotoSourceVisible(true);
         return;
       }
       const baseDraft = {
@@ -726,11 +781,23 @@ export default function MyDayAddMealFlow({
       setPhotoReviewUri(persistedPhotoUri);
     } catch (error: any) {
       console.warn("[MyDayAddMealFlow] meal photo analysis failed", error);
+      if (source === "camera" && String(error?.message || "").includes("Camera did not open")) {
+        Alert.alert(
+          t("my_day.photo_camera_unavailable_title", { defaultValue: "Camera didn’t open" }),
+          t("my_day.photo_camera_unavailable_body", {
+            defaultValue: "Try again, or choose a photo from your library instead.",
+          })
+        );
+        return;
+      }
       Alert.alert(
         t("common.error_generic", { defaultValue: "Something went wrong" }),
         error?.message || t("my_day.photo_analyze_error_body", { defaultValue: "We couldn't analyze this meal photo right now." })
       );
+      setPhotoSourceVisible(true);
     } finally {
+      photoPickerInFlightRef.current = false;
+      setPhotoPickerInFlight(false);
       setPhotoReviewLoading(false);
     }
   };
@@ -1028,11 +1095,21 @@ export default function MyDayAddMealFlow({
               </TouchableOpacity>
             </View>
             <View style={styles.photoSourceActions}>
-              <TouchableOpacity activeOpacity={0.85} style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg }]} onPress={() => void pickMealPhotoFromSource("library")}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={photoPickerInFlight}
+                style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg, opacity: photoPickerInFlight ? 0.65 : 1 }]}
+                onPress={() => void pickMealPhotoFromSource("library")}
+              >
                 <MaterialIcons name="photo-library" size={18} color={actionTone} />
                 <Text style={[styles.photoSourceButtonText, { color: text }]}>{t("my_day.choose_photo", { defaultValue: "Choose from library" })}</Text>
               </TouchableOpacity>
-              <TouchableOpacity activeOpacity={0.85} style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg }]} onPress={() => void pickMealPhotoFromSource("camera")}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={photoPickerInFlight}
+                style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg, opacity: photoPickerInFlight ? 0.65 : 1 }]}
+                onPress={() => void pickMealPhotoFromSource("camera")}
+              >
                 <MaterialIcons name="photo-camera" size={18} color={actionTone} />
                 <Text style={[styles.photoSourceButtonText, { color: text }]}>{t("my_day.take_photo", { defaultValue: "Take photo" })}</Text>
               </TouchableOpacity>
@@ -1201,7 +1278,7 @@ export default function MyDayAddMealFlow({
         titleValue={reviewDraft?.title ?? ""}
         onChangeTitle={(value) => setReviewDraft((prev) => (prev ? { ...prev, title: value } : prev))}
         mealDetailsStepLabel={t("my_day.meal_details", { defaultValue: "Meal details" })}
-        nutritionStepLabel={t("my_day.meal_nutrition", { defaultValue: "Meal Nutrition" })}
+        nutritionStepLabel={t("my_day.meal_nutrition", { defaultValue: "Meal nutrition" })}
         quantitiesLabel={t("my_day.quantities", { defaultValue: "Quantities" })}
         visibleIngredients={visibleIngredients.map(({ item, index }) => ({
           index,
@@ -1234,9 +1311,13 @@ export default function MyDayAddMealFlow({
           setUnitDropdownOpen(false);
         }}
         onAddIngredient={addIngredient}
-        nutritionLabel={t("my_day.meal_nutrition", { defaultValue: "Meal Nutrition" })}
-        nutritionHintAuto="Nutrition is being calculated automatically from the ingredient list."
-        nutritionHintManual="Manual mode lets you override the nutrition values for this meal."
+        nutritionLabel={t("my_day.meal_nutrition", { defaultValue: "Meal nutrition" })}
+        nutritionHintAuto={t("my_day.meal_nutrition_hint_auto", {
+          defaultValue: "Nutrition is being calculated automatically from the ingredient list.",
+        })}
+        nutritionHintManual={t("my_day.meal_nutrition_hint_manual", {
+          defaultValue: "Manual mode lets you override the nutrition values for this meal.",
+        })}
         nutritionMode={nutritionMode}
         onChangeNutritionMode={(mode) => {
           setNutritionMode(mode);
@@ -1245,7 +1326,7 @@ export default function MyDayAddMealFlow({
         nutritionFields={[
           {
             key: "calories",
-            label: "Calories",
+            label: t("profile.health_calories", { defaultValue: "Calories" }),
             value: reviewDraft ? `${Math.round(parseNumber(reviewDraft.calories, 0))}` : "0",
             unit: "kcal",
             onChange: (value) => setReviewDraft((prev) => (prev ? { ...prev, calories: sanitizePositiveDecimalInput(value) } : prev)),
@@ -1272,8 +1353,8 @@ export default function MyDayAddMealFlow({
             onChange: (value) => setReviewDraft((prev) => (prev ? { ...prev, fat: sanitizePositiveDecimalInput(value) } : prev)),
           },
         ]}
-        autoLabel="Automatic"
-        manualLabel="Manual"
+        autoLabel={t("profile.health_plan_auto", { defaultValue: "Automatic" })}
+        manualLabel={t("profile.health_plan_manual", { defaultValue: "Manual" })}
         cancelLabel={t("common.cancel")}
         backLabel={t("common.back", { defaultValue: "Back" })}
         nextLabel={t("common.next", { defaultValue: "Next" })}
