@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cook N'Eat AI",
     "slug": "mycookbook-ai",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": ["recipeai", "mycookbookai", "ai.mycookbook.app"],
