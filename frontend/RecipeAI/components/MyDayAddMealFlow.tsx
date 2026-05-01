@@ -104,7 +104,6 @@ const API_BASE_URL = getApiBaseUrl() || "http://10.0.2.2:3000";
 const REVIEW_DEFAULT_VISIBLE_COUNT = 6;
 const RECIPE_PICKER_PAGE_SIZE = 20;
 const MAX_MEAL_PHOTO_DIMENSION = 1400;
-const CAMERA_OPEN_TIMEOUT_MS = 4500;
 const GRAMS_PER_OUNCE = 28.349523125;
 const ML_PER_FLUID_OUNCE = 29.5735295625;
 const POUNDS_PER_KILOGRAM = 2.2046226218;
@@ -359,21 +358,6 @@ async function persistMealPhotoPreview(uri: string): Promise<string> {
     console.warn("[MyDayAddMealFlow] persistMealPhotoPreview failed", error);
     return uri;
   }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-    promise
-      .then((value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-  });
 }
 
 export default function MyDayAddMealFlow({
@@ -705,6 +689,17 @@ export default function MyDayAddMealFlow({
           closeAll();
           return;
         }
+      } else {
+        const currentPermission = await ImagePicker.getCameraPermissionsAsync();
+        const permission = currentPermission.granted ? currentPermission : await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert(
+            t("my_day.photo_permission_title", { defaultValue: "Permission required" }),
+            t("my_day.photo_permission_camera_body", { defaultValue: "We need camera access to take a meal photo." })
+          );
+          setPhotoSourceVisible(true);
+          return;
+        }
       }
 
       const pickerOptions = {
@@ -712,28 +707,14 @@ export default function MyDayAddMealFlow({
         quality: 0.8,
         mediaTypes: ["images"] as ImagePicker.MediaType[],
       };
-      const result =
-        source === "camera"
-          ? await withTimeout(
-              ImagePicker.launchCameraAsync({ ...pickerOptions, legacy: true }),
-              CAMERA_OPEN_TIMEOUT_MS,
-              "Camera did not open in time."
-            )
-          : await ImagePicker.launchImageLibraryAsync(pickerOptions);
+      const result = source === "camera" ? await ImagePicker.launchCameraAsync(pickerOptions) : await ImagePicker.launchImageLibraryAsync(pickerOptions);
       console.log("[MyDayAddMealFlow] photo picker returned", {
         source,
         canceled: result.canceled,
         hasAsset: !!result.assets?.[0]?.uri,
       });
       if (result.canceled || !result.assets?.[0]?.uri) {
-        if (source === "camera") {
-          Alert.alert(
-            t("my_day.photo_camera_unavailable_title", { defaultValue: "Camera didn’t open" }),
-            t("my_day.photo_camera_unavailable_body", {
-              defaultValue: "Try again, or choose a photo from your library instead.",
-            })
-          );
-        }
+        setPhotoSourceVisible(true);
         return;
       }
 
@@ -781,15 +762,6 @@ export default function MyDayAddMealFlow({
       setPhotoReviewUri(persistedPhotoUri);
     } catch (error: any) {
       console.warn("[MyDayAddMealFlow] meal photo analysis failed", error);
-      if (source === "camera" && String(error?.message || "").includes("Camera did not open")) {
-        Alert.alert(
-          t("my_day.photo_camera_unavailable_title", { defaultValue: "Camera didn’t open" }),
-          t("my_day.photo_camera_unavailable_body", {
-            defaultValue: "Try again, or choose a photo from your library instead.",
-          })
-        );
-        return;
-      }
       Alert.alert(
         t("common.error_generic", { defaultValue: "Something went wrong" }),
         error?.message || t("my_day.photo_analyze_error_body", { defaultValue: "We couldn't analyze this meal photo right now." })
