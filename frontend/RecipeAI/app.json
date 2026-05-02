@@ -51,6 +51,13 @@
       "expo-web-browser",
       "@react-native-google-signin/google-signin",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Cook N'Eat AI to open the camera so you can log meals with a photo.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "cameraPermission": "Allow Cook N'Eat AI to open the camera so you can log meals with a photo.",

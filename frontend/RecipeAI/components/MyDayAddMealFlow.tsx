@@ -16,6 +16,7 @@ import {
 } from "react-native";
 import { MaterialIcons } from "@expo/vector-icons";
 import * as FileSystem from "expo-file-system/legacy";
+import { Camera, CameraView } from "expo-camera";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { signInAnonymously } from "firebase/auth";
@@ -62,6 +63,7 @@ import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { getDeviceId } from "../utils/deviceId";
 
 type Mode = "photo" | "text" | "recipe";
+type PhotoPickerSource = "camera" | "library";
 type PremiumActionKey = "describe_meal" | "meal_photo_log";
 type RecipePickerCalorieFilterOption = "none" | "low" | "medium" | "high";
 
@@ -421,6 +423,14 @@ export default function MyDayAddMealFlow({
   const reviewSaveInFlightRef = useRef(false);
   const [photoPickerInFlight, setPhotoPickerInFlight] = useState(false);
   const photoPickerInFlightRef = useRef(false);
+  const mealCameraRef = useRef<CameraView | null>(null);
+  const [mealCameraVisible, setMealCameraVisible] = useState(false);
+  const [mealCameraReady, setMealCameraReady] = useState(false);
+  const [mealCameraCaptureInFlight, setMealCameraCaptureInFlight] = useState(false);
+  const [pendingPhotoPicker, setPendingPhotoPicker] = useState<{
+    source: PhotoPickerSource;
+    cameraPermissionWasRequested: boolean;
+  } | null>(null);
   const [healthMeasurement, setHealthMeasurement] = useState<MeasurementSystem>("Metric");
   const [featuredOffer, setFeaturedOffer] = useState<EconomyCatalogOffer | null>(null);
   const [availableRewardsCount, setAvailableRewardsCount] = useState(0);
@@ -467,6 +477,10 @@ export default function MyDayAddMealFlow({
   const closeAll = () => {
     photoPickerInFlightRef.current = false;
     setPhotoPickerInFlight(false);
+    setMealCameraVisible(false);
+    setMealCameraReady(false);
+    setMealCameraCaptureInFlight(false);
+    setPendingPhotoPicker(null);
     setOptionsVisible(false);
     setTextLogVisible(false);
     setPhotoSourceVisible(false);
@@ -686,7 +700,51 @@ export default function MyDayAddMealFlow({
     return payload?.analysis as PhotoAnalysisResponse;
   };
 
-  const pickMealPhotoFromSource = async (source: "camera" | "library") => {
+  const processMealPhotoUri = async (uri: string) => {
+    setPhotoReviewLoading(true);
+    const allowed = await requestPremiumAction("meal_photo_log", "preview");
+    if (!allowed) {
+      setPhotoReviewLoading(false);
+      setPhotoSourceVisible(true);
+      return;
+    }
+    const compressedPhotoUri = await compressMealPhotoIfNeeded(uri);
+    const persistedPhotoUri = await persistMealPhotoPreview(compressedPhotoUri);
+    const analysis = await analyzeMealPhoto(persistedPhotoUri);
+    if (!analysis?.isFood || !Array.isArray(analysis.ingredients) || analysis.ingredients.length === 0) {
+      Alert.alert(
+        t("my_day.photo_not_food_title", { defaultValue: "This doesn’t look like a meal" }),
+        t("my_day.photo_not_food_body", { defaultValue: "Try another photo with a clearer meal or plated food." })
+      );
+      setPhotoSourceVisible(true);
+      return;
+    }
+    const safeIngredients = sanitizeReviewIngredients(analysis.ingredients);
+    if (safeIngredients.length === 0) {
+      Alert.alert(
+        t("common.error_generic", { defaultValue: "Something went wrong" }),
+        t("my_day.photo_identify_error_body", { defaultValue: "We couldn't identify the main ingredients in this meal photo." })
+      );
+      setPhotoSourceVisible(true);
+      return;
+    }
+    const baseDraft = {
+      title: analysis.title?.trim() || t("my_day.meal_fallback_title", { defaultValue: "Meal" }),
+      calories: String(Math.max(0, Math.round(analysis.nutrition?.calories || 0))),
+      protein: String(Math.max(0, Math.round(analysis.nutrition?.protein || 0))),
+      carbs: String(Math.max(0, Math.round(analysis.nutrition?.carbs || 0))),
+      fat: String(Math.max(0, Math.round(analysis.nutrition?.fat || 0))),
+    };
+    setReviewMode("photo");
+    setReviewBase(baseDraft);
+    setReviewDraft(baseDraft);
+    setReviewIngredients(safeIngredients);
+    setReviewIngredientBase(safeIngredients);
+    photoReviewUriRef.current = persistedPhotoUri;
+    setPhotoReviewUri(persistedPhotoUri);
+  };
+
+  const pickMealPhotoFromSource = async (source: PhotoPickerSource) => {
     if (photoPickerInFlightRef.current) return;
     photoPickerInFlightRef.current = true;
     setPhotoPickerInFlight(true);
@@ -706,9 +764,9 @@ export default function MyDayAddMealFlow({
           return;
         }
       } else {
-        const currentPermission = await ImagePicker.getCameraPermissionsAsync();
+        const currentPermission = await Camera.getCameraPermissionsAsync();
         cameraPermissionWasRequested = !currentPermission.granted;
-        const permission = currentPermission.granted ? currentPermission : await ImagePicker.requestCameraPermissionsAsync();
+        const permission = currentPermission.granted ? currentPermission : await Camera.requestCameraPermissionsAsync();
         if (!permission.granted) {
           Alert.alert(
             t("my_day.photo_permission_title", { defaultValue: "Permission required" }),
@@ -720,75 +778,113 @@ export default function MyDayAddMealFlow({
       }
 
       setPhotoSourceVisible(false);
-      await waitForNativePickerTransition(source === "camera" && cameraPermissionWasRequested && Platform.OS === "android" ? 650 : 150);
+      if (source === "camera") {
+        setMealCameraReady(false);
+        setMealCameraVisible(true);
+        photoPickerInFlightRef.current = false;
+        setPhotoPickerInFlight(false);
+        return;
+      }
+      setPendingPhotoPicker({ source, cameraPermissionWasRequested });
+    } catch (error: any) {
+      console.warn("[MyDayAddMealFlow] meal photo picker preparation failed", error);
+      Alert.alert(
+        t("common.error_generic", { defaultValue: "Something went wrong" }),
+        error?.message || t("my_day.photo_analyze_error_body", { defaultValue: "We couldn't analyze this meal photo right now." })
+      );
+      setPhotoSourceVisible(true);
+      photoPickerInFlightRef.current = false;
+      setPhotoPickerInFlight(false);
+    }
+  };
 
-      const pickerOptions = {
-        allowsEditing: false,
-        quality: 0.8,
-        mediaTypes: ["images"] as ImagePicker.MediaType[],
-      };
-      const result = source === "camera" ? await ImagePicker.launchCameraAsync(pickerOptions) : await ImagePicker.launchImageLibraryAsync(pickerOptions);
-      console.log("[MyDayAddMealFlow] photo picker returned", {
-        source,
-        canceled: result.canceled,
-        hasAsset: !!result.assets?.[0]?.uri,
-      });
-      if (result.canceled || !result.assets?.[0]?.uri) {
-        setPhotoSourceVisible(true);
-        return;
-      }
+  useEffect(() => {
+    if (!visible || photoSourceVisible || !pendingPhotoPicker) return;
+    let cancelled = false;
 
-      setPhotoReviewLoading(true);
-      const allowed = await requestPremiumAction("meal_photo_log", "preview");
-      if (!allowed) {
-        setPhotoReviewLoading(false);
-        setPhotoSourceVisible(true);
-        return;
-      }
-      const compressedPhotoUri = await compressMealPhotoIfNeeded(result.assets[0].uri);
-      const persistedPhotoUri = await persistMealPhotoPreview(compressedPhotoUri);
-      const analysis = await analyzeMealPhoto(persistedPhotoUri);
-      if (!analysis?.isFood || !Array.isArray(analysis.ingredients) || analysis.ingredients.length === 0) {
-        Alert.alert(
-          t("my_day.photo_not_food_title", { defaultValue: "This doesn’t look like a meal" }),
-          t("my_day.photo_not_food_body", { defaultValue: "Try another photo with a clearer meal or plated food." })
-        );
-        setPhotoSourceVisible(true);
-        return;
-      }
-      const safeIngredients = sanitizeReviewIngredients(analysis.ingredients);
-      if (safeIngredients.length === 0) {
+    const runPicker = async () => {
+      const { source, cameraPermissionWasRequested } = pendingPhotoPicker;
+      try {
+        const transitionDelay =
+          source === "camera" && cameraPermissionWasRequested && Platform.OS === "android"
+            ? 1200
+            : Platform.OS === "android"
+              ? 350
+              : 150;
+        await waitForNativePickerTransition(transitionDelay);
+        if (cancelled) return;
+        console.log("[MyDayAddMealFlow] launching native photo picker", { source, transitionDelay });
+
+        const pickerOptions = {
+          allowsEditing: false,
+          quality: 0.8,
+          mediaTypes: ["images"] as ImagePicker.MediaType[],
+        };
+        const result = source === "camera" ? await ImagePicker.launchCameraAsync(pickerOptions) : await ImagePicker.launchImageLibraryAsync(pickerOptions);
+        console.log("[MyDayAddMealFlow] photo picker returned", {
+          source,
+          canceled: result.canceled,
+          hasAsset: !!result.assets?.[0]?.uri,
+        });
+        if (cancelled) return;
+        if (result.canceled || !result.assets?.[0]?.uri) {
+          setPhotoSourceVisible(true);
+          return;
+        }
+
+        await processMealPhotoUri(result.assets[0].uri);
+      } catch (error: any) {
+        console.warn("[MyDayAddMealFlow] meal photo analysis failed", error);
         Alert.alert(
           t("common.error_generic", { defaultValue: "Something went wrong" }),
-          t("my_day.photo_identify_error_body", { defaultValue: "We couldn't identify the main ingredients in this meal photo." })
+          error?.message || t("my_day.photo_analyze_error_body", { defaultValue: "We couldn't analyze this meal photo right now." })
         );
         setPhotoSourceVisible(true);
+      } finally {
+        if (!cancelled) {
+          setPendingPhotoPicker(null);
+          photoPickerInFlightRef.current = false;
+          setPhotoPickerInFlight(false);
+          setPhotoReviewLoading(false);
+        }
+      }
+    };
+
+    void runPicker();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingPhotoPicker, photoSourceVisible, visible]);
+
+  const closeMealCamera = () => {
+    setMealCameraVisible(false);
+    setMealCameraReady(false);
+    setMealCameraCaptureInFlight(false);
+    setPhotoSourceVisible(true);
+  };
+
+  const captureMealCameraPhoto = async () => {
+    if (mealCameraCaptureInFlight || !mealCameraReady || !mealCameraRef.current) return;
+    setMealCameraCaptureInFlight(true);
+    try {
+      const photo = await mealCameraRef.current.takePictureAsync({ quality: 0.8 });
+      if (!photo?.uri) {
+        setMealCameraCaptureInFlight(false);
         return;
       }
-      const baseDraft = {
-        title: analysis.title?.trim() || t("my_day.meal_fallback_title", { defaultValue: "Meal" }),
-        calories: String(Math.max(0, Math.round(analysis.nutrition?.calories || 0))),
-        protein: String(Math.max(0, Math.round(analysis.nutrition?.protein || 0))),
-        carbs: String(Math.max(0, Math.round(analysis.nutrition?.carbs || 0))),
-        fat: String(Math.max(0, Math.round(analysis.nutrition?.fat || 0))),
-      };
-      setReviewMode("photo");
-      setReviewBase(baseDraft);
-      setReviewDraft(baseDraft);
-      setReviewIngredients(safeIngredients);
-      setReviewIngredientBase(safeIngredients);
-      photoReviewUriRef.current = persistedPhotoUri;
-      setPhotoReviewUri(persistedPhotoUri);
+      setMealCameraVisible(false);
+      setMealCameraReady(false);
+      await processMealPhotoUri(photo.uri);
     } catch (error: any) {
-      console.warn("[MyDayAddMealFlow] meal photo analysis failed", error);
+      console.warn("[MyDayAddMealFlow] in-app camera capture failed", error);
       Alert.alert(
         t("common.error_generic", { defaultValue: "Something went wrong" }),
         error?.message || t("my_day.photo_analyze_error_body", { defaultValue: "We couldn't analyze this meal photo right now." })
       );
       setPhotoSourceVisible(true);
     } finally {
-      photoPickerInFlightRef.current = false;
-      setPhotoPickerInFlight(false);
+      setMealCameraCaptureInFlight(false);
       setPhotoReviewLoading(false);
     }
   };
@@ -1115,6 +1211,46 @@ export default function MyDayAddMealFlow({
             )}
           </View>
         </Pressable>
+      </Modal>
+
+      <Modal visible={visible && mealCameraVisible} animationType="slide" onRequestClose={closeMealCamera}>
+        <View style={styles.cameraScreen}>
+          <CameraView
+            ref={mealCameraRef}
+            style={StyleSheet.absoluteFill}
+            facing="back"
+            mode="picture"
+            active={visible && mealCameraVisible}
+            onCameraReady={() => setMealCameraReady(true)}
+            onMountError={(event) => {
+              console.warn("[MyDayAddMealFlow] in-app camera mount failed", event?.message);
+              Alert.alert(
+                t("common.error_generic", { defaultValue: "Something went wrong" }),
+                event?.message || t("my_day.photo_camera_unavailable_body", { defaultValue: "Try again, or choose a photo from your library instead." })
+              );
+              closeMealCamera();
+            }}
+          />
+          <View style={styles.cameraTopBar}>
+            <TouchableOpacity activeOpacity={0.85} style={styles.cameraIconButton} onPress={closeMealCamera}>
+              <MaterialIcons name="close" size={24} color="#FFFFFF" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.cameraBottomBar}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.cameraShutterButton, { opacity: mealCameraReady && !mealCameraCaptureInFlight ? 1 : 0.55 }]}
+              disabled={!mealCameraReady || mealCameraCaptureInFlight}
+              onPress={() => void captureMealCameraPhoto()}
+            >
+              {mealCameraCaptureInFlight ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <View style={styles.cameraShutterInner} />
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
       <Modal visible={visible && photoReviewLoading} transparent animationType="fade" onRequestClose={() => setPhotoReviewLoading(false)}>
@@ -1501,6 +1637,53 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
     textAlign: "center",
+  },
+  cameraScreen: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+  cameraTopBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: 48,
+    paddingHorizontal: 18,
+    paddingBottom: 16,
+    alignItems: "flex-start",
+  },
+  cameraIconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cameraBottomBar: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: 22,
+    paddingBottom: 42,
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.35)",
+  },
+  cameraShutterButton: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+    borderWidth: 4,
+    borderColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cameraShutterInner: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: "#FFFFFF",
   },
   recipeSearchInput: {
     borderWidth: 1,
