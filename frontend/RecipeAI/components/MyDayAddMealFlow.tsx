@@ -46,13 +46,9 @@ import {
   updateMeal,
 } from "../lib/myDayMeals";
 import {
-  buildRecipeMealLoggingRepresentation,
   estimateRecipeNutrition,
-  isRecipeMealLoggingRepresentationUsable,
   loadSavedRecipes,
   logRecipeMeal,
-  needsRecipeMealLoggingRepresentationEnrichment,
-  parseRecipeIngredientLine,
   persistRecipeNutritionEstimate,
   resolveRecipeNutritionEstimate,
   SavedRecipe,
@@ -64,7 +60,7 @@ import { getDeviceId } from "../utils/deviceId";
 
 type Mode = "photo" | "text" | "recipe";
 type PhotoPickerSource = "camera" | "library";
-type PremiumActionKey = "describe_meal" | "meal_photo_log";
+type PremiumActionKey = "describe_meal" | "meal_photo_log" | "recipe_meal_estimate";
 type RecipePickerCalorieFilterOption = "none" | "low" | "medium" | "high";
 
 type EditableTotals = {
@@ -419,6 +415,7 @@ export default function MyDayAddMealFlow({
   const [recipeLibraryLoading, setRecipeLibraryLoading] = useState(false);
   const [recipeSelectionLoading, setRecipeSelectionLoading] = useState(false);
   const [selectedRecipe, setSelectedRecipe] = useState<SavedRecipe | null>(null);
+  const [selectedRecipeNeedsEstimateCharge, setSelectedRecipeNeedsEstimateCharge] = useState(false);
   const [reviewSaveInFlight, setReviewSaveInFlight] = useState(false);
   const reviewSaveInFlightRef = useRef(false);
   const [photoPickerInFlight, setPhotoPickerInFlight] = useState(false);
@@ -470,6 +467,7 @@ export default function MyDayAddMealFlow({
     setUnitDropdownOpen(false);
     setNutritionMode("auto");
     setSelectedRecipe(null);
+    setSelectedRecipeNeedsEstimateCharge(false);
     photoReviewUriRef.current = null;
     setPhotoReviewUri(null);
   };
@@ -918,28 +916,25 @@ export default function MyDayAddMealFlow({
   const handleSelectRecipe = async (recipe: SavedRecipe) => {
     try {
       setRecipeSelectionLoading(true);
+      const needsEstimateCharge = !recipe.nutritionInfo;
+      if (needsEstimateCharge) {
+        const allowed = await requestPremiumAction("recipe_meal_estimate", "preview");
+        if (!allowed) return;
+      }
       const savedNutrition = estimateRecipeNutrition(recipe);
-      const shouldRefreshLoggingRepresentation = recipe.nutritionInfo
-        ? needsRecipeMealLoggingRepresentationEnrichment(recipe.mealLoggingRepresentation)
-        : !isRecipeMealLoggingRepresentationUsable(recipe.mealLoggingRepresentation);
       const resolved = recipe.nutritionInfo
-        ? shouldRefreshLoggingRepresentation
-          ? await resolveRecipeNutritionEstimate(recipe, i18n.language, { forceRepresentationRefresh: true })
-          : {
-              nutrition: savedNutrition,
-              ingredients: recipe.mealLoggingRepresentation?.ingredients ?? [],
-              mealLoggingRepresentation: recipe.mealLoggingRepresentation!,
-              usedAiFallback: false,
-            }
+        ? {
+            nutrition: savedNutrition,
+            ingredients: [],
+            mealLoggingRepresentation: { ingredients: [], updatedAt: new Date().toISOString(), source: "estimated" as const },
+            usedAiFallback: false,
+          }
         : await resolveRecipeNutritionEstimate(recipe, i18n.language);
-      const mealLoggingRepresentation = shouldRefreshLoggingRepresentation
-        ? resolved.mealLoggingRepresentation ?? buildRecipeMealLoggingRepresentation(recipe, 8)
-        : recipe.mealLoggingRepresentation;
-      if (!recipe.nutritionInfo || shouldRefreshLoggingRepresentation) {
+      if (!recipe.nutritionInfo) {
         await persistRecipeNutritionEstimate(
           recipe.id,
-          recipe.nutritionInfo ? savedNutrition : resolved.nutrition,
-          mealLoggingRepresentation
+          resolved.nutrition,
+          null
         );
       }
       const nutrition = recipe.nutritionInfo ? savedNutrition : resolved.nutrition;
@@ -950,22 +945,13 @@ export default function MyDayAddMealFlow({
         carbs: String(nutrition.carbsPerServing),
         fat: String(nutrition.fatPerServing),
       };
-      const ingredients =
-        (mealLoggingRepresentation?.ingredients || resolved.ingredients).length > 0
-          ? (mealLoggingRepresentation?.ingredients || resolved.ingredients).slice(0, 8).map((item) => ({
-              name: item.name,
-              quantity: String(item.quantity || "1"),
-              unit: String(item.unit || "serving"),
-            }))
-          : (recipe.ingredients && recipe.ingredients.length > 0 ? recipe.ingredients : [recipe.title])
-              .slice(0, 8)
-              .map((name) => parseRecipeIngredientLine(name));
       setSelectedRecipe(recipe);
+      setSelectedRecipeNeedsEstimateCharge(needsEstimateCharge);
       setReviewMode("recipe");
       setReviewBase(baseDraft);
       setReviewDraft(baseDraft);
-      setReviewIngredients(ingredients);
-      setReviewIngredientBase(ingredients);
+      setReviewIngredients([]);
+      setReviewIngredientBase([]);
     } catch (error) {
       console.warn("[MyDayAddMealFlow] Failed to prepare recipe meal", error);
       Alert.alert(
@@ -973,6 +959,7 @@ export default function MyDayAddMealFlow({
         t("my_day.recipe_prepare_error_body", { defaultValue: "We couldn't prepare this recipe right now." })
       );
       setSelectedRecipe(null);
+      setSelectedRecipeNeedsEstimateCharge(false);
     } finally {
       setRecipeSelectionLoading(false);
     }
@@ -986,10 +973,10 @@ export default function MyDayAddMealFlow({
   const handleConfirmReview = async () => {
     if (!reviewDraft || !reviewMode) return;
     const safeIngredients = sanitizeReviewIngredients(reviewIngredients);
-    if (safeIngredients.length === 0) return;
+    if (safeIngredients.length === 0 && reviewMode !== "recipe") return;
     if (!beginReviewSave()) return;
     try {
-      const ingredientsChanged = !areReviewIngredientsEqual(safeIngredients, reviewIngredientBase);
+      const ingredientsChanged = reviewMode !== "recipe" && !areReviewIngredientsEqual(safeIngredients, reviewIngredientBase);
       const refreshedEstimate = ingredientsChanged
         ? await resolveStructuredMealEstimate(
             safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
@@ -1040,27 +1027,35 @@ export default function MyDayAddMealFlow({
         await (syncEngine as any)?.markMyDayMealDirty?.(saved);
       } else if (selectedRecipe) {
         const perServingNutrition = {
-          caloriesPerServing: Math.round(refreshedEstimate ? refreshedEstimate.calories : parseNumber(reviewDraft.calories, 0)),
-          proteinPerServing: Math.round(refreshedEstimate ? refreshedEstimate.protein : parseNumber(reviewDraft.protein, 0)),
-          carbsPerServing: Math.round(refreshedEstimate ? refreshedEstimate.carbs : parseNumber(reviewDraft.carbs, 0)),
-          fatPerServing: Math.round(refreshedEstimate ? refreshedEstimate.fat : parseNumber(reviewDraft.fat, 0)),
-          servings: selectedRecipe.servings && selectedRecipe.servings > 0 ? selectedRecipe.servings : 1,
+          caloriesPerServing: Math.round(parseNumber(reviewDraft.calories, 0)),
+          proteinPerServing: Math.round(parseNumber(reviewDraft.protein, 0)),
+          carbsPerServing: Math.round(parseNumber(reviewDraft.carbs, 0)),
+          fatPerServing: Math.round(parseNumber(reviewDraft.fat, 0)),
+          servings: selectedRecipe.servingInfo?.servings || (selectedRecipe.servings && selectedRecipe.servings > 0 ? selectedRecipe.servings : 1),
+          servingInfo: selectedRecipe.servingInfo ?? null,
         };
         const savedMeal = await logRecipeMeal(
           {
             ...selectedRecipe,
             title: reviewDraft.title,
             nutrition: perServingNutrition,
-            ingredients: safeIngredients.map((item) => `${item.quantity}${item.unit ? ` ${item.unit}` : ""} ${item.name}`.trim()),
           },
           1,
           {
             nutritionOverride: perServingNutrition,
-            ingredientsOverride: safeIngredients.map((item) => ({ ...item })),
+            ingredientsOverride: [],
             persistRecipeEstimate: !ingredientsChanged,
             date: targetMealDate,
           }
         );
+        if (selectedRecipeNeedsEstimateCharge) {
+          const committed = await requestPremiumAction("recipe_meal_estimate", "commit");
+          if (!committed) {
+            await removeMeal(savedMeal.id);
+            await (syncEngine as any)?.markMyDayMealDeleted?.(savedMeal.id);
+            return;
+          }
+        }
         await (syncEngine as any)?.markMyDayMealDirty?.(savedMeal);
       }
       await claimMealRewardsForCurrentCount();
@@ -1106,14 +1101,46 @@ export default function MyDayAddMealFlow({
       <Modal visible={visible && optionsVisible} transparent animationType="fade" onRequestClose={closeAll}>
         <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={closeAll}>
           <View style={[styles.optionSheet, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
+            <View style={styles.optionSheetHeader}>
+              <View>
+                <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.add_meal_cta", { defaultValue: "Add meal" })}</Text>
+                <Text style={[styles.modalHelp, styles.optionSheetHelp, { color: subText }]}>
+                  {t("my_day.add_meal_help", { defaultValue: "Choose how you want to log this meal." })}
+                </Text>
+              </View>
+              <TouchableOpacity activeOpacity={0.8} onPress={closeAll}>
+                <MaterialIcons name="close" size={22} color={subText} />
+              </TouchableOpacity>
+            </View>
             {[
-              { key: "log_photo", icon: "photo-camera", action: openPhotoLogger },
-              { key: "describe_meal", icon: "chat-bubble-outline", action: openTextLogger },
-              { key: "from_recipe", icon: "menu-book", action: () => void openRecipeLogger() },
+              {
+                key: "log_photo",
+                icon: "photo-camera",
+                action: openPhotoLogger,
+                description: t("my_day.log_photo_description", { defaultValue: "Use the camera or gallery and review what we detect." }),
+              },
+              {
+                key: "describe_meal",
+                icon: "chat-bubble-outline",
+                action: openTextLogger,
+                description: t("my_day.describe_meal_description", { defaultValue: "Type what you ate and adjust quantities before saving." }),
+              },
+              {
+                key: "from_recipe",
+                icon: "menu-book",
+                action: () => void openRecipeLogger(),
+                description: t("my_day.from_recipe_description", { defaultValue: "Log nutrition from one of your saved recipes." }),
+              },
             ].map((option) => (
-              <TouchableOpacity key={option.key} activeOpacity={0.85} style={[styles.optionRow, { borderBottomColor: border }]} onPress={option.action}>
-                <MaterialIcons name={option.icon as any} size={20} color={actionTone} />
-                <Text style={[styles.optionLabel, { color: actionTone }]}>{t(`my_day.${option.key}`)}</Text>
+              <TouchableOpacity key={option.key} activeOpacity={0.85} style={[styles.optionRow, { borderColor: border, backgroundColor: bg }]} onPress={option.action}>
+                <View style={[styles.optionIconBox, { backgroundColor: `${actionTone}18` }]}>
+                  <MaterialIcons name={option.icon as any} size={20} color={actionTone} />
+                </View>
+                <View style={styles.optionCopy}>
+                  <Text style={[styles.optionLabel, { color: text }]}>{t(`my_day.${option.key}`)}</Text>
+                  <Text style={[styles.optionDescription, { color: subText }]}>{option.description}</Text>
+                </View>
+                <MaterialIcons name="chevron-right" size={22} color={subText} />
               </TouchableOpacity>
             ))}
           </View>
@@ -1407,6 +1434,10 @@ export default function MyDayAddMealFlow({
         mealDetailsStepLabel={t("my_day.meal_details", { defaultValue: "Meal details" })}
         nutritionStepLabel={t("my_day.meal_nutrition", { defaultValue: "Meal nutrition" })}
         quantitiesLabel={t("my_day.quantities", { defaultValue: "Quantities" })}
+        quantitiesNote={t("my_day.recipe_meal_ingredients_note", {
+          defaultValue: "This meal was logged from a recipe and uses the ingredients saved in that recipe.",
+        })}
+        hideIngredientsEditor={reviewMode === "recipe"}
         visibleIngredients={visibleIngredients.map(({ item, index }) => ({
           index,
           key: `${item.name}-${index}`,
@@ -1487,7 +1518,7 @@ export default function MyDayAddMealFlow({
         nextLabel={t("common.next", { defaultValue: "Next" })}
         saveLabel={reviewSaveInFlight ? t("common.saving", { defaultValue: "Saving..." }) : t("common.save")}
         onSave={handleConfirmReview}
-        saveDisabled={reviewIngredients.length === 0 || reviewSaveInFlight}
+        saveDisabled={(reviewMode !== "recipe" && reviewIngredients.length === 0) || reviewSaveInFlight}
       />
 
       <InsufficientCookiesModal
@@ -1598,19 +1629,47 @@ const styles = StyleSheet.create({
     width: "90%",
     borderRadius: 18,
     borderWidth: 1,
-    overflow: "hidden",
+    padding: 18,
+  },
+  optionSheetHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+    marginBottom: 12,
+  },
+  optionSheetHelp: {
+    marginBottom: 0,
+    marginTop: 4,
   },
   optionRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    borderWidth: 1,
+    borderRadius: 14,
+    marginTop: 10,
+  },
+  optionIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  optionCopy: {
+    flex: 1,
   },
   optionLabel: {
     fontSize: 15,
-    fontWeight: "600",
+    fontWeight: "800",
+  },
+  optionDescription: {
+    fontSize: 12,
+    lineHeight: 16,
+    marginTop: 3,
   },
   photoSourceCard: {
     width: "88%",

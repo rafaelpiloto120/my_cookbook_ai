@@ -248,6 +248,7 @@ export default function MyDayHistoryScreen() {
   );
   const [healthMeasurement, setHealthMeasurement] = useState<MeasurementSystem>("Metric");
   const [editingMealId, setEditingMealId] = useState<string | null>(null);
+  const [editingMealSource, setEditingMealSource] = useState<MyDayMealSource | null>(null);
   const [mealDraft, setMealDraft] = useState<EditableTotals | null>(null);
   const [mealDraftBase, setMealDraftBase] = useState<EditableTotals | null>(null);
   const [mealEditIngredients, setMealEditIngredients] = useState<ReviewIngredient[]>([]);
@@ -466,6 +467,7 @@ export default function MyDayHistoryScreen() {
         ? meal.ingredients.map((item) => ({ ...item }))
         : [];
     setEditingMealId(meal.id);
+    setEditingMealSource(meal.source);
     setMealEditNutritionMode(meal.source === "manual" ? "manual" : "auto");
     setMealDraftBase(baseDraft);
     setMealDraft(baseDraft);
@@ -481,6 +483,10 @@ export default function MyDayHistoryScreen() {
   const handleMealEditNutritionModeChange = (mode: "auto" | "manual") => {
     setMealEditNutritionMode(mode);
     if (mode === "auto" && mealDraftBase && mealDraft) {
+      if (editingMealSource === "recipe") {
+        setMealDraft({ ...mealDraftBase, title: mealDraft.title });
+        return;
+      }
       const recomputed = recomputeTotals(mealDraftBase, mealEditIngredientBase, mealEditIngredients);
       setMealDraft({
         title: mealDraft.title,
@@ -561,6 +567,7 @@ export default function MyDayHistoryScreen() {
 
   const closeMealEditor = () => {
     setEditingMealId(null);
+    setEditingMealSource(null);
     setMealDraft(null);
     setMealDraftBase(null);
     setMealEditIngredients([]);
@@ -589,8 +596,9 @@ export default function MyDayHistoryScreen() {
     if (!editingMealId || !mealDraft || !beginMealEditSave()) return;
     try {
       const safeIngredients = sanitizeReviewIngredients(mealEditIngredients);
-      if (safeIngredients.length === 0) return;
-      const ingredientsChanged = !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
+      const isRecipeMeal = editingMealSource === "recipe";
+      if (safeIngredients.length === 0 && !isRecipeMeal) return;
+      const ingredientsChanged = !isRecipeMeal && !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
       const refreshedEstimate =
         mealEditNutritionMode === "auto" && ingredientsChanged
           ? await resolveStructuredMealEstimate(
@@ -606,7 +614,7 @@ export default function MyDayHistoryScreen() {
         protein: refreshedEstimate ? Math.round(refreshedEstimate.protein) : parseNumber(mealDraft.protein, 0),
         carbs: refreshedEstimate ? Math.round(refreshedEstimate.carbs) : parseNumber(mealDraft.carbs, 0),
         fat: refreshedEstimate ? Math.round(refreshedEstimate.fat) : parseNumber(mealDraft.fat, 0),
-        ingredients: safeIngredients,
+        ingredients: isRecipeMeal ? [] : safeIngredients,
       });
       closeMealEditor();
       await refreshHistory();
@@ -800,6 +808,10 @@ export default function MyDayHistoryScreen() {
         mealDetailsStepLabel={t("my_day.meal_details", { defaultValue: "Meal details" })}
         nutritionStepLabel={t("my_day.meal_nutrition", { defaultValue: "Meal nutrition" })}
         quantitiesLabel={t("my_day.quantities", { defaultValue: "Quantities" })}
+        quantitiesNote={t("my_day.recipe_meal_ingredients_note", {
+          defaultValue: "This meal was logged from a recipe and uses the ingredients saved in that recipe.",
+        })}
+        hideIngredientsEditor={editingMealSource === "recipe"}
         visibleIngredients={visibleMealEditIngredients.map(({ item, index }) => ({
           index,
           key: `${item.name}-${index}`,
@@ -902,7 +914,7 @@ export default function MyDayHistoryScreen() {
             : t("common.save", { defaultValue: "Save" })
         }
         onSave={saveEdit}
-        saveDisabled={mealEditIngredients.length === 0 || mealEditSaveInFlight}
+        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight}
       />
       <MyDayAddMealFlow
         visible={addMealFlowVisible}

@@ -1,4 +1,4 @@
-const UPDATED_AT = 202604301000;
+const UPDATED_AT = 202605021800;
 
 const LOCALES = ["en", "pt-PT", "pt-BR", "es", "fr", "de"];
 
@@ -12,14 +12,14 @@ function normalizeAlias(value) {
     .trim();
 }
 
-function aliases(en, pt = en) {
+function aliases(en, pt = en, es = en, fr = en, de = en) {
   return {
     en,
     "pt-PT": pt,
     "pt-BR": pt,
-    es: en,
-    fr: en,
-    de: en,
+    es,
+    fr,
+    de,
   };
 }
 
@@ -214,6 +214,7 @@ const BASES = [
   ["bulgur", "bulgur", "carb", 83, 3.1, 19, 0.2, "g", 150, "g", ["bulgur"], ["bulgur"], "carb"],
   ["noodles", "noodles", "carb", 138, 4.5, 25, 2.1, "g", 180, "g", ["noodles"], ["noodles", "massa noodles"], "carb"],
   ["gnocchi", "gnocchi", "carb", 133, 3.4, 28, 0.6, "g", 180, "g", ["gnocchi"], ["gnocchi", "nhoque"], "carb"],
+  ["naan", "naan", "carb", 310, 9, 54, 7, "g", 70, "g", ["naan", "naan bread"], ["naan", "pao naan"], "carb"],
   ["cornmeal", "cornmeal", "carb", 370, 7, 79, 1.8, "g", 50, "g", ["cornmeal", "polenta"], ["farinha de milho", "polenta"], "carb"],
   ["cassava", "cassava", "carb", 160, 1.4, 38, 0.3, "g", 150, "g", ["cassava", "manioc"], ["mandioca"], "carb"],
   ["pumpkin", "pumpkin", "vegetable", 26, 1, 6.5, 0.1, "g", 150, "g", ["pumpkin"], ["abobora"], "vegetable"],
@@ -227,6 +228,7 @@ const BASES = [
   ["asparagus", "asparagus", "vegetable", 20, 2.2, 3.9, 0.1, "g", 100, "g", ["asparagus"], ["espargos"], "vegetable"],
   ["artichoke", "artichoke", "vegetable", 47, 3.3, 11, 0.2, "g", 100, "g", ["artichoke"], ["alcachofra"], "vegetable"],
   ["leek", "leek", "vegetable", 61, 1.5, 14, 0.3, "g", 80, "g", ["leek"], ["alho frances"], "vegetable"],
+  ["celery", "celery", "vegetable", 16, 0.7, 3, 0.2, "g", 40, "g", ["celery", "celery stalk"], ["aipo"], "vegetable"],
   ["garlic", "garlic", "vegetable", 149, 6.4, 33, 0.5, "g", 5, "g", ["garlic"], ["alho"], "vegetable"],
   ["apple", "apple", "fruit", 52, 0.3, 14, 0.2, "g", 150, "g", ["apple"], ["maca"], "fruit"],
   ["pear", "pear", "fruit", 57, 0.4, 15, 0.1, "g", 150, "g", ["pear"], ["pera"], "fruit"],
@@ -238,6 +240,7 @@ const BASES = [
   ["mango", "mango", "fruit", 60, 0.8, 15, 0.4, "g", 120, "g", ["mango"], ["manga"], "fruit"],
   ["watermelon", "watermelon", "fruit", 30, 0.6, 8, 0.2, "g", 200, "g", ["watermelon"], ["melancia"], "fruit"],
   ["melon", "melon", "fruit", 34, 0.8, 8, 0.2, "g", 180, "g", ["melon"], ["melao"], "fruit"],
+  ["lemon", "lemon", "fruit", 29, 1.1, 9.3, 0.3, "g", 60, "g", ["lemon", "lime"], ["limao", "lima"], "fruit"],
   ["raspberries", "raspberries", "fruit", 52, 1.2, 12, 0.7, "g", 80, "g", ["raspberries"], ["framboesas"], "fruit"],
   ["blackberries", "blackberries", "fruit", 43, 1.4, 10, 0.5, "g", 80, "g", ["blackberries"], ["amoras"], "fruit"],
   ["lentils", "lentils", "legume", 116, 9, 20, 0.4, "g", 130, "g", ["lentils"], ["lentilhas"], "legume"],
@@ -264,32 +267,182 @@ const BASES = [
   ["chia_seeds", "chia seeds", "nuts", 486, 17, 42, 31, "g", 15, "g", ["chia seeds"], ["sementes de chia"], "nuts"],
   ["flax_seeds", "flax seeds", "nuts", 534, 18, 29, 42, "g", 15, "g", ["flax seeds"], ["sementes de linhaca"], "nuts"],
   ["pumpkin_seeds", "pumpkin seeds", "nuts", 559, 30, 11, 49, "g", 25, "g", ["pumpkin seeds"], ["sementes de abobora"], "nuts"],
+  ["sesame_seeds", "sesame seeds", "nuts", 573, 17, 23, 50, "g", 10, "g", ["sesame seeds"], ["sementes de sesamo"], "nuts"],
   ["mayonnaise", "mayonnaise", "sauce", 680, 1, 1, 75, "g", 15, "g", ["mayonnaise", "mayo"], ["maionese"], "sauce"],
+  ["bechamel_sauce", "bechamel sauce", "sauce", 105, 3.5, 8, 6.5, "g", 60, "g", ["bechamel", "bechamel sauce", "white sauce"], ["bechamel", "molho bechamel", "molho branco"], "sauce"],
+  ["cream", "cream", "dairy", 340, 2, 3, 35, "ml", 50, "ml", ["cream", "heavy cream", "single cream", "double cream"], ["natas", "nata", "creme de leite"], "dairy"],
   ["ketchup", "ketchup", "sauce", 112, 1.3, 26, 0.2, "g", 20, "g", ["ketchup"], ["ketchup"], "sauce"],
   ["mustard", "mustard", "sauce", 66, 4.4, 5.8, 3.3, "g", 10, "g", ["mustard"], ["mostarda"], "sauce"],
   ["pesto", "pesto", "sauce", 418, 5, 7, 41, "g", 30, "g", ["pesto"], ["pesto"], "sauce"],
   ["hummus", "hummus", "sauce", 166, 8, 14, 10, "g", 50, "g", ["hummus"], ["hummus"], "sauce"],
   ["soy_sauce", "soy sauce", "sauce", 53, 8, 4.9, 0.6, "ml", 15, "ml", ["soy sauce"], ["molho de soja"], "sauce"],
   ["barbecue_sauce", "barbecue sauce", "sauce", 172, 0.8, 40, 0.6, "g", 25, "g", ["barbecue sauce", "bbq sauce"], ["molho barbecue"], "sauce"],
+  ["yogurt_sauce", "yogurt sauce", "sauce", 80, 4, 6, 4, "g", 30, "g", ["yogurt sauce"], ["molho de iogurte"], "sauce"],
   ["wine", "wine", "drink", 85, 0.1, 2.6, 0, "ml", 150, "ml", ["wine"], ["vinho"], "drink"],
+  ["coconut_cream", "coconut cream", "sauce", 330, 2, 6, 34, "ml", 50, "ml", ["coconut cream", "coconut milk"], ["creme de coco", "leite de coco"], "sauce"],
   ["beer", "beer", "drink", 43, 0.5, 3.6, 0, "ml", 330, "ml", ["beer"], ["cerveja"], "drink"],
   ["almond_milk", "almond milk", "drink", 17, 0.6, 0.7, 1.5, "ml", 200, "ml", ["almond milk"], ["bebida de amendoa"], "drink"],
   ["soy_milk", "soy milk", "drink", 54, 3.3, 6, 1.8, "ml", 200, "ml", ["soy milk"], ["bebida de soja"], "drink"],
   ["oat_milk", "oat milk", "drink", 46, 1, 6.7, 1.5, "ml", 200, "ml", ["oat milk"], ["bebida de aveia"], "drink"],
   ["smoothie", "smoothie", "drink", 65, 1.5, 13, 1, "ml", 250, "ml", ["smoothie"], ["smoothie", "batido"], "drink"],
   ["pizza", "pizza", "prepared", 266, 11, 33, 10, "g", 180, "g", ["pizza"], ["pizza"], "prepared"],
+  ["pizza_dough", "pizza dough", "carb", 260, 7, 52, 2.5, "g", 160, "g", ["pizza dough", "pizza base", "pizza crust"], ["massa de pizza", "base de pizza"], "carb"],
+  ["wheat_flour", "wheat flour", "carb", 364, 10, 76, 1, "g", 30, "g", ["flour", "wheat flour", "all purpose flour", "plain flour"], ["farinha", "farinha de trigo"], "carb"],
+  ["white_sugar", "white sugar", "carb", 387, 0, 100, 0, "g", 10, "g", ["sugar", "white sugar", "granulated sugar"], ["acucar", "acucar branco"], "carb"],
+  ["brown_sugar", "brown sugar", "carb", 380, 0, 98, 0, "g", 10, "g", ["brown sugar"], ["acucar mascavado", "acucar amarelo"], "carb"],
   ["lasagna", "lasagna", "prepared", 135, 7, 12, 6, "g", 250, "g", ["lasagna"], ["lasanha"], "prepared"],
+  ["lasagna_sheets", "lasagna sheets", "carb", 350, 12, 72, 1.5, "g", 50, "g", ["lasagna sheets", "lasagne sheets", "pasta sheets"], ["folhas de lasanha", "placas de lasanha", "massa de lasanha"], "carb"],
   ["meatballs", "meatballs", "prepared", 197, 13, 7, 12, "g", 150, "g", ["meatballs"], ["almondegas"], "prepared"],
+  ["salad", "salad", "vegetable", 40, 2, 7, 0.5, "g", 80, "g", ["salad", "mixed salad"], ["salada", "salada mista"], "vegetable"],
+  ["bread_slices", "sliced bread", "carb", 265, 9, 49, 3.2, "g", 30, "g", ["sliced bread", "bread slice", "bread slices"], ["pao de forma", "fatia de pao", "fatias de pao"], "carb"],
+  ["puff_pastry", "puff pastry", "carb", 558, 7, 45, 38, "g", 80, "g", ["puff pastry", "shortcrust pastry", "pastry sheet"], ["massa folhada", "massa quebrada"], "carb"],
+  ["breadcrumbs", "breadcrumbs", "carb", 395, 13, 72, 5, "g", 30, "g", ["breadcrumbs", "bread crumbs"], ["pao ralado", "farinha de rosca"], "carb"],
+  ["ham_slices", "ham slices", "protein", 145, 21, 1.5, 6, "g", 50, "g", ["ham slices", "sliced ham"], ["fatias de fiambre", "fiambre fatiado"], "protein"],
+  ["egg_yolk", "egg yolk", "protein", 322, 16, 3.6, 27, "g", 18, "g", ["egg yolk", "egg yolks"], ["gema", "gemas", "gema de ovo", "gemas de ovo"], "protein"],
+  ["egg_white", "egg white", "protein", 52, 11, 0.7, 0.2, "g", 33, "g", ["egg white", "egg whites"], ["clara", "claras", "clara de ovo", "claras de ovo"], "protein"],
   ["omelette", "omelette", "prepared", 154, 11, 1, 12, "g", 150, "g", ["omelette"], ["omelete"], "prepared"],
   ["pancakes", "pancakes", "prepared", 227, 6, 28, 10, "g", 120, "g", ["pancakes"], ["panquecas"], "prepared"],
   ["waffles", "waffles", "prepared", 291, 8, 33, 14, "g", 100, "g", ["waffles"], ["waffles"], "prepared"],
   ["croissant", "croissant", "prepared", 406, 8, 45, 21, "g", 70, "g", ["croissant"], ["croissant"], "prepared"],
   ["muffin", "muffin", "prepared", 377, 5, 54, 16, "g", 90, "g", ["muffin"], ["muffin"], "prepared"],
-  ["chocolate", "chocolate", "prepared", 546, 4.9, 61, 31, "g", 30, "g", ["chocolate"], ["chocolate"], "prepared"],
-  ["ice_cream", "ice cream", "prepared", 207, 3.5, 24, 11, "g", 100, "g", ["ice cream"], ["gelado"], "prepared"],
+  ["chocolate", "chocolate", "prepared", 546, 4.9, 61, 31, "g", 30, "g", ["chocolate", "chocolate chips"], ["chocolate", "pepitas de chocolate", "gotas de chocolate"], "prepared"],
+  ["ice_cream", "ice cream", "prepared", 207, 3.5, 24, 11, "g", 100, "g", ["ice cream", "vanilla ice cream"], ["gelado", "gelado de baunilha"], "prepared"],
   ["protein_bar", "protein bar", "prepared", 350, 25, 35, 10, "g", 60, "g", ["protein bar"], ["barra proteica"], "prepared"],
   ["cereal_bar", "cereal bar", "prepared", 380, 6, 65, 10, "g", 40, "g", ["cereal bar"], ["barra de cereais"], "prepared"],
 ];
+
+const BASE_LOCALE_ALIASES = {
+  pork_lion: {
+    es: ["cerdo", "lomo de cerdo", "solomillo de cerdo"],
+    fr: ["porc", "filet de porc"],
+    de: ["schwein", "schweinefilet", "schweinelende"],
+  },
+  pork_chop: {
+    es: ["chuleta de cerdo", "cerdo"],
+    fr: ["cote de porc", "porc"],
+    de: ["schweinekotelett", "schwein"],
+  },
+  ham: {
+    es: ["jamon", "jamon cocido", "lonchas de jamon"],
+    fr: ["jambon", "jambon cuit", "tranches de jambon"],
+    de: ["schinken", "gekochter schinken"],
+  },
+  cod: {
+    es: ["bacalao"],
+    fr: ["morue", "cabillaud"],
+    de: ["kabeljau", "dorsch"],
+  },
+  shrimp: {
+    es: ["gambas", "camarones", "langostinos"],
+    fr: ["crevettes"],
+    de: ["garnelen", "shrimps"],
+  },
+  noodles: {
+    es: ["fideos", "pasta", "noodles"],
+    fr: ["nouilles", "pates"],
+    de: ["nudeln", "pasta"],
+  },
+  gnocchi: {
+    es: ["noquis", "gnocchi"],
+    fr: ["gnocchi"],
+    de: ["gnocchi"],
+  },
+  wheat_flour: {
+    es: ["harina", "harina de trigo"],
+    fr: ["farine", "farine de ble"],
+    de: ["mehl", "weizenmehl"],
+  },
+  white_sugar: {
+    es: ["azucar", "azucar blanco"],
+    fr: ["sucre", "sucre blanc"],
+    de: ["zucker", "weisser zucker"],
+  },
+  brown_sugar: {
+    es: ["azucar moreno", "azucar mascabado"],
+    fr: ["sucre roux", "cassonade"],
+    de: ["brauner zucker", "rohrzucker"],
+  },
+  bechamel_sauce: {
+    es: ["bechamel", "salsa bechamel", "salsa blanca"],
+    fr: ["bechamel", "sauce bechamel", "sauce blanche"],
+    de: ["bechamel", "bechamelsosse", "weisse sosse"],
+  },
+  cream: {
+    es: ["nata", "crema", "crema de leche"],
+    fr: ["creme", "creme liquide", "creme fraiche"],
+    de: ["sahne", "rahm", "schlagsahne"],
+  },
+  coconut_cream: {
+    es: ["crema de coco", "leche de coco"],
+    fr: ["creme de coco", "lait de coco"],
+    de: ["kokoscreme", "kokosmilch"],
+  },
+  soy_sauce: {
+    es: ["salsa de soja"],
+    fr: ["sauce soja"],
+    de: ["sojasosse", "sojasauce"],
+  },
+  sesame_seeds: {
+    es: ["semillas de sesamo", "sesamo", "ajonjoli"],
+    fr: ["graines de sesame", "sesame"],
+    de: ["sesam", "sesamsamen"],
+  },
+  egg_yolk: {
+    es: ["yema", "yemas", "yema de huevo"],
+    fr: ["jaune d oeuf", "jaunes d oeuf"],
+    de: ["eigelb", "eigelbe"],
+  },
+  egg_white: {
+    es: ["clara", "claras", "clara de huevo"],
+    fr: ["blanc d oeuf", "blancs d oeuf"],
+    de: ["eiweiss", "eiweisse"],
+  },
+  feta: {
+    es: ["feta", "queso feta"],
+    fr: ["feta", "fromage feta"],
+    de: ["feta", "fetakase", "feta kase"],
+  },
+  ricotta: {
+    es: ["ricotta", "requeson"],
+    fr: ["ricotta"],
+    de: ["ricotta"],
+  },
+  mozzarella: {
+    es: ["mozzarella", "queso mozzarella"],
+    fr: ["mozzarella"],
+    de: ["mozzarella"],
+  },
+  cream_cheese: {
+    es: ["queso crema", "philadelphia"],
+    fr: ["fromage frais", "fromage a tartiner", "philadelphia"],
+    de: ["frischkase", "philadelphia"],
+  },
+  spinach: {
+    es: ["espinacas", "espinaca"],
+    fr: ["epinards", "epinard"],
+    de: ["spinat"],
+  },
+  artichoke: {
+    es: ["alcachofa", "alcachofas"],
+    fr: ["artichaut", "artichauts"],
+    de: ["artischocke", "artischocken"],
+  },
+  breadcrumbs: {
+    es: ["pan rallado"],
+    fr: ["chapelure"],
+    de: ["paniermehl", "semmelbrosel"],
+  },
+  chocolate: {
+    es: ["chocolate", "pepitas de chocolate"],
+    fr: ["chocolat", "pepites de chocolat"],
+    de: ["schokolade", "schokoladenstuckchen"],
+  },
+  ice_cream: {
+    es: ["helado", "helado de vainilla"],
+    fr: ["glace", "glace vanille"],
+    de: ["eis", "vanilleeis"],
+  },
+};
 
 function scaledNutrition(base, variant) {
   const [, , calorieScale, proteinScale, carbScale, fatScale] = variant;
@@ -329,6 +482,7 @@ function buildExpandedItems() {
       variantKey,
     ] = base;
     const baseNutrition = { calories, protein, carbs, fat, unit };
+    const localeAliases = BASE_LOCALE_ALIASES[id] || {};
     items.push(
       item(
         `expanded_${id}`,
@@ -336,7 +490,13 @@ function buildExpandedItems() {
         category,
         baseNutrition,
         { quantity: servingQuantity, unit: servingUnit },
-        aliases(enAliases, ptAliases)
+        aliases(
+          enAliases,
+          ptAliases,
+          localeAliases.es || enAliases,
+          localeAliases.fr || enAliases,
+          localeAliases.de || enAliases
+        )
       )
     );
 

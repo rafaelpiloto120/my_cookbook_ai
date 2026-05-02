@@ -90,6 +90,103 @@ function parseDuration(str) {
   return match ? parseInt(match[1], 10) : null;
 }
 
+function parseNutritionNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  if (typeof value !== "string") return null;
+  const normalized = he
+    .decode(value)
+    .replace(",", ".")
+    .replace(/\s+/g, " ")
+    .trim();
+  const match = normalized.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function normalizeNutritionInfo(input) {
+  if (!input || typeof input !== "object") return null;
+  const raw =
+    input.perServing && typeof input.perServing === "object"
+      ? input.perServing
+      : input;
+
+  const perServing = {
+    calories: parseNutritionNumber(raw.calories ?? raw.caloriesContent ?? raw.energy ?? raw.kcal),
+    protein: parseNutritionNumber(raw.protein ?? raw.proteinContent),
+    carbs: parseNutritionNumber(
+      raw.carbs ?? raw.carbohydrates ?? raw.carbohydrateContent ?? raw.carbohydratesContent
+    ),
+    fat: parseNutritionNumber(raw.fat ?? raw.fatContent),
+  };
+
+  const hasAnyValue = Object.values(perServing).some((value) => value !== null);
+  if (!hasAnyValue) return null;
+
+  return {
+    perServing,
+    source: "imported_url",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function mergeNutritionSources(primary, secondary) {
+  const primaryInfo = normalizeNutritionInfo(primary);
+  const secondaryInfo = normalizeNutritionInfo(secondary);
+  if (!primaryInfo) return secondaryInfo;
+  if (!secondaryInfo) return primaryInfo;
+
+  return {
+    ...primaryInfo,
+    perServing: {
+      calories: primaryInfo.perServing.calories ?? secondaryInfo.perServing.calories,
+      protein: primaryInfo.perServing.protein ?? secondaryInfo.perServing.protein,
+      carbs: primaryInfo.perServing.carbs ?? secondaryInfo.perServing.carbs,
+      fat: primaryInfo.perServing.fat ?? secondaryInfo.perServing.fat,
+    },
+  };
+}
+
+function extractVisibleNutrition($) {
+  const text = $("body").text().replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const pick = (patterns) => {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        const parsed = parseNutritionNumber(match[1]);
+        if (parsed !== null) return parsed;
+      }
+    }
+    return null;
+  };
+
+  const nutrition = {
+    calories: pick([
+      /(?:calorias|calories|kalorien|kcal|energia|energy)\s*:?\s*(\d+(?:[,.]\d+)?)/i,
+      /(\d+(?:[,.]\d+)?)\s*(?:kcal|calorias|calories|kalorien)\b/i,
+    ]),
+    protein: pick([
+      /(?:prote[ií]nas?|protein|proteines?|protéines?|eiwei[ßs])\s*:?\s*(\d+(?:[,.]\d+)?)/i,
+      /(\d+(?:[,.]\d+)?)\s*g\s*(?:prote[ií]nas?|protein|proteines?|protéines?|eiwei[ßs])/i,
+    ]),
+    carbs: pick([
+      /(?:hidratos(?: de carbono)?|carboidratos|carbs?|carbohydrates?|glucides|kohlenhydrate)\s*:?\s*(\d+(?:[,.]\d+)?)/i,
+      /(\d+(?:[,.]\d+)?)\s*g\s*(?:hidratos(?: de carbono)?|carboidratos|carbs?|carbohydrates?|glucides|kohlenhydrate)/i,
+    ]),
+    fat: pick([
+      /(?:l[ií]pidos?|gorduras?|fat|mati[eè]res grasses|fett)\s*:?\s*(\d+(?:[,.]\d+)?)/i,
+      /(\d+(?:[,.]\d+)?)\s*g\s*(?:l[ií]pidos?|gorduras?|fat|mati[eè]res grasses|fett)/i,
+    ]),
+  };
+
+  return Object.values(nutrition).some((value) => value !== null) ? nutrition : null;
+}
+
 function extractServings(str) {
   if (typeof str !== "string") return null;
   let match =
@@ -136,9 +233,6 @@ function normalizeImportedRecipe(scraped, requestInfo) {
   }
   if (typeof candidateServings === "number" && candidateServings > 0 && candidateServings < 1000) {
     servings = candidateServings;
-  }
-  if (typeof servings !== "number" || !Number.isFinite(servings) || servings <= 0 || servings >= 1000) {
-    servings = 4;
   }
 
   let image;
@@ -234,13 +328,14 @@ function normalizeImportedRecipe(scraped, requestInfo) {
           : "Untitled Recipe",
     cookingTime,
     difficulty,
-    servings,
+    servings: typeof servings === "number" && Number.isFinite(servings) ? servings : null,
     cost: "Medium",
     ingredients,
     steps,
     tags,
     createdAt: new Date().toISOString(),
     image,
+    nutritionInfo: mergeNutritionSources(scraped.nutritionInfo, scraped.nutrition),
   };
 }
 
@@ -398,6 +493,7 @@ function extractContinenteRecipe($) {
   };
   if (servingsText) scraped.yield = servingsText[1];
   if (timeMatch) scraped.totalTime = parseInt(timeMatch[1], 10);
+  scraped.nutrition = extractVisibleNutrition($);
   return scraped;
 }
 
@@ -821,8 +917,14 @@ export function extractRecipeFromHtml({ url, html, requestInfo }) {
   const $ = cheerio.load(html);
   const ldRecipes = extractJsonLd(html);
   if (ldRecipes.length > 0) {
+    const scraped = { ...ldRecipes[0] };
+    const visibleNutrition = extractVisibleNutrition($);
+    if (visibleNutrition) {
+      scraped.nutritionInfo = scraped.nutrition;
+      scraped.nutrition = visibleNutrition;
+    }
     return {
-      recipe: normalizeImportedRecipe(ldRecipes[0], requestInfo),
+      recipe: normalizeImportedRecipe(scraped, requestInfo),
       extractor: "jsonld",
       stage: "jsonld",
       looksRecipeLike: true,
@@ -846,6 +948,7 @@ export function extractRecipeFromHtml({ url, html, requestInfo }) {
     if (!extractor.match.test(url)) continue;
     const scraped = extractor.run();
     if (scraped) {
+      if (!scraped.nutrition && !scraped.nutritionInfo) scraped.nutrition = extractVisibleNutrition($);
       return {
         recipe: normalizeImportedRecipe(scraped, requestInfo),
         extractor: extractor.id,
@@ -857,6 +960,7 @@ export function extractRecipeFromHtml({ url, html, requestInfo }) {
 
   const generic = extractGenericRecipe($);
   if (generic) {
+    if (!generic.nutrition && !generic.nutritionInfo) generic.nutrition = extractVisibleNutrition($);
     return {
       recipe: normalizeImportedRecipe(generic, requestInfo),
       extractor: "generic_html",

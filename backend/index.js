@@ -68,6 +68,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const INGREDIENT_CATALOG_DOC_PATH = "ingredientCatalog/default";
+const MEAL_PHRASE_RULES_DOC_PATH = "mealPhraseRules/default";
+const MEAL_TEXT_RESOLVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MEAL_TEXT_RESOLVE_CACHE_MAX = 500;
+const mealTextResolveCache = new Map();
 
 function ingredientCatalogDocRef(db) {
   return db.doc(INGREDIENT_CATALOG_DOC_PATH);
@@ -79,6 +83,88 @@ function ingredientCatalogItemsCol(db) {
 
 function ingredientCatalogCandidatesCol(db) {
   return ingredientCatalogDocRef(db).collection("candidates");
+}
+
+function mealPhraseRulesDocRef(db) {
+  return db.doc(MEAL_PHRASE_RULES_DOC_PATH);
+}
+
+function mealPhraseRuleCandidatesCol(db) {
+  return mealPhraseRulesDocRef(db).collection("candidates");
+}
+
+function normalizeMealTextResolveCacheKey(input, language) {
+  return `${normalizeLanguage(language)}:${String(input || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()}`;
+}
+
+function stableHash(value) {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getMealTextResolveCache(key) {
+  const cached = mealTextResolveCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.createdAt > MEAL_TEXT_RESOLVE_CACHE_TTL_MS) {
+    mealTextResolveCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function setMealTextResolveCache(key, value) {
+  if (mealTextResolveCache.size >= MEAL_TEXT_RESOLVE_CACHE_MAX) {
+    const oldestKey = mealTextResolveCache.keys().next().value;
+    if (oldestKey) mealTextResolveCache.delete(oldestKey);
+  }
+  mealTextResolveCache.set(key, {
+    createdAt: Date.now(),
+    value,
+  });
+}
+
+async function persistMealPhraseRuleCandidate({
+  input,
+  language,
+  parsedIngredients,
+  result,
+}) {
+  if (!_adminInitialized || !input || !result) return;
+  const now = Date.now();
+  const db = getAnalyticsDb();
+  const cacheKey = normalizeMealTextResolveCacheKey(input, language);
+  const readableId = cacheKey
+    .replace(/[^a-z0-9]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  const candidateId = `${readableId || "phrase"}_${stableHash(cacheKey)}`;
+  await mealPhraseRuleCandidatesCol(db).doc(candidateId).set(
+    {
+      input: String(input || "").trim(),
+      language: normalizeLanguage(language),
+      parsedIngredients: Array.isArray(parsedIngredients) ? parsedIngredients : [],
+      title: result.title,
+      ingredients: result.ingredients,
+      nutrition: result.nutrition,
+      confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : null,
+      source: "describe_meal_ai",
+      status: "candidate",
+      createdAt: now,
+      updatedAt: now,
+      _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 function ingredientCatalogItemIdFromName(name) {
@@ -405,6 +491,7 @@ const PREMIUM_ACTION_COSTS = {
   recipe_nutrition_estimate: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
   meal_photo_log: ECONOMY_LIMITS.COST_MEAL_PHOTO_LOG,
   describe_meal: ECONOMY_LIMITS.COST_DESCRIBE_MEAL,
+  recipe_meal_estimate: ECONOMY_LIMITS.COST_RECIPE_NUTRITION_ESTIMATE,
   import_instagram_reel: ECONOMY_LIMITS.COST_IMPORT_INSTAGRAM_REEL,
 };
 
@@ -1848,6 +1935,113 @@ app.post("/recipes/estimate-nutrition/charge", async (req, res) => {
   }
 });
 
+app.post("/recipes/estimate-nutrition", async (req, res) => {
+  try {
+    const title = sanitizeInput(req.body?.title || "Recipe");
+    const language = normalizeLanguage(req.body?.language);
+    const servingsRaw = Number(req.body?.servings);
+    const servings = Number.isFinite(servingsRaw) && servingsRaw > 0 ? Math.round(servingsRaw) : null;
+    const ingredients = Array.isArray(req.body?.ingredients)
+      ? req.body.ingredients.map(sanitizeInput).filter(Boolean).slice(0, 80)
+      : [];
+
+    if (!title && ingredients.length === 0) {
+      return res.status(400).json({ ok: false, error: "Recipe title or ingredients are required" });
+    }
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["perServing", "servingsUsed", "yieldUnit", "recipeType", "confidence"],
+      properties: {
+        perServing: {
+          type: "object",
+          additionalProperties: false,
+          required: ["calories", "protein", "carbs", "fat"],
+          properties: {
+            calories: { type: "number" },
+            protein: { type: "number" },
+            carbs: { type: "number" },
+            fat: { type: "number" },
+          },
+        },
+        servingsUsed: { type: "number" },
+        yieldUnit: { type: "string" },
+        recipeType: { type: "string" },
+        confidence: { type: "number" },
+      },
+    };
+
+    const prompt = `
+Estimate nutrition per serving for this recipe as a whole.
+
+Rules:
+- Use the full recipe context, not ingredient-by-ingredient serving guesses.
+- If recipe servings are provided, use them only when they appear to mean expected eating portions.
+- If the provided serving count is 1 but the recipe is clearly a batch, tray, cake, bars, cookies, dip, spread, sauce, waffles, pancakes, or snack made from multi-serving quantities, infer the number of expected eating servings instead of treating the whole batch as one serving.
+- If servings are not specified, infer a typical yield/number of portions from the dish type, title, ingredient quantities, and recipe context.
+- For tray cakes, bars, cookies, pancakes, waffles, pies, quiches, or batch desserts, avoid treating the whole batch as one serving unless the title clearly says single serving.
+- servingsUsed is the number of expected eating servings a person would log, not necessarily the physical number of pieces.
+- yieldUnit should describe what the recipe makes, e.g. portions, slices, bars, cookies, pancakes, waffles, cups.
+- recipeType should be a short category, e.g. main_dish, side_dish, dessert, snack, breakfast, batch_bake, drink.
+- Return conservative, realistic per-serving calories and macros.
+- Do not explain.
+
+Recipe:
+Title: ${title || "Recipe"}
+Servings: ${servings ?? "not specified; infer realistic yield"}
+Language: ${language}
+Ingredients:
+${ingredients.map((ingredient) => `- ${ingredient}`).join("\n") || "- Not provided"}
+`;
+
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "recipe_nutrition_estimate",
+      schema,
+      temperature: 0.1,
+      timeoutMs: 20000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a nutrition estimation assistant. Estimate the whole recipe per serving with realistic conservative calories and macros. Return valid JSON only.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    raw = cleanJsonResponse(raw);
+    const parsed = safeJSONParse(raw, {});
+    const perServing = parsed?.perServing || {};
+    const nutrition = {
+      calories: Math.max(Math.round(Number(perServing.calories) || 0), 1),
+      protein: Math.max(Math.round(Number(perServing.protein) || 0), 0),
+      carbs: Math.max(Math.round(Number(perServing.carbs) || 0), 0),
+      fat: Math.max(Math.round(Number(perServing.fat) || 0), 0),
+    };
+
+    if (!Number.isFinite(nutrition.calories) || nutrition.calories <= 0) {
+      return res.status(500).json({ ok: false, error: "Failed to estimate recipe nutrition" });
+    }
+
+    return res.json({
+      ok: true,
+      nutrition: {
+        perServing: nutrition,
+        source: "ai_recipe_estimate",
+        updatedAt: new Date().toISOString(),
+      },
+      servingsUsed: Number.isFinite(Number(parsed?.servingsUsed)) ? Number(parsed.servingsUsed) : servings,
+      yieldUnit: sanitizeInput(parsed?.yieldUnit || ""),
+      recipeType: sanitizeInput(parsed?.recipeType || ""),
+      confidence: Number.isFinite(Number(parsed?.confidence)) ? Number(parsed.confidence) : null,
+    });
+  } catch (err) {
+    console.error("❌ /recipes/estimate-nutrition error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to estimate recipe nutrition" });
+  }
+});
+
 // Backend-first economy catalog for the in-app store UI.
 // The mobile app should render offers and only allow purchase if billingEnabled is true.
 app.get("/economy/catalog", async (req, res) => {
@@ -3274,6 +3468,411 @@ app.post("/ingredients/catalog/candidates", async (req, res) => {
   }
 });
 
+function ingredientLocaleFromLanguage(language) {
+  const normalized = String(language || "").trim().toLowerCase();
+  if (normalized.includes("brazil") || normalized.includes("brasil") || normalized.startsWith("pt-br")) return "pt-BR";
+  if (normalized.includes("portuguese") || normalized.includes("português") || normalized.startsWith("pt")) return "pt-PT";
+  if (normalized.includes("spanish") || normalized.includes("español") || normalized.startsWith("es")) return "es";
+  if (normalized.includes("french") || normalized.includes("français") || normalized.startsWith("fr")) return "fr";
+  if (normalized.includes("german") || normalized.includes("deutsch") || normalized.startsWith("de")) return "de";
+  return "en";
+}
+
+function buildRuntimeIngredientAliases({ canonicalName, displayName, sourceText, requestedName, requestedLocale }) {
+  const values = Array.from(
+    new Set(
+      [requestedName, displayName, sourceText, canonicalName]
+        .map((value) => normalizeAlias(value || ""))
+        .filter(Boolean)
+    )
+  );
+  const fallback = values.length > 0 ? values : ["ingredient"];
+  const canonicalOnly = normalizeAlias(canonicalName || "") ? [normalizeAlias(canonicalName)] : fallback;
+  return Object.fromEntries(
+    SUPPORTED_INGREDIENT_LOCALES.map((locale) => [
+      locale,
+      locale === requestedLocale ? fallback : canonicalOnly,
+    ])
+  );
+}
+
+function runtimeFoodText(item, requestedName = "") {
+  return [
+    item?.sourceText,
+    item?.displayName,
+    item?.canonicalName,
+    requestedName,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function normalizeRuntimeQuantity(quantity, fallback = { quantity: 1, unit: "g" }) {
+  const rawQuantity = Number(quantity?.quantity);
+  const unit = String(quantity?.unit || fallback?.unit || "g").toLowerCase();
+  return {
+    quantity: Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : Number(fallback?.quantity) || 1,
+    unit,
+  };
+}
+
+function clampRuntimeIngredientQuantity(quantity, item, requestedName = "") {
+  const text = runtimeFoodText(item, requestedName);
+  const normalized = normalizeRuntimeQuantity(quantity);
+
+  const isOil =
+    /\b(olive oil|oil|azeite|aceite|huile|olivenol)\b/.test(text) &&
+    !/\b(coconut oil|coconut milk|leite de coco)\b/.test(text);
+  const isTinyOil =
+    /\b(fio de|drizzle of|splash of|dash of|chorrito de|filet d['’]?|q\.?\s*b\.?|quanto baste|as needed|to taste)\b/.test(
+      text
+    );
+  if (isOil && isTinyOil) {
+    return { quantity: 5, unit: normalized.unit === "ml" ? "ml" : "g" };
+  }
+  if (isOil && ["g", "ml"].includes(normalized.unit) && normalized.quantity > 20) {
+    return { quantity: 14, unit: normalized.unit };
+  }
+
+  const isEggYolk = /\b(egg yolks?|yolks?|gema|gemas|eigelb|yema|yemas|jaune)\b/.test(text);
+  if (isEggYolk && ["g", "ml"].includes(normalized.unit) && normalized.quantity > 30) {
+    return { quantity: 18, unit: "g" };
+  }
+
+  const isEggWhite = /\b(egg whites?|whites?|clara|claras|eiweiss|blanc d oeuf)\b/.test(text);
+  if (isEggWhite && ["g", "ml"].includes(normalized.unit) && normalized.quantity > 50) {
+    return { quantity: 33, unit: "g" };
+  }
+
+  const isWholeEgg = /\b(eggs?|ovos?|huevos?|oeufs?|eier?)\b/.test(text);
+  const isPreparedEggServing =
+    /\b(scrambled eggs|ovo[s]? mexido[s]?|huevos? revueltos?|oeufs? brouilles?|rührei|ruhrei|boiled eggs|ovos? cozidos?|huevos? cocidos?|oeufs? durs?|gekochte eier)\b/.test(text);
+  if (isWholeEgg && isPreparedEggServing && ["g", "ml"].includes(normalized.unit) && normalized.quantity < 90) {
+    return { quantity: 100, unit: "g" };
+  }
+  if (isWholeEgg && ["g", "ml"].includes(normalized.unit) && normalized.quantity > 80) {
+    return { quantity: 50, unit: "g" };
+  }
+
+  return normalized;
+}
+
+function sanitizeRuntimeResolvedIngredient(item, requestedName = "") {
+  if (!item || typeof item !== "object") return item;
+  return {
+    ...item,
+    defaultServing: clampRuntimeIngredientQuantity(item.defaultServing, item, requestedName),
+    resolvedQuantity: clampRuntimeIngredientQuantity(item.resolvedQuantity, item, requestedName),
+  };
+}
+
+function clampMealTextResolvedQuantity(item, input = "") {
+  const quantity = Number(item?.quantity);
+  const unit = String(item?.unit || "").toLowerCase();
+  const text = String(item?.name || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const contextText = String(input || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const fullText = `${text} ${contextText}`;
+
+  if (!Number.isFinite(quantity) || quantity <= 0) return null;
+  if (!["g", "ml"].includes(unit)) return null;
+
+  const isSolidFood =
+    /\b(banana|bread|toast|pao|paes|pan|pain|brot|egg|eggs|ovo|ovos|huevo|huevos|oeuf|oeufs|eier|ei|oats|oatmeal|aveia|avena|flocons|hafer|yogurt|iogurte|yogur|yaourt|joghurt|cottage|sandwich|sandes|sanduiche|wrap|omelet|omelette|omelete|tortilla|omelett|rice bowl|bowl|bol|reisschussel|cake|bolo|tarta|gateau|kuchen|sushi|pizza|lasagna|lasanha|lasana|lasaña|lasagne|shrimp|gambas|crevettes|garnelen)\b/.test(text);
+  if (unit === "ml" && isSolidFood) {
+    return { quantity, unit: "g" };
+  }
+
+  if (/\b(cottage|fromage cottage|huttenkase|huettenkaese|huttenkase)\b/.test(text) && unit === "g" && quantity < 80) {
+    return { quantity: 150, unit: "g" };
+  }
+  if (/\b(wrap)\b/.test(text) && unit === "g" && quantity < 120) {
+    return { quantity: 220, unit: "g" };
+  }
+  if (/\b(avocado toast|torrada de abacate|tostada de aguacate|toast avocat|avocado-toast)\b/.test(text) && unit === "g" && quantity < 100) {
+    return { quantity: 150, unit: "g" };
+  }
+
+  const isTiny = quantity < 5;
+  if (!isTiny) return { quantity, unit };
+
+  const asQuantity = (nextQuantity, nextUnit = unit) => ({ quantity: nextQuantity, unit: nextUnit });
+
+  if (/\b(protein shake|shake de proteina|batido de proteina|shake proteine|proteinshake)\b/.test(text)) {
+    return asQuantity(250, "ml");
+  }
+  if (/\b(leite achocolatado|schokomilch|lait chocolate|leche chocolateada|chocolate milk)\b/.test(text)) {
+    return asQuantity(250, "ml");
+  }
+  if (/\b(soup|sopa|soupe|suppe|caldo)\b/.test(text)) {
+    return asQuantity(300, "ml");
+  }
+  if (/\b(banana|platano|platanos|banane)\b/.test(text)) {
+    return asQuantity(120, "g");
+  }
+  if (/\b(bread slice|slice of bread|fatia de pao|rebanada de pan|tranche de pain|scheibe brot)\b/.test(text)) {
+    return asQuantity(30, "g");
+  }
+  if (/\b(bread|toast|pao|paes|pan|pain|brot)\b/.test(text)) {
+    const hasTwo = /\b(2|two|dois|duas|dos|deux|zwei)\b/.test(fullText);
+    return asQuantity(hasTwo ? 120 : 30, "g");
+  }
+  if (/\b(egg|eggs|ovo|ovos|huevo|huevos|oeuf|oeufs|eier|ei|ruhrei|ruehrei|rührei)\b/.test(text)) {
+    const hasTwo = /\b(2|two|dois|duas|dos|deux|zwei)\b/.test(fullText);
+    return asQuantity(hasTwo ? 100 : 50, "g");
+  }
+  if (/\b(oats|oatmeal|aveia|avena|flocons|flocons d avoine|hafer|haferbrei)\b/.test(text)) {
+    return asQuantity(40, "g");
+  }
+  if (/\b(sushi)\b/.test(text)) {
+    return asQuantity(180, "g");
+  }
+  if (/\b(shrimp|gambas|crevettes|garnelen)\b/.test(text)) {
+    return asQuantity(150, "g");
+  }
+  if (/\b(yogurt|iogurte|yogur|yaourt|joghurt)\b/.test(text)) {
+    return asQuantity(125, "g");
+  }
+  if (/\b(cottage|fromage cottage|huttenkase|huettenkaese|huttenkase)\b/.test(text)) {
+    return asQuantity(150, "g");
+  }
+  if (/\b(sandwich|sandes|sanduiche|sandwich|thunfisch sandwich)\b/.test(text)) {
+    const isHalf = /\b(half|meia|meio|medio|demi|halbes?)\b/.test(fullText);
+    return asQuantity(isHalf ? 110 : 220, "g");
+  }
+  if (/\b(wrap)\b/.test(text)) {
+    return asQuantity(220, "g");
+  }
+  if (/\b(omelet|omelette|omelete|tortilla|omelett)\b/.test(text)) {
+    return asQuantity(150, "g");
+  }
+  if (/\b(rice bowl|bowl de arroz|bol de arroz|bol de riz|reisschussel|reisschüssel)\b/.test(text)) {
+    return asQuantity(200, "g");
+  }
+  if (/\b(cake|bolo|tarta|gateau|kuchen)\b/.test(text)) {
+    return asQuantity(80, "g");
+  }
+
+  return { quantity, unit };
+}
+
+function buildRuntimeResolvedLocalEntry(item, language, requestedName) {
+  const canonicalName = normalizeAlias(item?.canonicalName || item?.displayName || item?.sourceText || "");
+  const displayName = sanitizeInput(item?.displayName || item?.canonicalName || item?.sourceText || canonicalName);
+  const requestedLocale = ingredientLocaleFromLanguage(language);
+  const aliases = buildRuntimeIngredientAliases({
+    canonicalName,
+    displayName,
+    sourceText: item?.sourceText,
+    requestedName,
+    requestedLocale,
+  });
+  const nutritionPer100 = item?.nutritionPer100 || {};
+  const defaultServing = item?.defaultServing || item?.resolvedQuantity || {};
+
+  return serializeIngredientCatalogItem(
+    `runtime_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    {
+      canonicalName,
+      category: sanitizeInput(item?.category || "") || null,
+      aliases,
+      nutritionPer100: {
+        calories: Number(nutritionPer100.calories),
+        protein: Number(nutritionPer100.protein),
+        carbs: Number(nutritionPer100.carbs),
+        fat: Number(nutritionPer100.fat),
+        unit: nutritionPer100.unit === "ml" ? "ml" : "g",
+      },
+      defaultServing: {
+        quantity: Number(defaultServing.quantity),
+        unit: String(defaultServing.unit || "g").toLowerCase(),
+      },
+      source: "ai_resolved",
+      updatedAt: Date.now(),
+    }
+  );
+}
+
+function queueIngredientCatalogCandidateFromRuntime({ item, req }) {
+  if (!_adminInitialized || !item?.localEntry) return;
+  setImmediate(async () => {
+    try {
+      const db = getAnalyticsDb();
+      const authCtx = await getEconomyAuthContext(req).catch(() => ({ uid: null }));
+      await persistIngredientCatalogCandidate({
+        db,
+        submittedByUid: authCtx?.uid || null,
+        candidate: {
+          canonicalName: item.localEntry.canonicalName,
+          category: item.localEntry.category ?? null,
+          aliases: item.localEntry.aliases || {},
+          nutritionPer100: item.localEntry.nutritionPer100,
+          defaultServing: item.localEntry.defaultServing,
+          sourceText: item.sourceText || null,
+          confidence: item.confidence ?? null,
+          createdAt: Date.now(),
+        },
+      });
+    } catch (err) {
+      console.warn("[IngredientRuntimeResolve] Candidate queue failed:", err?.message || err);
+    }
+  });
+}
+
+app.post("/ingredients/runtime/resolve", async (req, res) => {
+  try {
+    const rawIngredients = Array.isArray(req.body?.ingredients) ? req.body.ingredients : [];
+    const language = normalizeLanguage(req.body?.language);
+    const ingredients = rawIngredients
+      .map((entry) => ({
+        sourceText: sanitizeInput(entry?.sourceText || ""),
+        name: sanitizeInput(entry?.name || ""),
+      }))
+      .filter((entry) => entry.sourceText || entry.name)
+      .slice(0, 4);
+
+    if (ingredients.length === 0) {
+      return res.status(400).json({ error: "ingredients array is required" });
+    }
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["items"],
+      properties: {
+        items: {
+          type: "array",
+          minItems: ingredients.length,
+          maxItems: ingredients.length,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "sourceText",
+              "displayName",
+              "canonicalName",
+              "category",
+              "nutritionPer100",
+              "defaultServing",
+              "resolvedQuantity",
+              "confidence",
+            ],
+            properties: {
+              sourceText: { type: "string" },
+              displayName: { type: "string" },
+              canonicalName: { type: "string" },
+              category: { type: "string" },
+              nutritionPer100: {
+                type: "object",
+                additionalProperties: false,
+                required: ["calories", "protein", "carbs", "fat", "unit"],
+                properties: {
+                  calories: { type: "number" },
+                  protein: { type: "number" },
+                  carbs: { type: "number" },
+                  fat: { type: "number" },
+                  unit: { type: "string", enum: ["g", "ml"] },
+                },
+              },
+              defaultServing: {
+                type: "object",
+                additionalProperties: false,
+                required: ["quantity", "unit"],
+                properties: {
+                  quantity: { type: "number" },
+                  unit: {
+                    type: "string",
+                    enum: ["g", "kg", "ml", "l"],
+                  },
+                },
+              },
+              resolvedQuantity: {
+                type: "object",
+                additionalProperties: false,
+                required: ["quantity", "unit"],
+                properties: {
+                  quantity: { type: "number" },
+                  unit: {
+                    type: "string",
+                    enum: ["g", "kg", "ml", "l"],
+                  },
+                },
+              },
+              confidence: { type: "number" },
+            },
+          },
+        },
+      },
+    };
+
+    const prompt = `
+Resolve these food ingredient phrases for immediate meal nutrition calculation.
+
+Rules:
+- Return exactly one item per input, in the same order.
+- displayName should be short and user-friendly in the app language when possible (${language}).
+- canonicalName should be a clear English ingredient name.
+- nutritionPer100 must be realistic per 100 g or 100 ml.
+- resolvedQuantity must represent the sourceText amount:
+  - explicit weight/volume: keep it;
+  - count or household unit: convert to realistic edible amount in g or ml;
+  - no valid quantity: use a usual one-person serving for that ingredient in g or ml.
+- Do not generate multilingual aliases, catalog metadata, explanations, or extra fields.
+
+Input:
+${JSON.stringify(ingredients, null, 2)}
+`;
+
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "ingredient_runtime_resolution",
+      schema,
+      temperature: 0.1,
+      timeoutMs: 10000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a fast food nutrition resolver. Return compact valid JSON only. Prioritize immediate meal logging accuracy over catalog completeness.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    raw = cleanJsonResponse(raw);
+    const parsed = safeJSONParse(raw, {});
+    const aiItems = Array.isArray(parsed?.items) ? parsed.items : [];
+    const resolved = [];
+
+    for (const [index, rawItem] of aiItems.entries()) {
+      const requestedName = ingredients[index]?.name || "";
+      const item = sanitizeRuntimeResolvedIngredient(rawItem, requestedName);
+      const localEntry = buildRuntimeResolvedLocalEntry(item, language, requestedName);
+      if (!localEntry) continue;
+      const resolvedItem = {
+        sourceText: item?.sourceText || "",
+        resolvedQuantity: item?.resolvedQuantity || localEntry.defaultServing,
+        confidence: Number.isFinite(Number(item?.confidence)) ? Number(item.confidence) : null,
+        localEntry,
+      };
+      resolved.push(resolvedItem);
+      queueIngredientCatalogCandidateFromRuntime({ item: resolvedItem, req });
+    }
+
+    return res.json({ ok: true, items: resolved });
+  } catch (err) {
+    console.error("❌ /ingredients/runtime/resolve error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to resolve meal ingredients" });
+  }
+});
+
 app.post("/ingredients/catalog/resolve", async (req, res) => {
   try {
     const rawIngredients = Array.isArray(req.body?.ingredients) ? req.body.ingredients : [];
@@ -4365,7 +4964,7 @@ Return only valid JSON.
 
     const parsed = safeJSONParse(cleanJsonResponse(raw), null);
     const isFood = parsed?.isFood === true;
-    const ingredients = Array.isArray(parsed?.ingredients)
+    let ingredients = Array.isArray(parsed?.ingredients)
       ? parsed.ingredients
           .map((item) => ({
             name: String(item?.name || "").trim().slice(0, 80),
@@ -4403,6 +5002,279 @@ Return only valid JSON.
     const status = err?.statusCode || 500;
     console.error("❌ /analyzeMealPhoto error:", err?.message || err);
     return res.status(status).json({ error: err?.message || "Failed to analyze meal photo" });
+  }
+});
+
+app.post("/meals/text/resolve", async (req, res) => {
+  try {
+    const input = sanitizeInput(req.body?.input || "");
+    const language = normalizeLanguage(req.body?.language);
+    const parsedIngredients = Array.isArray(req.body?.parsedIngredients)
+      ? req.body.parsedIngredients
+          .map((item) => ({
+            name: sanitizeInput(item?.name || ""),
+            quantity: Number(item?.quantity),
+            unit: sanitizeInput(item?.unit || ""),
+          }))
+          .filter((item) => item.name)
+          .slice(0, 10)
+      : [];
+
+    if (!input) {
+      return res.status(400).json({ error: "Meal description is required" });
+    }
+
+    const cacheKey = normalizeMealTextResolveCacheKey(input, language);
+    const cached = getMealTextResolveCache(cacheKey);
+    if (cached) {
+      return res.json({ ...cached, cached: true });
+    }
+
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "ingredients", "nutrition", "confidence"],
+      properties: {
+        title: { type: "string" },
+        ingredients: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["name", "quantity", "unit"],
+            properties: {
+              name: { type: "string" },
+              quantity: { type: "number" },
+              unit: { type: "string", enum: ["g", "ml"] },
+            },
+          },
+        },
+        nutrition: {
+          type: "object",
+          additionalProperties: false,
+          required: ["calories", "protein", "carbs", "fat"],
+          properties: {
+            calories: { type: "number" },
+            protein: { type: "number" },
+            carbs: { type: "number" },
+            fat: { type: "number" },
+          },
+        },
+        confidence: { type: "number" },
+      },
+    };
+
+    const prompt = `
+Resolve this user-described meal for a meal tracking app.
+
+Language: ${language}
+Description: ${input}
+Parser first-pass:
+${JSON.stringify(parsedIngredients, null, 2)}
+
+Goal:
+- Return the best user-facing meal logging representation and total nutrition.
+- Treat this as MealPhraseRules: decide whether the phrase is one prepared food/product or separable foods.
+- Use ingredient names in the user's language when possible.
+- Use only g or ml.
+- Preserve explicit quantities from the user.
+- If quantity is missing, infer realistic one-person eating quantities.
+- For counted foods without grams/ml, convert the count into edible weight/volume. For example, "2 pães" means two bread portions/rolls, not 2 grams.
+- A normal serving of soup is usually around 250-350 ml; a normal serving of lasagna or a similar prepared main dish is usually around 250-350 g.
+- Do NOT decompose prepared dishes/products into full recipes.
+- Split only separable foods eaten together.
+
+Important examples:
+- "Pão com fiambre" => Pão + Fiambre.
+- "Iogurte com granola" => Iogurte + Granola.
+- "Leite achocolatado" => one item: Leite achocolatado.
+- "Bolo de cenoura" => one item: Bolo de cenoura.
+- "Bolo de cenoura com queijo" => Bolo de cenoura + Queijo.
+- "Hamburger with breaded chicken, salad, strawberries, chickpeas and low-fat yogurt" => Breaded chicken burger + Salad + Strawberries + Chickpeas + Low-fat yogurt.
+- "Lasanha de atum" => one item: Lasanha de atum.
+- "Lasanha de atum" quantity should be a normal main-dish serving, about 250-350 g, not a small tasting portion.
+- "100g de Bolo de cenoura" => one item: Bolo de cenoura, 100 g.
+- "2 Pães com fiambre" => Pão quantity for 2 breads + Fiambre quantity for 2 servings.
+- "Sopa de legumes" => one item: Sopa de legumes.
+
+Decision rule:
+- "de/of/achocolatado/grego/magro/panado/recheado" often describes the food type; keep it attached.
+- "com/with/con/avec/mit" can separate foods only when both sides are independent foods.
+- For burger/hamburger phrases, "with + protein/preparation" usually describes the burger filling; keep it as one burger item. Sides after commas or "and" stay separate.
+- If uncertain, prefer fewer clearer items over too many recipe sub-ingredients.
+- Total nutrition must match the returned ingredient representation.
+
+Return valid JSON only.
+`;
+
+    let raw = await requestStructuredJsonCompletion({
+      schemaName: "meal_text_resolution",
+      schema,
+      temperature: 0.1,
+      timeoutMs: 12000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You resolve natural-language meal descriptions for a nutrition app. Be practical, conservative, multilingual, and avoid over-decomposition.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    raw = cleanJsonResponse(raw);
+    const parsed = safeJSONParse(raw, {});
+    let ingredients = Array.isArray(parsed?.ingredients)
+      ? parsed.ingredients
+          .map((item) => {
+            const clamped = clampMealTextResolvedQuantity(item, input);
+            return {
+              name: sanitizeInput(item?.name || "").slice(0, 80),
+              quantity: clamped ? Math.round(clamped.quantity * 10) / 10 : NaN,
+              unit: clamped?.unit || String(item?.unit || "").toLowerCase(),
+            };
+          })
+          .filter(
+            (item) =>
+              item.name &&
+              Number.isFinite(item.quantity) &&
+              item.quantity > 0 &&
+              ["g", "ml"].includes(item.unit)
+          )
+          .slice(0, 8)
+      : [];
+
+    const normalizedIngredientText = (value) =>
+      String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+    const hasProteinShake = ingredients.some((item) =>
+      /\b(protein shake|shake de proteina|batido de proteina|shake proteine|proteinshake)\b/.test(
+        normalizedIngredientText(item.name)
+      )
+    );
+    const hasProteinShakeComponents = ingredients.some((item) =>
+      /\b(milk|leite|leche|lait|milch|banana|platano|banane|peanut butter|manteiga de amendoim|pasta de amendoim|beurre de cacahuete|erdnussbutter)\b/.test(
+        normalizedIngredientText(item.name)
+      )
+    );
+    if (hasProteinShake && hasProteinShakeComponents) {
+      const powderName =
+        language === "pt-BR" || language === "pt-PT"
+          ? "Proteína em pó"
+          : language === "es"
+            ? "Proteína en polvo"
+            : language === "fr"
+              ? "Protéine en poudre"
+              : language === "de"
+                ? "Proteinpulver"
+                : "Protein powder";
+      ingredients = ingredients.map((item) =>
+        /\b(protein shake|shake de proteina|batido de proteina|shake proteine|proteinshake)\b/.test(
+          normalizedIngredientText(item.name)
+        )
+          ? { name: powderName, quantity: 30, unit: "g" }
+          : item
+      );
+    }
+    const inputLooksLikeProteinShake = /\b(protein shake|shake de proteina|batido de proteina|shake proteine|shake proteico|proteinshake)\b/.test(
+      normalizedIngredientText(input)
+    );
+    const hasProteinPowder = ingredients.some((item) =>
+      /\b(protein powder|proteina em po|proteina en polvo|proteine en poudre|proteinpulver)\b/.test(
+        normalizedIngredientText(item.name)
+      )
+    );
+    const proteinPowderName =
+      language === "pt-BR" || language === "pt-PT"
+        ? "Proteína em pó"
+        : language === "es"
+          ? "Proteína en polvo"
+          : language === "fr"
+            ? "Protéine en poudre"
+            : language === "de"
+              ? "Proteinpulver"
+              : "Protein powder";
+    if (inputLooksLikeProteinShake && hasProteinShakeComponents && !hasProteinPowder) {
+      ingredients = [{ name: proteinPowderName, quantity: 30, unit: "g" }, ...ingredients].slice(0, 8);
+    }
+    if (inputLooksLikeProteinShake && !hasProteinShakeComponents) {
+      const normalizedInput = normalizedIngredientText(input);
+      const shakeIngredients = [{ name: proteinPowderName, quantity: 30, unit: "g" }];
+      if (/\b(milk|leite|leche|lait|milch)\b/.test(normalizedInput)) {
+        shakeIngredients.push({
+          name:
+            language === "pt-BR" || language === "pt-PT"
+              ? "Leite"
+              : language === "es"
+                ? "Leche"
+                : language === "fr"
+                  ? "Lait"
+                  : language === "de"
+                    ? "Milch"
+                    : "Milk",
+          quantity: 200,
+          unit: "ml",
+        });
+      }
+      if (/\b(banana|platano|banane)\b/.test(normalizedInput)) {
+        shakeIngredients.push({ name: "Banana", quantity: 120, unit: "g" });
+      }
+      if (/\b(pb|peanut butter|manteiga de amendoim|pasta de amendoim|beurre de cacahuete|erdnussbutter)\b/.test(normalizedInput)) {
+        shakeIngredients.push({
+          name:
+            language === "pt-BR" || language === "pt-PT"
+              ? "Manteiga de amendoim"
+              : language === "es"
+                ? "Mantequilla de cacahuete"
+                : language === "fr"
+                  ? "Beurre de cacahuète"
+                  : language === "de"
+                    ? "Erdnussbutter"
+                    : "Peanut butter",
+          quantity: 16,
+          unit: "g",
+        });
+      }
+      ingredients = shakeIngredients;
+    }
+
+    const nutrition = {
+      calories: Math.max(0, Math.round(Number(parsed?.nutrition?.calories) || 0)),
+      protein: Math.max(0, Math.round(Number(parsed?.nutrition?.protein) || 0)),
+      carbs: Math.max(0, Math.round(Number(parsed?.nutrition?.carbs) || 0)),
+      fat: Math.max(0, Math.round(Number(parsed?.nutrition?.fat) || 0)),
+    };
+
+    if (ingredients.length === 0 || nutrition.calories <= 0) {
+      return res.status(500).json({ error: "Failed to resolve meal description" });
+    }
+
+    const result = {
+      ok: true,
+      title: sanitizeInput(parsed?.title || input),
+      ingredients,
+      nutrition,
+      confidence: Number.isFinite(Number(parsed?.confidence)) ? Number(parsed.confidence) : null,
+    };
+
+    setMealTextResolveCache(cacheKey, result);
+    persistMealPhraseRuleCandidate({
+      input,
+      language,
+      parsedIngredients,
+      result,
+    }).catch((candidateErr) => {
+      console.warn("⚠️ Failed to persist meal phrase candidate:", candidateErr?.message || candidateErr);
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error("❌ /meals/text/resolve error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to resolve meal description" });
   }
 });
 
@@ -6862,6 +7734,44 @@ app.post("/importRecipeFromUrl", async (req, res) => {
       }
       return null;
     }
+    function parseNutritionNumber(value) {
+      if (value === null || value === undefined || value === "") return null;
+      if (typeof value === "number") {
+        return Number.isFinite(value) && value >= 0 ? value : null;
+      }
+      if (typeof value !== "string") return null;
+      const normalized = he
+        .decode(value)
+        .replace(",", ".")
+        .replace(/\s+/g, " ")
+        .trim();
+      const match = normalized.match(/-?\d+(?:\.\d+)?/);
+      if (!match) return null;
+      const parsed = Number(match[0]);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+    function validateImportedNutritionInfo(input) {
+      if (!input || typeof input !== "object") return null;
+      const raw =
+        input.perServing && typeof input.perServing === "object"
+          ? input.perServing
+          : input;
+      const perServing = {
+        calories: parseNutritionNumber(raw.calories ?? raw.caloriesContent ?? raw.energy ?? raw.kcal),
+        protein: parseNutritionNumber(raw.protein ?? raw.proteinContent),
+        carbs: parseNutritionNumber(
+          raw.carbs ?? raw.carbohydrates ?? raw.carbohydrateContent ?? raw.carbohydratesContent
+        ),
+        fat: parseNutritionNumber(raw.fat ?? raw.fatContent),
+      };
+      const hasAnyValue = Object.values(perServing).some((value) => value !== null);
+      if (!hasAnyValue) return null;
+      return {
+        perServing,
+        source: "imported_url",
+        updatedAt: new Date().toISOString(),
+      };
+    }
     // Candidates: prefer first valid (5–600 min)
     const timeCandidates = [scraped.totalTime, scraped.cookTime, scraped.prepTime];
     for (const cand of timeCandidates) {
@@ -6915,15 +7825,6 @@ app.post("/importRecipeFromUrl", async (req, res) => {
       candidateServings < 1000
     ) {
       servings = candidateServings;
-    }
-    // If still not set, fallback to 4
-    if (
-      typeof servings !== "number" ||
-      !isFinite(servings) ||
-      servings <= 0 ||
-      servings >= 1000
-    ) {
-      servings = 4;
     }
     // Image: normalize to a string URL. Handle string, array, or object. Else fallback to default.
     let image = undefined;
@@ -7070,11 +7971,12 @@ app.post("/importRecipeFromUrl", async (req, res) => {
         : (typeof scraped.title === "string" && scraped.title.trim() ? he.decode(scraped.title.trim()) : "Untitled Recipe"),
       cookingTime,
       difficulty,
-      servings,
+      servings: typeof servings === "number" && isFinite(servings) ? servings : null,
       cost: "Medium",
       ingredients,
       steps,
       tags,
+      nutritionInfo: validateImportedNutritionInfo(scraped.nutritionInfo || scraped.nutrition),
       createdAt: new Date().toISOString(),
       image,
     };
@@ -8480,7 +9382,7 @@ Rules:
       const aiSchema = {
         type: "object",
         additionalProperties: false,
-        required: ["title", "cookingTime", "difficulty", "servings", "cost", "ingredients", "steps", "tags"],
+        required: ["title", "cookingTime", "difficulty", "servings", "cost", "ingredients", "steps", "tags", "nutritionInfo"],
         properties: {
           title: { type: "string" },
           cookingTime: { type: "number" },
@@ -8500,6 +9402,24 @@ Rules:
           tags: {
             type: "array",
             items: { type: "string" },
+          },
+          nutritionInfo: {
+            type: "object",
+            additionalProperties: false,
+            required: ["perServing"],
+            properties: {
+              perServing: {
+                type: "object",
+                additionalProperties: false,
+                required: ["calories", "protein", "carbs", "fat"],
+                properties: {
+                  calories: { type: "number" },
+                  protein: { type: "number" },
+                  carbs: { type: "number" },
+                  fat: { type: "number" },
+                },
+              },
+            },
           },
         },
       };
@@ -8531,6 +9451,7 @@ Rules:
 - servings should be a realistic integer.
 - cost should be Cheap, Medium, or Expensive.
 - tags should be short food-related tags.
+- nutritionInfo should be per serving, copied from the page when present; otherwise estimate conservatively from the recipe.
 - If this is not clearly a recipe page, return:
   {
     "title": "",
@@ -8540,7 +9461,15 @@ Rules:
     "cost": "Medium",
     "ingredients": [],
     "steps": [],
-    "tags": []
+    "tags": [],
+    "nutritionInfo": {
+      "perServing": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0
+      }
+    }
   }
 
 URL: ${url}

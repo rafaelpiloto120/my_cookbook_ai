@@ -63,7 +63,6 @@ import {
 } from "../lib/recipes/nutrition";
 import { normalizeRecipeDifficulty } from "../lib/recipes/difficulty";
 import {
-  buildRecipeMealLoggingRepresentation,
   estimateRecipeNutrition,
   resolveRecipeNutritionEstimate,
   SavedRecipe,
@@ -96,6 +95,7 @@ interface Recipe {
     };
   } | null;
   mealLoggingRepresentation?: SavedRecipe["mealLoggingRepresentation"];
+  servingInfo?: SavedRecipe["servingInfo"];
 }
 
 interface Cookbook {
@@ -295,6 +295,7 @@ export default function AddRecipe() {
     protein: string;
     carbs: string;
     fat: string;
+    servingInfo?: SavedRecipe["servingInfo"] | null;
   } | null>(null);
   const [estimatedMealLoggingRepresentation, setEstimatedMealLoggingRepresentation] =
     useState<SavedRecipe["mealLoggingRepresentation"] | null>(null);
@@ -1073,7 +1074,17 @@ export default function AddRecipe() {
         title: title.trim(),
         cookingTime: parseInt(cookingTime) || 30,
         difficulty,
-        servings: parseInt(servings) || 2,
+        servings: parseInt(servings) || nutritionEstimateMeta?.servingInfo?.servings || editingRecipe?.servingInfo?.servings || 1,
+        servingInfo:
+          nutritionEstimateMeta?.servingInfo ??
+          editingRecipe?.servingInfo ??
+          (parseInt(servings)
+            ? {
+                servings: parseInt(servings),
+                source: "manual",
+                updatedAt: new Date().toISOString(),
+              }
+            : null),
         cost,
         ingredients: parseListMultiline(ingredients),
         steps: parseListMultiline(steps),
@@ -1083,18 +1094,7 @@ export default function AddRecipe() {
         image: finalImageUri,
         imageUrl: finalImageUri,
         nutritionInfo: nextNutritionInfo,
-        mealLoggingRepresentation:
-          canPersistEstimateMeta && estimatedMealLoggingRepresentation
-            ? estimatedMealLoggingRepresentation
-            : buildRecipeMealLoggingRepresentation(
-                {
-                  id: editingRecipe ? editingRecipe.id : `${Date.now()}`,
-                  title: title.trim(),
-                  servings: parseInt(servings) || 2,
-                  ingredients: parseListMultiline(ingredients),
-                },
-                8
-              ),
+        mealLoggingRepresentation: canPersistEstimateMeta ? estimatedMealLoggingRepresentation : null,
         nutritionEstimateMeta: canPersistEstimateMeta
           ? {
               ingredientsSignature: nutritionEstimateMeta.ingredientsSignature,
@@ -1292,31 +1292,23 @@ export default function AddRecipe() {
       recipeForEstimate = {
         id: editingRecipe?.id || "draft-recipe-estimate",
         title: title.trim() || "Recipe",
-        servings: Math.max(parseInt(servings, 10) || 1, 1),
+        servings: parseInt(servings, 10) > 0 ? Math.max(parseInt(servings, 10), 1) : null,
         ingredients: parseListMultiline(ingredients),
         nutritionInfo: null,
         nutrition: null,
-        mealLoggingRepresentation: buildRecipeMealLoggingRepresentation(
-          {
-            id: editingRecipe?.id || "draft-recipe-estimate",
-            title: title.trim() || "Recipe",
-            servings: Math.max(parseInt(servings, 10) || 1, 1),
-            ingredients: parseListMultiline(ingredients),
-          },
-          8
-        ),
+        mealLoggingRepresentation: null,
       };
 
       let nutrition;
-      let mealLoggingRepresentation =
-        buildRecipeMealLoggingRepresentation(recipeForEstimate, 8);
+      let mealLoggingRepresentation = null;
       try {
         const resolved = await resolveRecipeNutritionEstimate(recipeForEstimate, i18n.language);
         nutrition = resolved.nutrition;
-        mealLoggingRepresentation = resolved.mealLoggingRepresentation;
+        mealLoggingRepresentation = null;
       } catch (error) {
         console.warn("[AddRecipe] resolveRecipeNutritionEstimate failed, using local fallback", error);
         nutrition = estimateRecipeNutrition(recipeForEstimate);
+        mealLoggingRepresentation = null;
       }
 
       const committed = await requestNutritionEstimateEconomy("commit");
@@ -1331,12 +1323,16 @@ export default function AddRecipe() {
       setNutritionProtein(nextProtein);
       setNutritionCarbs(nextCarbs);
       setNutritionFat(nextFat);
+      if (nutrition.servings && nutrition.servings > 0) {
+        setServings(String(nutrition.servings));
+      }
       setNutritionEstimateMeta({
         ingredientsSignature: currentIngredientsSignature,
         calories: nextCalories,
         protein: nextProtein,
         carbs: nextCarbs,
         fat: nextFat,
+        servingInfo: nutrition.servingInfo ?? null,
       });
       setEstimatedMealLoggingRepresentation(mealLoggingRepresentation);
       setNutritionEstimateLocked(true);

@@ -71,6 +71,13 @@ test("extractRecipeFromHtml prefers JSON-LD recipe data", () => {
     "Cook the pasta.",
     "Make the sauce.",
   ]);
+  assert.deepEqual(result.recipe.nutritionInfo?.perServing, {
+    calories: 520,
+    protein: 18,
+    carbs: 64,
+    fat: 21,
+  });
+  assert.equal(result.recipe.nutritionInfo?.source, "imported_url");
 });
 
 test("extractRecipeFromHtml extracts Allrecipes print-style recipe pages", () => {

@@ -41,7 +41,6 @@ import {
 } from "../../../lib/recipes/nutrition";
 import { normalizeRecipeDifficulty } from "../../../lib/recipes/difficulty";
 import {
-  buildRecipeMealLoggingRepresentation,
   estimateRecipeNutrition,
   resolveRecipeNutritionEstimate,
   SavedRecipe,
@@ -75,6 +74,7 @@ interface Recipe {
     };
   } | null;
   mealLoggingRepresentation?: SavedRecipe["mealLoggingRepresentation"];
+  servingInfo?: SavedRecipe["servingInfo"];
 }
 
 interface Cookbook {
@@ -877,20 +877,21 @@ const estimateNutritionForRecipe = async () => {
     recipeForEstimate = {
       id: currentRecipe.id,
       title: currentRecipe.title,
-      servings: Math.max(Number(currentRecipe.servings) || 1, 1),
+      servings: Number(currentRecipe.servings) > 0 ? Math.max(Number(currentRecipe.servings), 1) : null,
       ingredients: currentRecipe.ingredients || [],
       nutritionInfo: null,
       nutrition: null,
     };
     let nutrition;
-    let mealLoggingRepresentation = buildRecipeMealLoggingRepresentation(recipeForEstimate, 8);
+    let mealLoggingRepresentation = null;
     try {
       const resolved = await resolveRecipeNutritionEstimate(recipeForEstimate, i18n.language);
       nutrition = resolved.nutrition;
-      mealLoggingRepresentation = resolved.mealLoggingRepresentation;
+      mealLoggingRepresentation = null;
     } catch (error) {
       console.warn("[RecipeDetail] resolveRecipeNutritionEstimate failed, using local fallback", error);
       nutrition = estimateRecipeNutrition(recipeForEstimate);
+      mealLoggingRepresentation = null;
     }
 
     const committed = await requestNutritionEstimateEconomy("commit");
@@ -909,6 +910,8 @@ const estimateNutritionForRecipe = async () => {
 
     const updatedRecipe: Recipe = {
       ...currentRecipe,
+      servings: nutrition.servings && nutrition.servings > 0 ? nutrition.servings : currentRecipe.servings,
+      servingInfo: nutrition.servingInfo ?? (currentRecipe as any).servingInfo ?? null,
       nutritionInfo,
       mealLoggingRepresentation,
       nutritionEstimateMeta: {
@@ -923,6 +926,9 @@ const estimateNutritionForRecipe = async () => {
     };
 
     setCurrentRecipe(updatedRecipe);
+    if (updatedRecipe.servings && updatedRecipe.servings > 0) {
+      setServings(updatedRecipe.servings);
+    }
 
     try {
       const stored = await AsyncStorage.getItem("recipes");
@@ -1023,7 +1029,7 @@ const estimateNutritionForRecipe = async () => {
         const fallbackRecipe: Recipe = {
           ...currentRecipe,
           nutritionInfo: fallbackNutritionInfo,
-          mealLoggingRepresentation: buildRecipeMealLoggingRepresentation(recipeForEstimate, 8),
+          mealLoggingRepresentation: null,
           nutritionEstimateMeta: {
             ingredientsSignature: buildIngredientsSignature(currentRecipe.ingredients),
             perServing: {

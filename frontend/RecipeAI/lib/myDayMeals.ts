@@ -33,6 +33,8 @@ export type MyDayMeal = {
 export const MY_DAY_MEALS_KEY = "myDayMeals";
 const API_BASE_URL = getApiBaseUrl() || "http://10.0.2.2:3000";
 
+// Local FoodCatalog fallback for Describe Meal when the synced catalog is missing
+// or the backend is unavailable. These should gradually move into catalog data.
 const FOOD_HINTS: {
   match: RegExp;
   calories: number;
@@ -72,12 +74,16 @@ function titleFromInput(input: string) {
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
+// MealPhraseRules uses these as client-side serving hints after text parsing.
+// They are not the long-term source of truth; backend candidates are persisted
+// under mealPhraseRules/default/candidates for review and promotion.
 const DEFAULT_SERVING_HINTS: {
   match: RegExp;
   quantity: number;
   unit: string;
   countableUnit?: boolean;
 }[] = [
+  { match: /\b(scrambled eggs|ovo[s]?\s+mexido[s]?|huevos?\s+revueltos?|oeufs?\s+brouill[eé]s?|r[uü]hrei)\b/i, quantity: 100, unit: "g" },
   { match: /\b(yogurt sauce|molho de iogurte)\b/i, quantity: 30, unit: "g" },
   { match: /\b(tomato sauce|molho de tomate|salsa de tomate)\b/i, quantity: 125, unit: "g" },
   { match: /\b(olive oil|azeite|aceite de oliva)\b/i, quantity: 14, unit: "g" },
@@ -88,6 +94,7 @@ const DEFAULT_SERVING_HINTS: {
   { match: /\b(low[-\s]?fat yogurt|skim(?:med)? yogurt|light yogurt|iogurte magro|iogurte natural magro)\b/i, quantity: 125, unit: "g" },
   { match: /\b(greek yogurt|iogurte grego|yogur griego)\b/i, quantity: 150, unit: "g" },
   { match: /\b(yogurt|iogurte|yogur)\b/i, quantity: 125, unit: "g" },
+  { match: /\b(cottage cheese|queijo cottage|queso cottage|fromage cottage|h[uü]ttenk[aä]se)\b/i, quantity: 150, unit: "g" },
   { match: /\b(berries|berry|frutos vermelhos|berries mix)\b/i, quantity: 80, unit: "g" },
   { match: /\b(strawberr(?:y|ies)|morango|morangos|fresa|fresas)\b/i, quantity: 100, unit: "g" },
   { match: /\b(blueberr(?:y|ies)|mirtilo|mirtilos)\b/i, quantity: 80, unit: "g" },
@@ -105,11 +112,13 @@ const DEFAULT_SERVING_HINTS: {
   { match: /\b(milk|leite|leche|lait|milch)\b/i, quantity: 200, unit: "ml" },
   { match: /\b(cola|coke|refrigerante|refresco)\b/i, quantity: 330, unit: "ml" },
   { match: /\b(soup|sopa|soupe|suppe)\b/i, quantity: 300, unit: "ml" },
+  { match: /\b(egg yolk|egg yolks|yolk|yolks|gema|gemas|yema|yemas|eigelb)\b/i, quantity: 18, unit: "g", countableUnit: true },
+  { match: /\b(egg white|egg whites|white|whites|clara|claras|eiweiss)\b/i, quantity: 33, unit: "g", countableUnit: true },
   { match: /\b(egg|eggs|ovo|ovos|huevo|huevos)\b/i, quantity: 50, unit: "g", countableUnit: true },
   { match: /\b(pasta|massa)\b/i, quantity: 180, unit: "g" },
   { match: /\b(naan)\b/i, quantity: 70, unit: "g" },
   { match: /\b(wrap|tortilla|tortilha)\b/i, quantity: 60, unit: "g" },
-  { match: /\b(bread|toast|toasts|p[aã]o|pan)\b/i, quantity: 30, unit: "g" },
+  { match: /\b(bread|toast|toasts|p[aã]o|p[aã]es|pan|panes)\b/i, quantity: 30, unit: "g", countableUnit: true },
   { match: /\b(avocado|abacate|aguacate)\b/i, quantity: 100, unit: "g" },
   { match: /\b(salad|salada|ensalada)\b/i, quantity: 80, unit: "g" },
   { match: /\b(onions?|cebolas?|cebollas?|oignons?|zwiebeln?)\b/i, quantity: 80, unit: "g" },
@@ -131,8 +140,14 @@ const DEFAULT_SERVING_HINTS: {
   { match: /\b(breadcrumbs?|bread crumbs?|pan rallado|p[aã]o ralado|chapelure|paniermehl)\b/i, quantity: 40, unit: "g" },
   { match: /\b(puff pastry|massa folhada|massa quebrada|p[aâ]te bris[eé]e|m[uü]rbeteig)\b/i, quantity: 230, unit: "g" },
   { match: /\b(bread slices?|sliced bread|tranches? de pain|tranches? de pain de mie|p[aã]o de forma)\b/i, quantity: 30, unit: "g" },
-  { match: /\b(ham slices?|tranches? de jambon|fatias? de presunto|lonchas? de jam[oó]n)\b/i, quantity: 25, unit: "g" },
+  { match: /\b(ham|fiambre|presunto|jambon|jam[oó]n|ham slices?|tranches? de jambon|fatias? de presunto|lonchas? de jam[oó]n)\b/i, quantity: 30, unit: "g" },
+  { match: /\b(breaded chicken burger|frango panado burger|hamb[uú]rguer de frango panado|hamburguesa de pollo empanado|burger de poulet pan[eé]|paniertes h[aä]hnchen burger|h[aä]hnchen schnitzel burger)\b/i, quantity: 250, unit: "g" },
   { match: /\b(burger|hamburguer|hamburguesa)\b/i, quantity: 150, unit: "g" },
+  { match: /\b(tuna sandwich|turkey sandwich|chicken sandwich|sandes? de atum|sandu[ií]che de atum|s[aá]ndwich de at[uú]n|sandwich au thon|thunfischsandwich|sandes? de peru|sandu[ií]che de peru|s[aá]ndwich de pavo|sandwich de dinde|putensandwich)\b/i, quantity: 220, unit: "g" },
+  { match: /\b(chicken wrap|wrap de frango|wrap de pollo|wrap poulet|h[aä]hnchen-wrap)\b/i, quantity: 220, unit: "g" },
+  { match: /\b(pizza slice|fatia de pizza|porci[oó]n de pizza|part de pizza|pizzast[uü]ck)\b/i, quantity: 120, unit: "g" },
+  { match: /\b(pancakes?|panquecas?|tortitas?|cr[eê]pes?|pfannkuchen)\b/i, quantity: 160, unit: "g" },
+  { match: /\b(lasagna|lasanha|lasa[ñn]a|lasagnes?|lasagne)\b/i, quantity: 300, unit: "g" },
   { match: /\b(fries|french fries|batatas fritas|frites)\b/i, quantity: 120, unit: "g" },
 ];
 
@@ -149,7 +164,52 @@ const COUNT_WORDS: Record<string, number> = {
   eight: 8,
   nine: 9,
   ten: 10,
+  um: 1,
+  uma: 1,
+  dois: 2,
+  duas: 2,
+  tres: 3,
+  três: 3,
+  quatro: 4,
+  cinco: 5,
+  seis: 6,
+  sete: 7,
+  oito: 8,
+  nove: 9,
+  dez: 10,
+  un: 1,
+  una: 1,
+  une: 1,
+  dos: 2,
+  deux: 2,
+  trois: 3,
+  cuatro: 4,
+  quatre: 4,
+  cinq: 5,
+  siete: 7,
+  sept: 7,
+  ocho: 8,
+  huit: 8,
+  nueve: 9,
+  neuf: 9,
+  diez: 10,
+  dix: 10,
+  ein: 1,
+  eine: 1,
+  zwei: 2,
+  drei: 3,
+  vier: 4,
+  funf: 5,
+  fünf: 5,
+  sechs: 6,
+  sieben: 7,
+  acht: 8,
+  neun: 9,
+  zehn: 10,
 };
+
+const COUNT_WORD_PATTERN =
+  "three|seven|eight|nine|one|two|four|five|six|ten|duas|dois|três|tres|quatro|cinco|seis|sete|oito|nove|dez|uma|um|una|une|un|dos|deux|trois|cuatro|quatre|cinq|siete|sept|ocho|huit|nueve|neuf|diez|dix|eine|ein|zwei|drei|vier|funf|fünf|sechs|sieben|acht|neun|zehn";
 
 function titleCaseIngredientName(input: string) {
   const cleaned = input.trim().replace(/\s+/g, " ");
@@ -243,10 +303,10 @@ export function getDefaultServingForIngredient(name: string) {
 function stripLeadingQuantity(text: string) {
   return text
     .trim()
-    .replace(/^(\d+(?:[.,]\d+)?)\s*(kg|g|mg|ml|l)\s*(?:of\s+)?/i, "")
-    .replace(/^(\d+(?:[.,]\d+)?)\s*(?:x\s*)?(?:of\s+)?/i, "")
+    .replace(/^(\d+(?:[.,]\d+)?)\s*(kg|g|mg|ml|l)\s*(?:of\s+|de\s+|da\s+|do\s+|d['’]\s*|von\s+)?/i, "")
+    .replace(/^(\d+(?:[.,]\d+)?)\s*(?:x\s*)?(?:of\s+|de\s+|da\s+|do\s+|d['’]\s*|von\s+)?/i, "")
     .replace(/^(a|an|the)\s+/i, "")
-    .replace(/^(um|uma|uns|umas)\s+/i, "")
+    .replace(/^(um|uma|uns|umas|un|una|unos|unas|une|des|le|la|les|ein|eine|der|die|das)\s+/i, "")
     .trim();
 }
 
@@ -254,8 +314,8 @@ function normalizeIngredientBaseName(text: string) {
   const cleaned = text
     .trim()
     .replace(/\b(junto|together)\b\s*$/i, "")
-    .replace(/^(?:al[eé]m\s+disso|alem\s+disso|additionally|also)\s+/i, "")
-    .replace(/^(?:um|uma|uns|umas)\s+/i, "")
+    .replace(/^(?:al[eé]m\s+disso|alem\s+disso|additionally|also|aussi|zus[aä]tzlich|dazu)\s+/i, "")
+    .replace(/^(?:um|uma|uns|umas|un|una|unos|unas|une|des|le|la|les|ein|eine|der|die|das)\s+/i, "")
     .replace(/^(?:a|an|the)\s+/i, "")
     .replace(/^(?:some|maybe|more)\s+/i, "")
     .replace(/^(?:a\s+little|little)\s+/i, "")
@@ -265,7 +325,7 @@ function normalizeIngredientBaseName(text: string) {
     .replace(/^(?:a\s+slice\s+of|slice\s+of)\s+/i, "")
     .replace(/^(?:a\s+bowl\s+of|bowl\s+of)\s+/i, "")
     .replace(/^(?:a\s+tuna\s+sandwich)$/i, "tuna sandwich")
-    .replace(/^(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+/i, "")
+    .replace(new RegExp(`^(?:${COUNT_WORD_PATTERN})\\s+`, "i"), "")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -283,9 +343,18 @@ function parseSpecialQuantityPrefix(part: string) {
     { regex: /^(?:a\s+)?half\s+(.+)$/i, multiplier: 0.5 },
     { regex: /^(?:a\s+little|little)\s+(.+)$/i, multiplier: 0.5 },
     { regex: /^(?:a\s+)?handful\s+of\s+(.+)$/i, multiplier: 0.5 },
+    { regex: /^(?:um|uma)\s+punhado\s+de\s+(.+)$/i, multiplier: 0.5 },
+    { regex: /^(?:un|une)\s+poign[eé]e\s+d['’]?\s*(.+)$/i, multiplier: 0.5 },
+    { regex: /^(?:ein|eine)\s+handvoll\s+(.+)$/i, multiplier: 0.5 },
     { regex: /^(?:a\s+)?piece\s+of\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:um|uma)\s+peda[cç]o\s+de\s+(.+)$/i, multiplier: 1 },
     { regex: /^(?:a\s+)?slice\s+of\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:um|uma)\s+fatia\s+de\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:un|une)\s+tranche\s+de\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:ein|eine)\s+scheibe\s+(.+)$/i, multiplier: 1 },
     { regex: /^(?:a\s+)?bowl\s+of\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:um|uma)\s+tigela\s+de\s+(.+)$/i, multiplier: 1 },
+    { regex: /^(?:un|une)\s+bol\s+de\s+(.+)$/i, multiplier: 1 },
     { regex: /^(?:a\s+)?bit\s+of\s+(.+)$/i, multiplier: 0.75 },
     { regex: /^(?:some)\s+(.+)$/i, multiplier: 1 },
     { regex: /^(?:maybe)\s+(.+)$/i, multiplier: 1 },
@@ -309,8 +378,8 @@ function hasExplicitQuantity(text: string) {
   if (!trimmed) return false;
 
   return (
-    /^(\d+(?:[.,]\d+)?|\d+\/\d+|\d+\s+\d+\/\d+|½|¼|¾|⅓|⅔)\s*(kg|g|mg|ml|l|oz|lb|lbs|cup|cups|tbsp|tsp|tablespoon|tablespoons|teaspoon|teaspoons|x)?\b/i.test(trimmed) ||
-    /^(one|two|three|four|five|six|seven|eight|nine|ten|um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i.test(trimmed) ||
+    /^(\d+(?:[.,]\d+)?|\d+\/\d+|\d+\s+\d+\/\d+|½|¼|¾|⅓|⅔)\s*(kg|g|mg|ml|l|oz|lb|lbs|cup|cups|tbsp|tsp|tablespoon|tablespoons|teaspoon|teaspoons|c\.?\s*sopa|c\.?\s*chá|colher(?:es)?\s+de\s+sopa|colher(?:es)?\s+de\s+chá|cucharadas?|cucharaditas?|cuill[eè]res?\s+à\s+soupe|cuill[eè]res?\s+à\s+caf[eé]|esslöffel|teelöffel|el|tl|x)?\b/i.test(trimmed) ||
+    new RegExp(`^(?:${COUNT_WORD_PATTERN})\\b`, "i").test(trimmed) ||
     /^(?:a\s+)?(?:half|little|handful|piece|slice|bowl|bit)\b/i.test(trimmed) ||
     /^(?:um|uma)\s+(?:meio|meia|pouco|punhado|peda[cç]o|fatia|tigela)\b/i.test(trimmed)
   );
@@ -361,11 +430,26 @@ export function buildMealTitleFromInput(input: string) {
   return joinTitleSegments(parts);
 }
 
+function normalizeCompositeMealPhrases(input: string) {
+  return input.replace(
+    /\b(hamburger|hamburguer|hamb[uú]rguer|hamburguesa|burger)\s+(with|com|con|avec|mit)\s+(breaded chicken|frango panado|pollo empanado|poulet pan[eé]|paniertes h[aä]hnchen|h[aä]hnchen schnitzel)\b/gi,
+    (_match, burger, _connector, filling) => {
+      const normalizedBurger = String(burger).toLowerCase();
+      const normalizedFilling = String(filling).toLowerCase();
+      if (/hamburguesa/.test(normalizedBurger)) return "hamburguesa de pollo empanado";
+      if (/hamb[uú]rguer|hamburguer/.test(normalizedBurger)) return "hambúrguer de frango panado";
+      if (/poulet/.test(normalizedFilling)) return "burger de poulet pané";
+      if (/h[aä]hnchen|schnitzel/.test(normalizedFilling)) return "paniertes hähnchen burger";
+      return "breaded chicken burger";
+    }
+  );
+}
+
 export function splitMealTextParts(input: string) {
-  const normalized = input
+  const normalized = normalizeCompositeMealPhrases(input)
     .replace(/\s+/g, " ")
-    .replace(/\b(with also|along with|served with|junto com|juntamente com|al[eé]m disso)\b/gi, ",")
-    .replace(/\b(and|with|also|plus|e|com|y)\b/gi, ",")
+    .replace(/\b(with also|along with|served with|junto com|juntamente com|al[eé]m disso|acompa[nñ]ado de|servi(?:do)? avec|accompagn[eé] de|avec aussi|serviert mit|dazu)\b/gi, ",")
+    .replace(/\b(and|with|also|plus|e|com|y|con|et|avec|aussi|und|mit|auch)\b/gi, ",")
     .trim();
 
   return normalized
@@ -379,7 +463,7 @@ export function parseMealTextIngredients(input: string, language?: string): MyDa
   const parts = splitMealTextParts(input);
 
   return mergeDuplicateIngredients(parts.map((part) => {
-    const explicitWeightMatch = part.match(/^(\d+(?:[.,]\d+)?)\s*(kg|g|mg|ml|l)\s*(?:of\s+)?(.+)$/i);
+    const explicitWeightMatch = part.match(/^(\d+(?:[.,]\d+)?)\s*(kg|g|mg|ml|l)\s*(?:of\s+|de\s+|da\s+|do\s+|d['’]\s*|von\s+)?(.+)$/i);
     if (explicitWeightMatch) {
       const [, quantity, unit, rawName] = explicitWeightMatch;
       const baseName = normalizeIngredientBaseName(stripLeadingQuantity(rawName));
@@ -403,7 +487,7 @@ export function parseMealTextIngredients(input: string, language?: string): MyDa
     }
 
     const countMatch = part.match(
-      /^(\d+(?:[.,]\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:x\s*)?(?:of\s+)?(.+)$/i
+      new RegExp(`^(\\d+(?:[.,]\\d+)?|${COUNT_WORD_PATTERN})\\s*(?:x\\s*)?(?:of\\s+|de\\s+|da\\s+|do\\s+|d['’]\\s*|von\\s+)?(.+)$`, "i")
     );
     if (countMatch) {
       const [, countRaw, rawName] = countMatch;
@@ -568,10 +652,147 @@ function resolveIngredientAmountForNutrition(
   return null;
 }
 
+function normalizeFoodText(text: string) {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function clampRuntimeResolvedQuantity(
+  quantity: any,
+  entry: IngredientCatalogEntry,
+  sourceText: string,
+  fallback: MyDayMealIngredient
+) {
+  const rawQuantity = Number(quantity?.quantity);
+  const rawUnit = String(quantity?.unit || fallback.unit || "g").toLowerCase();
+  const base = {
+    quantity: Number.isFinite(rawQuantity) && rawQuantity > 0 ? rawQuantity : Number(fallback.quantity) || 1,
+    unit: rawUnit,
+  };
+  const text = normalizeFoodText(
+    `${sourceText} ${fallback.name} ${entry.canonicalName || ""} ${Object.values(entry.aliases || {}).flat().join(" ")}`
+  );
+
+  const isOil =
+    /\b(olive oil|oil|azeite|aceite|huile|olivenol)\b/.test(text) &&
+    !/\b(coconut oil|coconut milk|leite de coco)\b/.test(text);
+  const isTinyOil = /\b(fio de|drizzle of|splash of|dash of|chorrito de|filet d['’]?|q\.?\s*b\.?|quanto baste|as needed|to taste)\b/.test(text);
+  if (isOil && isTinyOil) return { quantity: 5, unit: base.unit === "ml" ? "ml" : "g" };
+  if (isOil && ["g", "ml"].includes(base.unit) && base.quantity > 20) {
+    return { quantity: 14, unit: base.unit };
+  }
+
+  const isEggYolk = /\b(egg yolks?|yolks?|gema|gemas|eigelb|yema|yemas|jaune)\b/.test(text);
+  if (isEggYolk && ["g", "ml"].includes(base.unit) && base.quantity > 30) {
+    return { quantity: 18, unit: "g" };
+  }
+
+  const isEggWhite = /\b(egg whites?|whites?|clara|claras|eiweiss|blanc d oeuf)\b/.test(text);
+  if (isEggWhite && ["g", "ml"].includes(base.unit) && base.quantity > 50) {
+    return { quantity: 33, unit: "g" };
+  }
+
+  const isWholeEgg = /\b(eggs?|ovos?|huevos?|oeufs?|eier?)\b/.test(text);
+  const isPreparedEggServing =
+    /\b(scrambled eggs|ovo[s]? mexido[s]?|huevos? revueltos?|oeufs? brouilles?|rührei|ruhrei|boiled eggs|ovos? cozidos?|huevos? cocidos?|oeufs? durs?|gekochte eier)\b/.test(text);
+  if (isWholeEgg && isPreparedEggServing && ["g", "ml"].includes(base.unit) && base.quantity < 90) {
+    return { quantity: 100, unit: "g" };
+  }
+  if (isWholeEgg && ["g", "ml"].includes(base.unit) && base.quantity > 80) {
+    return { quantity: 50, unit: "g" };
+  }
+
+  return base;
+}
+
 type ResolvedMealEstimate = ReturnType<typeof estimateMealFromText> & {
   ingredients: MyDayMealIngredient[];
   usedAiFallback: boolean;
 };
+
+function hasAmbiguousMealConnector(input: string) {
+  return /\b(com|with|con|avec|mit)\b/i.test(input);
+}
+
+function hasAwkwardParsedIngredientName(name: string) {
+  const normalized = normalizeFoodText(name).trim();
+  return (
+    /^(de|da|do|das|dos|d|e|and|with|com|con|avec|mit)\b/.test(normalized) ||
+    /\b(de|da|do|das|dos|d|e)$/i.test(normalized)
+  );
+}
+
+function hasNutritionConvertibleUnit(ingredient: MyDayMealIngredient, entry?: IngredientCatalogEntry | null) {
+  const quantity = Number(String(ingredient.quantity).replace(",", "."));
+  const nutritionUnit = entry?.nutritionPer100?.unit === "ml" ? "ml" : "g";
+  return convertUnitToNutritionBase(quantity, ingredient.unit, nutritionUnit) !== null;
+}
+
+function shouldResolveMealTextWithAi(input: string, baseIngredients: MyDayMealIngredient[]) {
+  if (baseIngredients.length === 0) return true;
+
+  const unknowns = baseIngredients.filter((ingredient) => !resolveIngredientCatalogEntry(ingredient.name));
+  const awkwardNames = baseIngredients.some((ingredient) => hasAwkwardParsedIngredientName(ingredient.name));
+  const nonConvertibleUnits = baseIngredients.some((ingredient) => {
+    const entry = resolveIngredientCatalogEntry(ingredient.name);
+    return !hasNutritionConvertibleUnit(ingredient, entry);
+  });
+
+  if (awkwardNames || nonConvertibleUnits) return true;
+  if (unknowns.length > 0) return true;
+  if (hasAmbiguousMealConnector(input) && unknowns.length > 0) return true;
+
+  return false;
+}
+
+function sanitizeResolvedMealIngredient(item: any): MyDayMealIngredient | null {
+  const name = titleCaseIngredientName(String(item?.name || "").trim()).slice(0, 80);
+  const quantity = Number(item?.quantity);
+  const unit = String(item?.unit || "").trim().toLowerCase();
+  if (!name || !Number.isFinite(quantity) || quantity <= 0) return null;
+  if (unit !== "g" && unit !== "ml") return null;
+  return {
+    name,
+    quantity: String(Math.round(quantity * 10) / 10),
+    unit,
+  };
+}
+
+async function resolveMealTextWithAi(
+  input: string,
+  baseIngredients: MyDayMealIngredient[],
+  language?: string
+): Promise<ResolvedMealEstimate | null> {
+  const response = await fetch(`${API_BASE_URL}/meals/text/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input,
+      language,
+      parsedIngredients: baseIngredients,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Meal text resolve failed (${response.status})`);
+  const data = await response.json().catch(() => null);
+  const ingredients = Array.isArray(data?.ingredients)
+    ? data.ingredients.map(sanitizeResolvedMealIngredient).filter(Boolean) as MyDayMealIngredient[]
+    : [];
+  const nutrition = data?.nutrition || {};
+  if (ingredients.length === 0) return null;
+
+  return {
+    title: titleFromInput(String(data?.title || input)),
+    calories: clampNumber(Number(nutrition.calories), 120),
+    protein: clampNumber(Number(nutrition.protein), 5),
+    carbs: clampNumber(Number(nutrition.carbs), 8),
+    fat: clampNumber(Number(nutrition.fat), 3),
+    ingredients,
+    usedAiFallback: true,
+  };
+}
 
 async function resolveIngredientsWithAiFallback(
   baseIngredients: MyDayMealIngredient[],
@@ -601,7 +822,7 @@ async function resolveIngredientsWithAiFallback(
   }
 
   try {
-    const response = await fetch(`${API_BASE_URL}/ingredients/catalog/resolve`, {
+    const response = await fetch(`${API_BASE_URL}/ingredients/runtime/resolve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -637,11 +858,23 @@ async function resolveIngredientsWithAiFallback(
       const sourceText = (sourceTexts[index] || ingredient.name).trim().toLowerCase();
       const resolved = resolvedBySource[sourceText];
       if (!resolved?.localEntry || !resolved?.resolvedQuantity) return ingredient;
-      const preserveLocalQuantity = hasExplicitQuantity(sourceText);
+      const preserveLocalQuantity =
+        hasExplicitQuantity(sourceText) &&
+        convertUnitToNutritionBase(
+          Number(String(ingredient.quantity).replace(",", ".")),
+          ingredient.unit,
+          resolved.localEntry.nutritionPer100?.unit === "ml" ? "ml" : "g"
+        ) !== null;
+      const resolvedQuantity = clampRuntimeResolvedQuantity(
+        resolved.resolvedQuantity,
+        resolved.localEntry,
+        sourceTexts[index] || ingredient.name,
+        ingredient
+      );
       return {
         name: displayNameForCatalogEntry(resolved.localEntry, ingredient.name, language),
-        quantity: preserveLocalQuantity ? ingredient.quantity : String(resolved.resolvedQuantity.quantity),
-        unit: preserveLocalQuantity ? ingredient.unit : String(resolved.resolvedQuantity.unit || ingredient.unit).toLowerCase(),
+        quantity: preserveLocalQuantity ? ingredient.quantity : String(resolvedQuantity.quantity),
+        unit: preserveLocalQuantity ? ingredient.unit : String(resolvedQuantity.unit || ingredient.unit).toLowerCase(),
       };
     });
 
@@ -677,6 +910,14 @@ export async function resolveStructuredMealEstimate(
 export async function resolveMealEstimate(input: string, language?: string): Promise<ResolvedMealEstimate> {
   const baseIngredients = parseMealTextIngredients(input, language);
   const parts = splitMealTextParts(input);
+  if (shouldResolveMealTextWithAi(input, baseIngredients)) {
+    try {
+      const aiEstimate = await resolveMealTextWithAi(input, baseIngredients, language);
+      if (aiEstimate) return aiEstimate;
+    } catch {
+      // Fall through to the structured ingredient resolver below.
+    }
+  }
   return resolveStructuredMealEstimate(input, baseIngredients, parts, language);
 }
 

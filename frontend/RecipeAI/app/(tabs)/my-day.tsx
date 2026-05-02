@@ -1133,6 +1133,10 @@ export default function MyDayScreen() {
   const handleMealEditNutritionModeChange = (mode: "auto" | "manual") => {
     setMealEditNutritionMode(mode);
     if (mode === "auto" && mealDraftBase && mealDraft) {
+      if (editingMealSource === "recipe") {
+        setMealDraft({ ...mealDraftBase, title: mealDraft.title });
+        return;
+      }
       const recomputed = recomputeTotals(mealDraftBase, mealEditIngredientBase, mealEditIngredients);
       setMealDraft({
         title: mealDraft.title,
@@ -1253,8 +1257,9 @@ export default function MyDayScreen() {
     if (!editingMealId || !mealDraft || !beginMealEditSave()) return;
     try {
       const safeIngredients = sanitizeReviewIngredients(mealEditIngredients);
-      if (safeIngredients.length === 0) return;
-      const ingredientsChanged = !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
+      const isRecipeMeal = editingMealSource === "recipe";
+      if (safeIngredients.length === 0 && !isRecipeMeal) return;
+      const ingredientsChanged = !isRecipeMeal && !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
       const refreshedEstimate =
         mealEditNutritionMode === "auto" && ingredientsChanged
           ? await resolveStructuredMealEstimate(
@@ -1270,7 +1275,7 @@ export default function MyDayScreen() {
         protein: refreshedEstimate ? Math.round(refreshedEstimate.protein) : parseNumber(mealDraft.protein, 0),
         carbs: refreshedEstimate ? Math.round(refreshedEstimate.carbs) : parseNumber(mealDraft.carbs, 0),
         fat: refreshedEstimate ? Math.round(refreshedEstimate.fat) : parseNumber(mealDraft.fat, 0),
-        ingredients: safeIngredients as MyDayMealIngredient[],
+        ingredients: isRecipeMeal ? [] : safeIngredients as MyDayMealIngredient[],
       };
       const existingMeal = meals.find((meal) => meal.id === editingMealId) ?? null;
       await updateMeal(editingMealId, updatedMeal);
@@ -1997,6 +2002,10 @@ export default function MyDayScreen() {
         mealDetailsStepLabel={t("my_day.meal_details", { defaultValue: "Meal details" })}
         nutritionStepLabel={t("my_day.meal_nutrition", { defaultValue: "Meal nutrition" })}
         quantitiesLabel={t("my_day.quantities", { defaultValue: "Quantities" })}
+        quantitiesNote={t("my_day.recipe_meal_ingredients_note", {
+          defaultValue: "This meal was logged from a recipe and uses the ingredients saved in that recipe.",
+        })}
+        hideIngredientsEditor={editingMealSource === "recipe"}
         visibleIngredients={visibleMealEditIngredients.map(({ item, index }) => ({
           index,
           key: `${item.name}-${index}`,
@@ -2132,7 +2141,7 @@ export default function MyDayScreen() {
             : t("common.save", { defaultValue: "Save" })
         }
         onSave={handleSaveMealEdit}
-        saveDisabled={mealEditIngredients.length === 0 || mealEditSaveInFlight}
+        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight}
       />
 
       <Modal

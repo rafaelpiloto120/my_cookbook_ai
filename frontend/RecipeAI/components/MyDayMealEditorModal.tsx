@@ -49,6 +49,8 @@ type Props = {
   mealDetailsStepLabel: string;
   nutritionStepLabel: string;
   quantitiesLabel: string;
+  quantitiesNote?: string | null;
+  hideIngredientsEditor?: boolean;
   visibleIngredients: VisibleIngredient[];
   allIngredientsCount: number;
   onChangeIngredientQuantity: (index: number, value: string) => void;
@@ -104,6 +106,8 @@ export default function MyDayMealEditorModal({
   mealDetailsStepLabel,
   nutritionStepLabel,
   quantitiesLabel,
+  quantitiesNote,
+  hideIngredientsEditor = false,
   visibleIngredients,
   allIngredientsCount,
   onChangeIngredientQuantity,
@@ -212,6 +216,10 @@ export default function MyDayMealEditorModal({
 
               <View style={styles.ingredientsWrap}>
                 <Text style={[styles.formLabelCompact, { color: text }]}>{quantitiesLabel}</Text>
+                {hideIngredientsEditor ? (
+                  <Text style={[styles.modalHelp, { color: subText, marginTop: 4 }]}>{quantitiesNote}</Text>
+                ) : (
+                  <>
                 {visibleIngredients.map((item) => (
                   <View key={item.key} style={styles.ingredientRow}>
                     <Text style={[styles.ingredientName, { color: text }]}>{item.name}</Text>
@@ -291,6 +299,8 @@ export default function MyDayMealEditorModal({
                     </Text>
                   </TouchableOpacity>
                 ) : null}
+                  </>
+                )}
               </View>
             </ScrollView>
           ) : (
