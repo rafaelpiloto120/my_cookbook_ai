@@ -4,7 +4,9 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  InteractionManager,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -360,6 +362,19 @@ async function persistMealPhotoPreview(uri: string): Promise<string> {
   }
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForNativePickerTransition(extraDelayMs = 0) {
+  await new Promise<void>((resolve) => {
+    InteractionManager.runAfterInteractions(() => resolve());
+  });
+  if (extraDelayMs > 0) {
+    await wait(extraDelayMs);
+  }
+}
+
 export default function MyDayAddMealFlow({
   visible,
   targetDate,
@@ -679,6 +694,7 @@ export default function MyDayAddMealFlow({
       console.log("[MyDayAddMealFlow] photo source selected", { source });
       setPhotoReviewLoading(false);
       resetReview();
+      let cameraPermissionWasRequested = false;
       if (source === "library") {
         const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (!permission.granted) {
@@ -691,6 +707,7 @@ export default function MyDayAddMealFlow({
         }
       } else {
         const currentPermission = await ImagePicker.getCameraPermissionsAsync();
+        cameraPermissionWasRequested = !currentPermission.granted;
         const permission = currentPermission.granted ? currentPermission : await ImagePicker.requestCameraPermissionsAsync();
         if (!permission.granted) {
           Alert.alert(
@@ -701,6 +718,9 @@ export default function MyDayAddMealFlow({
           return;
         }
       }
+
+      setPhotoSourceVisible(false);
+      await waitForNativePickerTransition(source === "camera" && cameraPermissionWasRequested && Platform.OS === "android" ? 650 : 150);
 
       const pickerOptions = {
         allowsEditing: false,
@@ -718,7 +738,6 @@ export default function MyDayAddMealFlow({
         return;
       }
 
-      setPhotoSourceVisible(false);
       setPhotoReviewLoading(true);
       const allowed = await requestPremiumAction("meal_photo_log", "preview");
       if (!allowed) {
