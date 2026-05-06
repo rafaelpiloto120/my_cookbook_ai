@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cook N'Eat AI",
     "slug": "mycookbook-ai",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": ["recipeai", "mycookbookai", "ai.mycookbook.app"],
@@ -26,7 +26,7 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
       ],
-      "versionCode": 27
+      "versionCode": 28
     },
     "web": {
       "output": "static",
