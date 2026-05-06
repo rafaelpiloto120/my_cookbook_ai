@@ -140,6 +140,13 @@ export interface MyDayMealDoc {
   photoUri?: string;
   recipeId?: string;
   servingMultiplier?: number;
+  nutritionMode?: "auto" | "manual";
+  automaticNutrition?: {
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+  };
   ingredients?: MyDayMealIngredientDoc[];
   updatedAt: number;
   schemaVersion: number;

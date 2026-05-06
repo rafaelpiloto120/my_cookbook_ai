@@ -548,6 +548,8 @@ export default function MyDayScreen() {
   const [mealEditUnitDropdownOpen, setMealEditUnitDropdownOpen] = useState(false);
   const [mealEditSaveInFlight, setMealEditSaveInFlight] = useState(false);
   const mealEditSaveInFlightRef = useRef(false);
+  const [mealEditAutoNutritionRefreshing, setMealEditAutoNutritionRefreshing] = useState(false);
+  const mealEditAutoNutritionRefreshIdRef = useRef(0);
   const [firstUsePromptVisible, setFirstUsePromptVisible] = useState(false);
   const [firstUsePromptDismissedThisSession, setFirstUsePromptDismissedThisSession] = useState(false);
   const [healthGoalsVisible, setHealthGoalsVisible] = useState(false);
@@ -1067,17 +1069,18 @@ export default function MyDayScreen() {
     }
   }, [openHealthGoals, params.openHealthGoals, router]);
 
-  const openMealEditor = (meal: any) => {
+  const openMealEditor = (meal: MyDayMeal) => {
     const safeMultiplier =
       Number.isFinite(Number(meal.servingMultiplier)) && Number(meal.servingMultiplier) > 0
         ? Number(meal.servingMultiplier)
         : 1;
+    const baseNutrition = meal.automaticNutrition ?? meal;
     const baseDraft = {
       title: meal.title,
-      calories: String(Math.round(meal.calories / safeMultiplier)),
-      protein: String(Math.round(meal.protein / safeMultiplier)),
-      carbs: String(Math.round(meal.carbs / safeMultiplier)),
-      fat: String(Math.round(meal.fat / safeMultiplier)),
+      calories: String(Math.round(baseNutrition.calories / safeMultiplier)),
+      protein: String(Math.round(baseNutrition.protein / safeMultiplier)),
+      carbs: String(Math.round(baseNutrition.carbs / safeMultiplier)),
+      fat: String(Math.round(baseNutrition.fat / safeMultiplier)),
     };
     const fallbackIngredients = splitIngredients(meal.rawInput || meal.title).map((name) => ({
       name,
@@ -1093,7 +1096,7 @@ export default function MyDayScreen() {
     setEditingMealId(meal.id);
     setEditingMealSource(meal.source);
     setEditingServings(String(safeMultiplier));
-    setMealEditNutritionMode(meal.source === "manual" ? "manual" : "auto");
+    setMealEditNutritionMode(meal.nutritionMode === "manual" || meal.source === "manual" ? "manual" : "auto");
     setMealDraftBase(baseDraft);
     setMealEditIngredientBase(normalizedBaseIngredients);
     setMealEditIngredients(scaleIngredients(normalizedBaseIngredients, safeMultiplier));
@@ -1130,6 +1133,39 @@ export default function MyDayScreen() {
     }
   };
 
+  const refreshMealEditAutomaticNutrition = async (ingredientsOverride = mealEditIngredients, forceAuto = false) => {
+    if ((!forceAuto && mealEditNutritionMode !== "auto") || editingMealSource === "recipe") return null;
+    const safeIngredients = sanitizeReviewIngredients(ingredientsOverride);
+    if (safeIngredients.length === 0) return null;
+
+    const refreshId = mealEditAutoNutritionRefreshIdRef.current + 1;
+    mealEditAutoNutritionRefreshIdRef.current = refreshId;
+    setMealEditAutoNutritionRefreshing(true);
+    try {
+      const estimate = await resolveStructuredMealEstimate(
+        safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
+        safeIngredients as MyDayMealIngredient[],
+        safeIngredients.map((item) => item.name),
+        i18n.language
+      );
+      if (mealEditAutoNutritionRefreshIdRef.current !== refreshId) return estimate;
+
+      const nextDraft = {
+        title: mealDraft?.title ?? estimate.title,
+        calories: String(estimate.calories),
+        protein: String(estimate.protein),
+        carbs: String(estimate.carbs),
+        fat: String(estimate.fat),
+      };
+      setMealDraft((prev) => (prev ? { ...nextDraft, title: prev.title } : nextDraft));
+      setMealDraftBase(nextDraft);
+      setMealEditIngredientBase(safeIngredients);
+      return estimate;
+    } finally {
+      if (mealEditAutoNutritionRefreshIdRef.current === refreshId) setMealEditAutoNutritionRefreshing(false);
+    }
+  };
+
   const handleMealEditNutritionModeChange = (mode: "auto" | "manual") => {
     setMealEditNutritionMode(mode);
     if (mode === "auto" && mealDraftBase && mealDraft) {
@@ -1137,14 +1173,7 @@ export default function MyDayScreen() {
         setMealDraft({ ...mealDraftBase, title: mealDraft.title });
         return;
       }
-      const recomputed = recomputeTotals(mealDraftBase, mealEditIngredientBase, mealEditIngredients);
-      setMealDraft({
-        title: mealDraft.title,
-        calories: recomputed.calories,
-        protein: recomputed.protein,
-        carbs: recomputed.carbs,
-        fat: recomputed.fat,
-      });
+      void refreshMealEditAutomaticNutrition(mealEditIngredients, true);
     }
   };
 
@@ -1259,22 +1288,26 @@ export default function MyDayScreen() {
       const safeIngredients = sanitizeReviewIngredients(mealEditIngredients);
       const isRecipeMeal = editingMealSource === "recipe";
       if (safeIngredients.length === 0 && !isRecipeMeal) return;
-      const ingredientsChanged = !isRecipeMeal && !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
-      const refreshedEstimate =
-        mealEditNutritionMode === "auto" && ingredientsChanged
-          ? await resolveStructuredMealEstimate(
-              safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
-              safeIngredients as MyDayMealIngredient[],
-              safeIngredients.map((item) => item.name),
-              i18n.language
-            )
-          : null;
+      const servingMultiplier =
+        Number.isFinite(Number(editingServings)) && Number(editingServings) > 0
+          ? Number(editingServings)
+          : 1;
       const updatedMeal = {
         title: mealDraft.title.trim() || "Meal",
-        calories: refreshedEstimate ? Math.round(refreshedEstimate.calories) : parseNumber(mealDraft.calories, 0),
-        protein: refreshedEstimate ? Math.round(refreshedEstimate.protein) : parseNumber(mealDraft.protein, 0),
-        carbs: refreshedEstimate ? Math.round(refreshedEstimate.carbs) : parseNumber(mealDraft.carbs, 0),
-        fat: refreshedEstimate ? Math.round(refreshedEstimate.fat) : parseNumber(mealDraft.fat, 0),
+        calories: parseNumber(mealDraft.calories, 0),
+        protein: parseNumber(mealDraft.protein, 0),
+        carbs: parseNumber(mealDraft.carbs, 0),
+        fat: parseNumber(mealDraft.fat, 0),
+        nutritionMode: mealEditNutritionMode,
+        automaticNutrition:
+          editingMealSource === "recipe" && mealDraftBase
+            ? {
+                calories: Math.round(parseNumber(mealDraftBase.calories, parseNumber(mealDraft.calories, 0)) * servingMultiplier),
+                protein: Math.round(parseNumber(mealDraftBase.protein, parseNumber(mealDraft.protein, 0)) * servingMultiplier),
+                carbs: Math.round(parseNumber(mealDraftBase.carbs, parseNumber(mealDraft.carbs, 0)) * servingMultiplier),
+                fat: Math.round(parseNumber(mealDraftBase.fat, parseNumber(mealDraft.fat, 0)) * servingMultiplier),
+              }
+            : undefined,
         ingredients: isRecipeMeal ? [] : safeIngredients as MyDayMealIngredient[],
       };
       const existingMeal = meals.find((meal) => meal.id === editingMealId) ?? null;
@@ -1567,120 +1600,134 @@ export default function MyDayScreen() {
               </Text>
             </View>
           ) : (
-            meals.slice(0, 4).map((meal) => {
-              const recipeImage =
-                meal.source === "recipe" && meal.recipeId
-                  ? savedRecipeById.get(meal.recipeId)?.image
-                  : null;
-              const sourceImage = meal.source === "photo" && meal.photoUri ? meal.photoUri : recipeImage;
-              const sourceIcon =
-                meal.source === "photo"
-                  ? "photo-camera"
-                  : meal.source === "recipe"
-                    ? "menu-book"
-                    : "chat-bubble-outline";
+            <>
+              {meals.slice(0, 4).map((meal) => {
+                const recipeImage =
+                  meal.source === "recipe" && meal.recipeId
+                    ? savedRecipeById.get(meal.recipeId)?.image
+                    : null;
+                const sourceImage = meal.source === "photo" && meal.photoUri ? meal.photoUri : recipeImage;
+                const sourceIcon =
+                  meal.source === "photo"
+                    ? "photo-camera"
+                    : meal.source === "recipe"
+                      ? "menu-book"
+                      : "chat-bubble-outline";
 
-              return (
+                return (
+                  <TouchableOpacity
+                    key={meal.id}
+                    activeOpacity={0.85}
+                    onPress={() => openMealEditor(meal)}
+                    style={[styles.mealRow, { borderBottomColor: border }]}
+                  >
+                    <View style={styles.mealRowInner}>
+                      <View style={[styles.mealSourceSquare, { backgroundColor: `${secondary}18`, borderColor: border }]}>
+                        {sourceImage ? (
+                          <Image source={{ uri: sourceImage }} style={styles.mealSourceImage} />
+                        ) : (
+                          <MaterialIcons name={sourceIcon as any} size={25} color={cta} />
+                        )}
+                      </View>
+                      <View
+                        style={[
+                          styles.mealCardContent,
+                          (mealTitleLineCounts[meal.id] ?? 1) <= 1 ? styles.mealCardContentCompact : null,
+                        ]}
+                      >
+                        <View style={styles.mealTopRow}>
+                          <View style={styles.mealInfo}>
+                            <Text
+                              numberOfLines={2}
+                              ellipsizeMode="tail"
+                              onTextLayout={(event) => {
+                                const lineCount = Math.min(event.nativeEvent.lines.length, 2);
+                                setMealTitleLineCounts((prev) =>
+                                  prev[meal.id] === lineCount ? prev : { ...prev, [meal.id]: lineCount }
+                                );
+                              }}
+                              style={[styles.mealTitle, { color: text }]}
+                            >
+                              {meal.title}
+                            </Text>
+                          </View>
+                          <View style={styles.mealActions}>
+                            <TouchableOpacity activeOpacity={0.8} onPress={() => openMealEditor(meal)} style={styles.mealActionButton}>
+                              <MaterialIcons name="edit" size={17} color={interactiveIconColor} />
+                            </TouchableOpacity>
+                            <TouchableOpacity activeOpacity={0.8} onPress={() => handleDeleteMeal(meal.id)} style={styles.mealActionButton}>
+                              <MaterialIcons name="delete-outline" size={18} color={subText} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        <View style={styles.mealMacroRow}>
+                          {[
+                            {
+                              key: "kcal",
+                              label: "Kcal",
+                              value: meal.calories,
+                              icon: "local-fire-department" as const,
+                            },
+                            {
+                              key: "protein",
+                              label: t("my_day.protein"),
+                              value: meal.protein,
+                              icon: null,
+                            },
+                            {
+                              key: "carbs",
+                              label: t("my_day.carbs"),
+                              value: meal.carbs,
+                              icon: null,
+                            },
+                            {
+                              key: "fat",
+                              label: t("my_day.fat"),
+                              value: meal.fat,
+                              icon: null,
+                            },
+                          ].map((macro) => {
+                            return (
+                              <View key={`${meal.id}-${macro.key}`} style={styles.mealMacroSimple}>
+                                {macro.icon ? (
+                                  <MaterialIcons name={macro.icon} size={13} color={cta} style={styles.mealMacroIcon} />
+                                ) : null}
+                                <Text style={[styles.mealMacroSimpleLabel, { color: subText }]}>
+                                  {macro.label}
+                                </Text>
+                                <Text style={[styles.mealMacroSimpleValue, { color: text }]}>
+                                  {macro.key === "kcal"
+                                    ? Math.round(macro.value)
+                                    : nutrientValueForDisplay(macro.value, healthMeasurement)}
+                                  {macro.key === "kcal" ? null : (
+                                    <Text style={[styles.mealMacroSimpleUnit, { color: subText }]}>
+                                      {" "}
+                                      {nutrientUnit}
+                                    </Text>
+                                  )}
+                                </Text>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+              {meals.length > 4 ? (
                 <TouchableOpacity
-                  key={meal.id}
                   activeOpacity={0.85}
-                  onPress={() => openMealEditor(meal)}
-                  style={[styles.mealRow, { borderBottomColor: border }]}
+                  style={[styles.mealsViewMoreButton, { borderColor: border, backgroundColor: `${secondary}12` }]}
+                  onPress={() => router.push("/my-day/history")}
                 >
-                  <View style={styles.mealRowInner}>
-                    <View style={[styles.mealSourceSquare, { backgroundColor: `${secondary}18`, borderColor: border }]}>
-                      {sourceImage ? (
-                        <Image source={{ uri: sourceImage }} style={styles.mealSourceImage} />
-                      ) : (
-                        <MaterialIcons name={sourceIcon as any} size={25} color={cta} />
-                      )}
-                    </View>
-                    <View
-                      style={[
-                        styles.mealCardContent,
-                        (mealTitleLineCounts[meal.id] ?? 1) <= 1 ? styles.mealCardContentCompact : null,
-                      ]}
-                    >
-                      <View style={styles.mealTopRow}>
-                        <View style={styles.mealInfo}>
-                          <Text
-                            numberOfLines={2}
-                            ellipsizeMode="tail"
-                            onTextLayout={(event) => {
-                              const lineCount = Math.min(event.nativeEvent.lines.length, 2);
-                              setMealTitleLineCounts((prev) =>
-                                prev[meal.id] === lineCount ? prev : { ...prev, [meal.id]: lineCount }
-                              );
-                            }}
-                            style={[styles.mealTitle, { color: text }]}
-                          >
-                            {meal.title}
-                          </Text>
-                        </View>
-                        <View style={styles.mealActions}>
-                          <TouchableOpacity activeOpacity={0.8} onPress={() => openMealEditor(meal)} style={styles.mealActionButton}>
-                            <MaterialIcons name="edit" size={17} color={interactiveIconColor} />
-                          </TouchableOpacity>
-                          <TouchableOpacity activeOpacity={0.8} onPress={() => handleDeleteMeal(meal.id)} style={styles.mealActionButton}>
-                            <MaterialIcons name="delete-outline" size={18} color={subText} />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                      <View style={styles.mealMacroRow}>
-                        {[
-                          {
-                            key: "kcal",
-                            label: "Kcal",
-                            value: meal.calories,
-                            icon: "local-fire-department" as const,
-                          },
-                          {
-                            key: "protein",
-                            label: t("my_day.protein"),
-                            value: meal.protein,
-                            icon: null,
-                          },
-                          {
-                            key: "carbs",
-                            label: t("my_day.carbs"),
-                            value: meal.carbs,
-                            icon: null,
-                          },
-                          {
-                            key: "fat",
-                            label: t("my_day.fat"),
-                            value: meal.fat,
-                            icon: null,
-                          },
-                        ].map((macro) => {
-                          return (
-                            <View key={`${meal.id}-${macro.key}`} style={styles.mealMacroSimple}>
-                              {macro.icon ? (
-                                <MaterialIcons name={macro.icon} size={13} color={cta} style={styles.mealMacroIcon} />
-                              ) : null}
-                              <Text style={[styles.mealMacroSimpleLabel, { color: subText }]}>
-                                {macro.label}
-                              </Text>
-                              <Text style={[styles.mealMacroSimpleValue, { color: text }]}>
-                                {macro.key === "kcal"
-                                  ? Math.round(macro.value)
-                                  : nutrientValueForDisplay(macro.value, healthMeasurement)}
-                                {macro.key === "kcal" ? null : (
-                                  <Text style={[styles.mealMacroSimpleUnit, { color: subText }]}>
-                                    {" "}
-                                    {nutrientUnit}
-                                  </Text>
-                                )}
-                              </Text>
-                            </View>
-                          );
-                        })}
-                      </View>
-                    </View>
-                  </View>
+                  <Text style={[styles.mealsViewMoreText, { color: cta }]}>
+                    {t("my_day.view_more_cta", { defaultValue: "View more" })}
+                  </Text>
+                  <MaterialIcons name="chevron-right" size={18} color={cta} />
                 </TouchableOpacity>
-              );
-            })
+              ) : null}
+            </>
           )}
         </AppCard>
 
@@ -2082,8 +2129,13 @@ export default function MyDayScreen() {
         nutritionHintManual={t("my_day.meal_nutrition_hint_manual", {
           defaultValue: "Manual mode lets you override the nutrition values for this meal.",
         })}
+        nutritionLoading={mealEditNutritionMode === "auto" && mealEditAutoNutritionRefreshing}
+        nutritionLoadingLabel={t("my_day.meal_nutrition_calculating", {
+          defaultValue: "Calculating nutrients. Please wait before saving.",
+        })}
         nutritionMode={mealEditNutritionMode}
         onChangeNutritionMode={handleMealEditNutritionModeChange}
+        onOpenNutritionStep={() => void refreshMealEditAutomaticNutrition()}
         nutritionFields={[
           {
             key: "calories",
@@ -2141,7 +2193,7 @@ export default function MyDayScreen() {
             : t("common.save", { defaultValue: "Save" })
         }
         onSave={handleSaveMealEdit}
-        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight}
+        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight || (mealEditNutritionMode === "auto" && mealEditAutoNutritionRefreshing)}
       />
 
       <Modal
@@ -2795,6 +2847,21 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
     resizeMode: "cover",
+  },
+  mealsViewMoreButton: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderRadius: 8,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
+  mealsViewMoreText: {
+    fontSize: 14,
+    fontWeight: "800",
   },
   emptyState: {
     borderRadius: 12,

@@ -3586,13 +3586,16 @@ function clampMealTextResolvedQuantity(item, input = "") {
   if (!["g", "ml"].includes(unit)) return null;
 
   const isSolidFood =
-    /\b(banana|bread|toast|pao|paes|pan|pain|brot|egg|eggs|ovo|ovos|huevo|huevos|oeuf|oeufs|eier|ei|oats|oatmeal|aveia|avena|flocons|hafer|yogurt|iogurte|yogur|yaourt|joghurt|cottage|sandwich|sandes|sanduiche|wrap|omelet|omelette|omelete|tortilla|omelett|rice bowl|bowl|bol|reisschussel|cake|bolo|tarta|gateau|kuchen|sushi|pizza|lasagna|lasanha|lasana|lasaña|lasagne|shrimp|gambas|crevettes|garnelen)\b/.test(text);
+    /\b(banana|bread|toast|pao|paes|pan|pain|brot|egg|eggs|ovo|ovos|huevo|huevos|oeuf|oeufs|eier|ei|oats|oatmeal|aveia|avena|flocons|hafer|yogurt|iogurte|yogur|yaourt|joghurt|cottage|sandwich|sandes|sanduiche|wrap|omelet|omelette|omelete|tortilla|omelett|rice bowl|bowl|bol|reisschussel|cake|bolo|tarta|gateau|kuchen|pastel de nata|pastel de natal|custard tart|sushi|pizza|lasagna|lasanha|lasana|lasaña|lasagne|shrimp|gambas|crevettes|garnelen)\b/.test(text);
   if (unit === "ml" && isSolidFood) {
     return { quantity, unit: "g" };
   }
 
   if (/\b(cottage|fromage cottage|huttenkase|huettenkaese|huttenkase)\b/.test(text) && unit === "g" && quantity < 80) {
     return { quantity: 150, unit: "g" };
+  }
+  if (/\b(pastel de nata|pastel de natal|custard tart)\b/.test(text) && unit === "g" && quantity < 40) {
+    return { quantity: 70, unit: "g" };
   }
   if (/\b(wrap)\b/.test(text) && unit === "g" && quantity < 120) {
     return { quantity: 220, unit: "g" };
@@ -3659,6 +3662,9 @@ function clampMealTextResolvedQuantity(item, input = "") {
   }
   if (/\b(cake|bolo|tarta|gateau|kuchen)\b/.test(text)) {
     return asQuantity(80, "g");
+  }
+  if (/\b(pastel de nata|pastel de natal|custard tart)\b/.test(text)) {
+    return asQuantity(70, "g");
   }
 
   return { quantity, unit };
@@ -5130,8 +5136,9 @@ Return valid JSON only.
       ? parsed.ingredients
           .map((item) => {
             const clamped = clampMealTextResolvedQuantity(item, input);
+            const rawName = sanitizeInput(item?.name || "").slice(0, 80);
             return {
-              name: sanitizeInput(item?.name || "").slice(0, 80),
+              name: /\bpastel de natal\b/i.test(rawName) ? "Pastel de nata" : rawName,
               quantity: clamped ? Math.round(clamped.quantity * 10) / 10 : NaN,
               unit: clamped?.unit || String(item?.unit || "").toLowerCase(),
             };

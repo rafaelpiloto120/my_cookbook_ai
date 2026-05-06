@@ -51,6 +51,16 @@ function normalizeMealDoc(raw: any): MyDayMealDoc {
     photoUri: typeof raw?.photoUri === "string" ? raw.photoUri : undefined,
     recipeId: typeof raw?.recipeId === "string" ? raw.recipeId : undefined,
     servingMultiplier: Number.isFinite(raw?.servingMultiplier) ? Number(raw.servingMultiplier) : undefined,
+    nutritionMode: raw?.nutritionMode === "manual" ? "manual" : raw?.nutritionMode === "auto" ? "auto" : undefined,
+    automaticNutrition:
+      raw?.automaticNutrition && typeof raw.automaticNutrition === "object"
+        ? {
+            calories: Number(raw.automaticNutrition.calories) || 0,
+            protein: Number(raw.automaticNutrition.protein) || 0,
+            carbs: Number(raw.automaticNutrition.carbs) || 0,
+            fat: Number(raw.automaticNutrition.fat) || 0,
+          }
+        : undefined,
     ingredients: Array.isArray(raw?.ingredients)
       ? raw.ingredients
           .filter((item: any) => item && typeof item === "object")

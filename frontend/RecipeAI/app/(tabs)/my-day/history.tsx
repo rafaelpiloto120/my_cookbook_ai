@@ -39,6 +39,14 @@ type DaySummary = {
     fat: number;
     photoUri?: string;
     recipeId?: string;
+    servingMultiplier?: number;
+    nutritionMode?: "auto" | "manual";
+    automaticNutrition?: {
+      calories: number;
+      protein: number;
+      carbs: number;
+      fat: number;
+    };
     ingredients: MyDayMealIngredient[];
   }[];
 };
@@ -261,6 +269,8 @@ export default function MyDayHistoryScreen() {
   const [mealEditUnitDropdownOpen, setMealEditUnitDropdownOpen] = useState(false);
   const [mealEditSaveInFlight, setMealEditSaveInFlight] = useState(false);
   const mealEditSaveInFlightRef = useRef(false);
+  const [mealEditAutoNutritionRefreshing, setMealEditAutoNutritionRefreshing] = useState(false);
+  const mealEditAutoNutritionRefreshIdRef = useRef(0);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [addMealFlowVisible, setAddMealFlowVisible] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => {
@@ -360,6 +370,9 @@ export default function MyDayHistoryScreen() {
             fat: meal.fat,
             photoUri: meal.photoUri,
             recipeId: meal.recipeId,
+            servingMultiplier: meal.servingMultiplier,
+            nutritionMode: meal.nutritionMode,
+            automaticNutrition: meal.automaticNutrition,
             ingredients: Array.isArray(meal.ingredients) ? meal.ingredients : [],
           });
           grouped.set(meal.dayKey, current);
@@ -420,6 +433,9 @@ export default function MyDayHistoryScreen() {
         fat: meal.fat,
         photoUri: meal.photoUri,
         recipeId: meal.recipeId,
+        servingMultiplier: meal.servingMultiplier,
+        nutritionMode: meal.nutritionMode,
+        automaticNutrition: meal.automaticNutrition,
         ingredients: Array.isArray(meal.ingredients) ? meal.ingredients : [],
       });
       grouped.set(meal.dayKey, current);
@@ -455,12 +471,13 @@ export default function MyDayHistoryScreen() {
   );
 
   const openMealEditor = (meal: DaySummary["meals"][number]) => {
+    const baseNutrition = meal.automaticNutrition ?? meal;
     const baseDraft = {
       title: meal.title,
-      calories: String(meal.calories),
-      protein: String(meal.protein),
-      carbs: String(meal.carbs),
-      fat: String(meal.fat),
+      calories: String(baseNutrition.calories),
+      protein: String(baseNutrition.protein),
+      carbs: String(baseNutrition.carbs),
+      fat: String(baseNutrition.fat),
     };
     const nextIngredients =
       Array.isArray(meal.ingredients) && meal.ingredients.length > 0
@@ -468,9 +485,19 @@ export default function MyDayHistoryScreen() {
         : [];
     setEditingMealId(meal.id);
     setEditingMealSource(meal.source);
-    setMealEditNutritionMode(meal.source === "manual" ? "manual" : "auto");
+    setMealEditNutritionMode(meal.nutritionMode === "manual" || meal.source === "manual" ? "manual" : "auto");
     setMealDraftBase(baseDraft);
-    setMealDraft(baseDraft);
+    setMealDraft(
+      meal.nutritionMode === "manual" || meal.source === "manual"
+        ? {
+            title: meal.title,
+            calories: String(meal.calories),
+            protein: String(meal.protein),
+            carbs: String(meal.carbs),
+            fat: String(meal.fat),
+          }
+        : baseDraft
+    );
     setMealEditIngredients(nextIngredients);
     setMealEditIngredientBase(nextIngredients);
     setMealEditShowAllIngredients(false);
@@ -480,6 +507,39 @@ export default function MyDayHistoryScreen() {
     setMealEditUnitDropdownOpen(false);
   };
 
+  const refreshMealEditAutomaticNutrition = async (ingredientsOverride = mealEditIngredients, forceAuto = false) => {
+    if ((!forceAuto && mealEditNutritionMode !== "auto") || editingMealSource === "recipe") return null;
+    const safeIngredients = sanitizeReviewIngredients(ingredientsOverride);
+    if (safeIngredients.length === 0) return null;
+
+    const refreshId = mealEditAutoNutritionRefreshIdRef.current + 1;
+    mealEditAutoNutritionRefreshIdRef.current = refreshId;
+    setMealEditAutoNutritionRefreshing(true);
+    try {
+      const estimate = await resolveStructuredMealEstimate(
+        safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
+        safeIngredients as MyDayMealIngredient[],
+        safeIngredients.map((item) => item.name),
+        i18n.language
+      );
+      if (mealEditAutoNutritionRefreshIdRef.current !== refreshId) return estimate;
+
+      const nextDraft = {
+        title: mealDraft?.title ?? estimate.title,
+        calories: String(estimate.calories),
+        protein: String(estimate.protein),
+        carbs: String(estimate.carbs),
+        fat: String(estimate.fat),
+      };
+      setMealDraft((prev) => (prev ? { ...nextDraft, title: prev.title } : nextDraft));
+      setMealDraftBase(nextDraft);
+      setMealEditIngredientBase(safeIngredients);
+      return estimate;
+    } finally {
+      if (mealEditAutoNutritionRefreshIdRef.current === refreshId) setMealEditAutoNutritionRefreshing(false);
+    }
+  };
+
   const handleMealEditNutritionModeChange = (mode: "auto" | "manual") => {
     setMealEditNutritionMode(mode);
     if (mode === "auto" && mealDraftBase && mealDraft) {
@@ -487,14 +547,7 @@ export default function MyDayHistoryScreen() {
         setMealDraft({ ...mealDraftBase, title: mealDraft.title });
         return;
       }
-      const recomputed = recomputeTotals(mealDraftBase, mealEditIngredientBase, mealEditIngredients);
-      setMealDraft({
-        title: mealDraft.title,
-        calories: recomputed.calories,
-        protein: recomputed.protein,
-        carbs: recomputed.carbs,
-        fat: recomputed.fat,
-      });
+      void refreshMealEditAutomaticNutrition(mealEditIngredients, true);
     }
   };
 
@@ -598,22 +651,22 @@ export default function MyDayHistoryScreen() {
       const safeIngredients = sanitizeReviewIngredients(mealEditIngredients);
       const isRecipeMeal = editingMealSource === "recipe";
       if (safeIngredients.length === 0 && !isRecipeMeal) return;
-      const ingredientsChanged = !isRecipeMeal && !areReviewIngredientsEqual(safeIngredients, mealEditIngredientBase);
-      const refreshedEstimate =
-        mealEditNutritionMode === "auto" && ingredientsChanged
-          ? await resolveStructuredMealEstimate(
-              safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
-              safeIngredients as MyDayMealIngredient[],
-              safeIngredients.map((item) => item.name),
-              i18n.language
-            )
-          : null;
       await updateMeal(editingMealId, {
         title: mealDraft.title.trim() || "Meal",
-        calories: refreshedEstimate ? Math.round(refreshedEstimate.calories) : parseNumber(mealDraft.calories, 0),
-        protein: refreshedEstimate ? Math.round(refreshedEstimate.protein) : parseNumber(mealDraft.protein, 0),
-        carbs: refreshedEstimate ? Math.round(refreshedEstimate.carbs) : parseNumber(mealDraft.carbs, 0),
-        fat: refreshedEstimate ? Math.round(refreshedEstimate.fat) : parseNumber(mealDraft.fat, 0),
+        calories: parseNumber(mealDraft.calories, 0),
+        protein: parseNumber(mealDraft.protein, 0),
+        carbs: parseNumber(mealDraft.carbs, 0),
+        fat: parseNumber(mealDraft.fat, 0),
+        nutritionMode: mealEditNutritionMode,
+        automaticNutrition:
+          editingMealSource === "recipe" && mealDraftBase
+            ? {
+                calories: parseNumber(mealDraftBase.calories, parseNumber(mealDraft.calories, 0)),
+                protein: parseNumber(mealDraftBase.protein, parseNumber(mealDraft.protein, 0)),
+                carbs: parseNumber(mealDraftBase.carbs, parseNumber(mealDraft.carbs, 0)),
+                fat: parseNumber(mealDraftBase.fat, parseNumber(mealDraft.fat, 0)),
+              }
+            : undefined,
         ingredients: isRecipeMeal ? [] : safeIngredients,
       });
       closeMealEditor();
@@ -855,8 +908,13 @@ export default function MyDayHistoryScreen() {
         nutritionHintManual={t("my_day.meal_nutrition_hint_manual", {
           defaultValue: "Manual mode lets you override the nutrition values for this meal.",
         })}
+        nutritionLoading={mealEditNutritionMode === "auto" && mealEditAutoNutritionRefreshing}
+        nutritionLoadingLabel={t("my_day.meal_nutrition_calculating", {
+          defaultValue: "Calculating nutrients. Please wait before saving.",
+        })}
         nutritionMode={mealEditNutritionMode}
         onChangeNutritionMode={handleMealEditNutritionModeChange}
+        onOpenNutritionStep={() => void refreshMealEditAutomaticNutrition()}
         nutritionFields={[
           {
             key: "calories",
@@ -914,7 +972,7 @@ export default function MyDayHistoryScreen() {
             : t("common.save", { defaultValue: "Save" })
         }
         onSave={saveEdit}
-        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight}
+        saveDisabled={(editingMealSource !== "recipe" && mealEditIngredients.length === 0) || mealEditSaveInFlight || (mealEditNutritionMode === "auto" && mealEditAutoNutritionRefreshing)}
       />
       <MyDayAddMealFlow
         visible={addMealFlowVisible}

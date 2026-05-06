@@ -418,6 +418,8 @@ export default function MyDayAddMealFlow({
   const [selectedRecipeNeedsEstimateCharge, setSelectedRecipeNeedsEstimateCharge] = useState(false);
   const [reviewSaveInFlight, setReviewSaveInFlight] = useState(false);
   const reviewSaveInFlightRef = useRef(false);
+  const [autoNutritionRefreshing, setAutoNutritionRefreshing] = useState(false);
+  const autoNutritionRefreshIdRef = useRef(0);
   const [photoPickerInFlight, setPhotoPickerInFlight] = useState(false);
   const photoPickerInFlightRef = useRef(false);
   const mealCameraRef = useRef<CameraView | null>(null);
@@ -952,6 +954,7 @@ export default function MyDayAddMealFlow({
       setReviewDraft(baseDraft);
       setReviewIngredients([]);
       setReviewIngredientBase([]);
+      setNutritionMode("auto");
     } catch (error) {
       console.warn("[MyDayAddMealFlow] Failed to prepare recipe meal", error);
       Alert.alert(
@@ -970,31 +973,56 @@ export default function MyDayAddMealFlow({
     closeAll();
   };
 
+  const refreshAutomaticReviewNutrition = async (ingredientsOverride = reviewIngredients, forceAuto = false) => {
+    if ((!forceAuto && nutritionMode !== "auto") || reviewMode === "recipe") return null;
+    const safeIngredients = sanitizeReviewIngredients(ingredientsOverride);
+    if (safeIngredients.length === 0) return null;
+
+    const refreshId = autoNutritionRefreshIdRef.current + 1;
+    autoNutritionRefreshIdRef.current = refreshId;
+    setAutoNutritionRefreshing(true);
+    try {
+      const refreshedEstimate = await resolveStructuredMealEstimate(
+        safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
+        safeIngredients as MyDayMealIngredient[],
+        safeIngredients.map((item) => item.name),
+        i18n.language
+      );
+
+      if (autoNutritionRefreshIdRef.current !== refreshId) return refreshedEstimate;
+
+      const refreshedDraft = {
+        title: reviewDraft?.title ?? refreshedEstimate.title,
+        calories: String(refreshedEstimate.calories),
+        protein: String(refreshedEstimate.protein),
+        carbs: String(refreshedEstimate.carbs),
+        fat: String(refreshedEstimate.fat),
+      };
+      setReviewDraft((prev) => (prev ? { ...refreshedDraft, title: prev.title } : refreshedDraft));
+      setReviewBase(refreshedDraft);
+      setReviewIngredientBase(safeIngredients);
+      return refreshedEstimate;
+    } finally {
+      if (autoNutritionRefreshIdRef.current === refreshId) setAutoNutritionRefreshing(false);
+    }
+  };
+
   const handleConfirmReview = async () => {
     if (!reviewDraft || !reviewMode) return;
     const safeIngredients = sanitizeReviewIngredients(reviewIngredients);
     if (safeIngredients.length === 0 && reviewMode !== "recipe") return;
     if (!beginReviewSave()) return;
     try {
-      const ingredientsChanged = reviewMode !== "recipe" && !areReviewIngredientsEqual(safeIngredients, reviewIngredientBase);
-      const refreshedEstimate = ingredientsChanged
-        ? await resolveStructuredMealEstimate(
-            safeIngredients.map((item) => `${item.quantity} ${item.unit} ${item.name}`.trim()).join(", "),
-            safeIngredients as MyDayMealIngredient[],
-            safeIngredients.map((item) => item.name),
-            i18n.language
-          )
-        : null;
-
       if (reviewMode === "text") {
         const saved = await addTextMeal(mealInput.trim() || reviewDraft.title, targetMealDate);
         const syncedMeal = {
           ...saved,
           title: reviewDraft.title.trim() || saved.title,
-          calories: refreshedEstimate ? refreshedEstimate.calories : parseNumber(reviewDraft.calories, saved.calories),
-          protein: refreshedEstimate ? refreshedEstimate.protein : parseNumber(reviewDraft.protein, saved.protein),
-          carbs: refreshedEstimate ? refreshedEstimate.carbs : parseNumber(reviewDraft.carbs, saved.carbs),
-          fat: refreshedEstimate ? refreshedEstimate.fat : parseNumber(reviewDraft.fat, saved.fat),
+          calories: parseNumber(reviewDraft.calories, saved.calories),
+          protein: parseNumber(reviewDraft.protein, saved.protein),
+          carbs: parseNumber(reviewDraft.carbs, saved.carbs),
+          fat: parseNumber(reviewDraft.fat, saved.fat),
+          nutritionMode,
           ingredients: safeIngredients as MyDayMealIngredient[],
         };
         await updateMeal(saved.id, syncedMeal);
@@ -1009,11 +1037,12 @@ export default function MyDayAddMealFlow({
         const saved = await addPhotoMeal(
           {
             title: reviewDraft.title.trim() || "Meal",
-            calories: refreshedEstimate ? refreshedEstimate.calories : parseNumber(reviewDraft.calories, 0),
-            protein: refreshedEstimate ? refreshedEstimate.protein : parseNumber(reviewDraft.protein, 0),
-            carbs: refreshedEstimate ? refreshedEstimate.carbs : parseNumber(reviewDraft.carbs, 0),
-            fat: refreshedEstimate ? refreshedEstimate.fat : parseNumber(reviewDraft.fat, 0),
+            calories: parseNumber(reviewDraft.calories, 0),
+            protein: parseNumber(reviewDraft.protein, 0),
+            carbs: parseNumber(reviewDraft.carbs, 0),
+            fat: parseNumber(reviewDraft.fat, 0),
             photoUri: photoReviewUriRef.current ?? photoReviewUri ?? undefined,
+            nutritionMode,
             ingredients: safeIngredients as MyDayMealIngredient[],
           },
           targetMealDate
@@ -1027,14 +1056,20 @@ export default function MyDayAddMealFlow({
         await (syncEngine as any)?.markMyDayMealDirty?.(saved);
       } else if (selectedRecipe) {
         const perServingNutrition = {
-          caloriesPerServing: Math.round(parseNumber(reviewDraft.calories, 0)),
-          proteinPerServing: Math.round(parseNumber(reviewDraft.protein, 0)),
-          carbsPerServing: Math.round(parseNumber(reviewDraft.carbs, 0)),
-          fatPerServing: Math.round(parseNumber(reviewDraft.fat, 0)),
+          caloriesPerServing: Math.round(parseNumber(nutritionMode === "manual" ? reviewBase?.calories : reviewDraft.calories, 0)),
+          proteinPerServing: Math.round(parseNumber(nutritionMode === "manual" ? reviewBase?.protein : reviewDraft.protein, 0)),
+          carbsPerServing: Math.round(parseNumber(nutritionMode === "manual" ? reviewBase?.carbs : reviewDraft.carbs, 0)),
+          fatPerServing: Math.round(parseNumber(nutritionMode === "manual" ? reviewBase?.fat : reviewDraft.fat, 0)),
           servings: selectedRecipe.servingInfo?.servings || (selectedRecipe.servings && selectedRecipe.servings > 0 ? selectedRecipe.servings : 1),
           servingInfo: selectedRecipe.servingInfo ?? null,
         };
-        const savedMeal = await logRecipeMeal(
+        const automaticNutrition = {
+          calories: Math.round(parseNumber(reviewBase?.calories, parseNumber(reviewDraft.calories, 0))),
+          protein: Math.round(parseNumber(reviewBase?.protein, parseNumber(reviewDraft.protein, 0))),
+          carbs: Math.round(parseNumber(reviewBase?.carbs, parseNumber(reviewDraft.carbs, 0))),
+          fat: Math.round(parseNumber(reviewBase?.fat, parseNumber(reviewDraft.fat, 0))),
+        };
+        let savedMeal = await logRecipeMeal(
           {
             ...selectedRecipe,
             title: reviewDraft.title,
@@ -1044,10 +1079,24 @@ export default function MyDayAddMealFlow({
           {
             nutritionOverride: perServingNutrition,
             ingredientsOverride: [],
-            persistRecipeEstimate: !ingredientsChanged,
+            persistRecipeEstimate: true,
             date: targetMealDate,
           }
         );
+        if (nutritionMode === "manual") {
+          const manualRecipeMeal = {
+            ...savedMeal,
+            title: reviewDraft.title.trim() || savedMeal.title,
+            calories: parseNumber(reviewDraft.calories, savedMeal.calories),
+            protein: parseNumber(reviewDraft.protein, savedMeal.protein),
+            carbs: parseNumber(reviewDraft.carbs, savedMeal.carbs),
+            fat: parseNumber(reviewDraft.fat, savedMeal.fat),
+            nutritionMode: "manual" as const,
+            automaticNutrition,
+          };
+          await updateMeal(savedMeal.id, manualRecipeMeal);
+          savedMeal = manualRecipeMeal;
+        }
         if (selectedRecipeNeedsEstimateCharge) {
           const committed = await requestPremiumAction("recipe_meal_estimate", "commit");
           if (!committed) {
@@ -1420,6 +1469,7 @@ export default function MyDayAddMealFlow({
       <MyDayMealEditorModal
         visible={visible && reviewVisible}
         onClose={closeAll}
+        closeOnBackdropPress={false}
         modalBackdrop={modalBackdrop}
         card={card}
         border={border}
@@ -1476,11 +1526,16 @@ export default function MyDayAddMealFlow({
         nutritionHintManual={t("my_day.meal_nutrition_hint_manual", {
           defaultValue: "Manual mode lets you override the nutrition values for this meal.",
         })}
+        nutritionLoading={nutritionMode === "auto" && autoNutritionRefreshing}
+        nutritionLoadingLabel={t("my_day.meal_nutrition_calculating", {
+          defaultValue: "Calculating nutrients. Please wait before saving.",
+        })}
         nutritionMode={nutritionMode}
         onChangeNutritionMode={(mode) => {
           setNutritionMode(mode);
-          if (mode === "auto" && reviewBase) setReviewDraft(recomputeTotals(reviewBase, reviewIngredientBase, reviewIngredients));
+          if (mode === "auto") void refreshAutomaticReviewNutrition(reviewIngredients, true);
         }}
+        onOpenNutritionStep={() => void refreshAutomaticReviewNutrition()}
         nutritionFields={[
           {
             key: "calories",
@@ -1518,7 +1573,7 @@ export default function MyDayAddMealFlow({
         nextLabel={t("common.next", { defaultValue: "Next" })}
         saveLabel={reviewSaveInFlight ? t("common.saving", { defaultValue: "Saving..." }) : t("common.save")}
         onSave={handleConfirmReview}
-        saveDisabled={(reviewMode !== "recipe" && reviewIngredients.length === 0) || reviewSaveInFlight}
+        saveDisabled={(reviewMode !== "recipe" && reviewIngredients.length === 0) || reviewSaveInFlight || (nutritionMode === "auto" && autoNutritionRefreshing)}
       />
 
       <InsufficientCookiesModal

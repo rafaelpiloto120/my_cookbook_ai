@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Modal,
   Pressable,
   ScrollView,
@@ -35,6 +36,7 @@ type NutritionField = {
 type Props = {
   visible: boolean;
   onClose: () => void;
+  closeOnBackdropPress?: boolean;
   modalBackdrop: string;
   card: string;
   border: string;
@@ -76,6 +78,8 @@ type Props = {
   nutritionLabel: string;
   nutritionHintAuto: string;
   nutritionHintManual: string;
+  nutritionLoading?: boolean;
+  nutritionLoadingLabel?: string;
   nutritionMode: "auto" | "manual";
   onChangeNutritionMode: (mode: "auto" | "manual") => void;
   nutritionFields: NutritionField[];
@@ -85,6 +89,7 @@ type Props = {
   backLabel: string;
   nextLabel: string;
   saveLabel: string;
+  onOpenNutritionStep?: () => void;
   onSave: () => void;
   saveDisabled: boolean;
 };
@@ -92,6 +97,7 @@ type Props = {
 export default function MyDayMealEditorModal({
   visible,
   onClose,
+  closeOnBackdropPress = true,
   modalBackdrop,
   card,
   border,
@@ -133,6 +139,8 @@ export default function MyDayMealEditorModal({
   nutritionLabel,
   nutritionHintAuto,
   nutritionHintManual,
+  nutritionLoading = false,
+  nutritionLoadingLabel,
   nutritionMode,
   onChangeNutritionMode,
   nutritionFields,
@@ -142,6 +150,7 @@ export default function MyDayMealEditorModal({
   backLabel,
   nextLabel,
   saveLabel,
+  onOpenNutritionStep,
   onSave,
   saveDisabled,
 }: Props) {
@@ -156,9 +165,17 @@ export default function MyDayMealEditorModal({
     { label: nutritionStepLabel, icon: "monitor-heart" as const },
   ];
 
+  const goToStep = (nextStep: number) => {
+    setCurrentStep(nextStep);
+    if (nextStep === 1) onOpenNutritionStep?.();
+  };
+
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={onClose}>
+      <Pressable
+        style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
+        onPress={closeOnBackdropPress ? onClose : undefined}
+      >
         <View
           style={[styles.modalCard, { backgroundColor: card, borderColor: border }]}
           onStartShouldSetResponder={() => true}
@@ -178,7 +195,7 @@ export default function MyDayMealEditorModal({
                   key={step.label}
                   activeOpacity={0.85}
                   style={styles.stepItem}
-                  onPress={() => setCurrentStep(index)}
+                  onPress={() => goToStep(index)}
                 >
                   <View style={[styles.stepDot, { backgroundColor: selected ? cta : "transparent", borderColor: selected ? cta : border }]}>
                     <Text style={[styles.stepDotText, { color: selected ? "#fff" : subText }]}>{index + 1}</Text>
@@ -316,6 +333,14 @@ export default function MyDayMealEditorModal({
                     <Text style={[styles.planHint, { color: subText }]}>
                       {nutritionMode === "auto" ? nutritionHintAuto : nutritionHintManual}
                     </Text>
+                    {nutritionMode === "auto" && nutritionLoading && nutritionLoadingLabel ? (
+                      <View style={styles.planLoadingRow}>
+                        <ActivityIndicator size="small" color={cta} />
+                        <Text style={[styles.planHint, styles.planLoadingText, { color: subText }]}>
+                          {nutritionLoadingLabel}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
 
@@ -395,7 +420,7 @@ export default function MyDayMealEditorModal({
                 <TouchableOpacity
                   activeOpacity={0.85}
                   style={[styles.primaryButton, { backgroundColor: cta, opacity: saveDisabled ? 0.7 : 1 }]}
-                  onPress={() => setCurrentStep(1)}
+                  onPress={() => goToStep(1)}
                   disabled={saveDisabled}
                 >
                   <Text style={styles.primaryButtonText}>{nextLabel}</Text>
@@ -403,7 +428,7 @@ export default function MyDayMealEditorModal({
               </>
             ) : (
               <>
-                <TouchableOpacity activeOpacity={0.85} style={[styles.secondaryButton, { borderColor: border, backgroundColor: bg }]} onPress={() => setCurrentStep(0)}>
+                <TouchableOpacity activeOpacity={0.85} style={[styles.secondaryButton, { borderColor: border, backgroundColor: bg }]} onPress={() => goToStep(0)}>
                   <Text style={[styles.secondaryButtonText, { color: text }]}>{backLabel}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -614,6 +639,15 @@ const styles = StyleSheet.create({
   planHint: {
     fontSize: 13,
     lineHeight: 18,
+  },
+  planLoadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 8,
+  },
+  planLoadingText: {
+    flex: 1,
   },
   planHeader: {
     marginBottom: 8,

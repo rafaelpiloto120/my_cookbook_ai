@@ -1634,6 +1634,13 @@ export async function logRecipeMeal(
     protein: Math.round(estimate.proteinPerServing * servingMultiplier),
     carbs: Math.round(estimate.carbsPerServing * servingMultiplier),
     fat: Math.round(estimate.fatPerServing * servingMultiplier),
+    nutritionMode: "auto",
+    automaticNutrition: {
+      calories: Math.round(estimate.caloriesPerServing * servingMultiplier),
+      protein: Math.round(estimate.proteinPerServing * servingMultiplier),
+      carbs: Math.round(estimate.carbsPerServing * servingMultiplier),
+      fat: Math.round(estimate.fatPerServing * servingMultiplier),
+    },
     ingredients: options?.ingredientsOverride ?? [],
   }, options?.date);
 }

@@ -27,6 +27,13 @@ export type MyDayMeal = {
   photoUri?: string;
   recipeId?: string;
   servingMultiplier?: number;
+  nutritionMode?: "auto" | "manual";
+  automaticNutrition?: {
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+  };
   ingredients?: MyDayMealIngredient[];
 };
 
@@ -146,6 +153,7 @@ const DEFAULT_SERVING_HINTS: {
   { match: /\b(tuna sandwich|turkey sandwich|chicken sandwich|sandes? de atum|sandu[ií]che de atum|s[aá]ndwich de at[uú]n|sandwich au thon|thunfischsandwich|sandes? de peru|sandu[ií]che de peru|s[aá]ndwich de pavo|sandwich de dinde|putensandwich)\b/i, quantity: 220, unit: "g" },
   { match: /\b(chicken wrap|wrap de frango|wrap de pollo|wrap poulet|h[aä]hnchen-wrap)\b/i, quantity: 220, unit: "g" },
   { match: /\b(pizza slice|fatia de pizza|porci[oó]n de pizza|part de pizza|pizzast[uü]ck)\b/i, quantity: 120, unit: "g" },
+  { match: /\b(pastel de nata|pastel de natal|custard tart)\b/i, quantity: 70, unit: "g" },
   { match: /\b(pancakes?|panquecas?|tortitas?|cr[eê]pes?|pfannkuchen)\b/i, quantity: 160, unit: "g" },
   { match: /\b(lasagna|lasanha|lasa[ñn]a|lasagnes?|lasagne)\b/i, quantity: 300, unit: "g" },
   { match: /\b(fries|french fries|batatas fritas|frites)\b/i, quantity: 120, unit: "g" },
@@ -967,6 +975,8 @@ export async function addRecipeMeal(
     protein: number;
     carbs: number;
     fat: number;
+    nutritionMode?: "auto" | "manual";
+    automaticNutrition?: MyDayMeal["automaticNutrition"];
     ingredients?: MyDayMealIngredient[];
   },
   date = new Date()
@@ -984,6 +994,8 @@ export async function addRecipeMeal(
     fat: clampNumber(input.fat, 3),
     recipeId: input.recipeId,
     servingMultiplier: input.servingMultiplier,
+    nutritionMode: input.nutritionMode === "manual" ? "manual" : "auto",
+    automaticNutrition: input.automaticNutrition,
     ingredients: input.ingredients,
   };
 
@@ -1000,6 +1012,8 @@ export async function addPhotoMeal(
     carbs: number;
     fat: number;
     photoUri?: string;
+    nutritionMode?: "auto" | "manual";
+    automaticNutrition?: MyDayMeal["automaticNutrition"];
     ingredients?: MyDayMealIngredient[];
   },
   date = new Date()
@@ -1016,6 +1030,8 @@ export async function addPhotoMeal(
     carbs: clampNumber(input.carbs, 0),
     fat: clampNumber(input.fat, 0),
     photoUri: typeof input.photoUri === "string" && input.photoUri.trim() ? input.photoUri.trim() : undefined,
+    nutritionMode: input.nutritionMode === "manual" ? "manual" : "auto",
+    automaticNutrition: input.automaticNutrition,
     ingredients: input.ingredients,
   };
 
@@ -1031,7 +1047,7 @@ export async function removeMeal(mealId: string): Promise<void> {
 
 export async function updateMeal(
   mealId: string,
-  updates: Partial<Pick<MyDayMeal, "title" | "calories" | "protein" | "carbs" | "fat" | "servingMultiplier" | "ingredients">>
+  updates: Partial<Pick<MyDayMeal, "title" | "calories" | "protein" | "carbs" | "fat" | "servingMultiplier" | "nutritionMode" | "automaticNutrition" | "ingredients">>
 ): Promise<void> {
   const meals = await loadMyDayMeals();
   const next = meals.map((meal) => {
