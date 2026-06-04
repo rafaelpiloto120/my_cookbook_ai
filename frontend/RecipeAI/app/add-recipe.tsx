@@ -39,6 +39,7 @@ import AppButton from "../components/AppButton";
 import AppCard from "../components/AppCard";
 import InsufficientCookiesModal from "../components/InsufficientCookiesModal";
 import EggIcon from "../components/EggIcon";
+import { formatEconomyUnits } from "../lib/economy/format";
 import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
@@ -64,6 +65,8 @@ import {
 import { normalizeRecipeDifficulty } from "../lib/recipes/difficulty";
 import {
   estimateRecipeNutrition,
+  getRecipeSourceMetadata,
+  normalizeRecipeSourceMetadata,
   resolveRecipeNutritionEstimate,
   SavedRecipe,
 } from "../lib/myDayRecipes";
@@ -75,13 +78,16 @@ interface Recipe {
   title: string;
   cookingTime: number;
   difficulty: "Easy" | "Moderate" | "Challenging";
-  servings: number;
+  servings: number | null;
   cost: "Cheap" | "Medium" | "Expensive";
   ingredients: string[];
   steps: string[];
   tags: string[];
   cookbooks: { id: string; name: string }[];
   createdAt: string;
+  notes?: string;
+  sourceUrl?: string | null;
+  sourceMetadata?: SavedRecipe["sourceMetadata"];
   image?: string;      // 🔹 main image field
   imageUrl?: string;   // 🔹 mirror field for compatibility with readers expecting imageUrl
   nutritionInfo?: RecipeNutritionInfo | null;
@@ -279,6 +285,8 @@ export default function AddRecipe() {
   const [cost, setCost] = useState<"Cheap" | "Medium" | "Expensive">("Cheap");
   const [ingredients, setIngredients] = useState(BULLET_PREFIX);
   const [steps, setSteps] = useState("1. ");
+  const [notes, setNotes] = useState("");
+  const [draftSourceMetadata, setDraftSourceMetadata] = useState<SavedRecipe["sourceMetadata"] | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [newTag, setNewTag] = useState("");
   const [allTags, setAllTags] = useState<string[]>([]);
@@ -307,7 +315,7 @@ export default function AddRecipe() {
   const [saving, setSaving] = useState(false);
 
   const router = useRouter();
-  const { bg, text, border, card, isDark } = useThemeColors();
+  const { bg, text, subText, border, card, cta, isDark, headerBg, headerText } = useThemeColors();
   const syncEngine = useSyncEngine();
   const hasAtLeastOneIngredientLine =
     parseListMultiline(ingredients).length > 0;
@@ -452,9 +460,11 @@ export default function AddRecipe() {
       nutritionInfo: normalizeRecipeNutritionInfo(
         (raw as any).nutritionInfo ?? (raw as any).nutrition
       ),
+      sourceMetadata: getRecipeSourceMetadata(raw),
     };
 
     setEditingRecipe(recipe);
+    setDraftSourceMetadata(recipe.sourceMetadata ?? null);
     setTitle(recipe.title || "");
     setCookingTime(String(recipe.cookingTime || ""));
     setDifficulty(normalizedDifficulty);
@@ -462,6 +472,7 @@ export default function AddRecipe() {
     setCost(normalizedCost);
     setIngredients(toFormattedListMultiline(recipe.ingredients || [], "bullet"));
     setSteps(toFormattedListMultiline(recipe.steps || [], "numbered"));
+    setNotes(typeof recipe.notes === "string" ? recipe.notes : "");
     setTags(recipe.tags || []);
     setImage(recipe.image || (recipe as any).imageUrl);
     setNutritionCalories(
@@ -528,6 +539,7 @@ export default function AddRecipe() {
     const allowedCosts = ["Cheap", "Medium", "Expensive"];
 
     setEditingRecipe(null);
+    setDraftSourceMetadata(getRecipeSourceMetadata(raw));
     setTitle(typeof raw.title === "string" ? raw.title : "");
     setCookingTime(
       typeof raw.cookingTime === "number" && Number.isFinite(raw.cookingTime)
@@ -551,6 +563,7 @@ export default function AddRecipe() {
     setSteps(
       toFormattedListMultiline(Array.isArray(raw.steps) ? raw.steps : [], "numbered")
     );
+    setNotes(typeof raw.notes === "string" ? raw.notes : "");
     setTags(Array.isArray(raw.tags) ? raw.tags.filter(Boolean) : []);
     setImage(raw.image || (raw as any).imageUrl);
     const nutritionInfo = normalizeRecipeNutritionInfo(
@@ -902,7 +915,7 @@ export default function AddRecipe() {
       console.warn("[AddRecipe] nutrition estimate consume exception; blocking estimate", err);
       Alert.alert(
         t("common.error", "Error"),
-        t("economy.try_again", "Couldn't verify your Egg balance. Please try again.")
+        t("economy.try_again", "Couldn't verify your balance. Please try again.")
       );
       return false;
     }
@@ -1067,6 +1080,29 @@ export default function AddRecipe() {
         nextNutritionSnapshot.protein === normalizeComparableNutritionValue(nutritionEstimateMeta.protein) &&
         nextNutritionSnapshot.carbs === normalizeComparableNutritionValue(nutritionEstimateMeta.carbs) &&
         nextNutritionSnapshot.fat === normalizeComparableNutritionValue(nutritionEstimateMeta.fat);
+      const sourceMetadataForSave =
+        getRecipeSourceMetadata(editingRecipe) ??
+        normalizeRecipeSourceMetadata(draftSourceMetadata);
+      const sourceUrlForSave =
+        (typeof editingRecipe?.sourceUrl === "string" && editingRecipe.sourceUrl.trim()
+          ? editingRecipe.sourceUrl.trim()
+          : sourceMetadataForSave?.sourceUrl) ?? null;
+      const parsedServings = parseInt(servings, 10);
+      const servingsForSave =
+        Number.isFinite(parsedServings) && parsedServings > 0 ? parsedServings : null;
+      const estimateServingInfoForSave =
+        canPersistEstimateMeta &&
+        nutritionEstimateMeta?.servingInfo &&
+        servingsForSave &&
+        Math.round(nutritionEstimateMeta.servingInfo.servings) === Math.round(servingsForSave)
+          ? nutritionEstimateMeta.servingInfo
+          : null;
+      const previousServingInfoForSave =
+        editingRecipe?.servingInfo &&
+        servingsForSave &&
+        Math.round(editingRecipe.servingInfo.servings) === Math.round(servingsForSave)
+          ? editingRecipe.servingInfo
+          : null;
 
       // Build the complete recipe object with all fields
       const newRecipe: Recipe = {
@@ -1074,20 +1110,21 @@ export default function AddRecipe() {
         title: title.trim(),
         cookingTime: parseInt(cookingTime) || 30,
         difficulty,
-        servings: parseInt(servings) || nutritionEstimateMeta?.servingInfo?.servings || editingRecipe?.servingInfo?.servings || 1,
-        servingInfo:
-          nutritionEstimateMeta?.servingInfo ??
-          editingRecipe?.servingInfo ??
-          (parseInt(servings)
-            ? {
-                servings: parseInt(servings),
-                source: "manual",
-                updatedAt: new Date().toISOString(),
-              }
-            : null),
+        servings: servingsForSave,
+        servingInfo: servingsForSave
+          ? estimateServingInfoForSave ??
+            previousServingInfoForSave ?? {
+              servings: servingsForSave,
+              source: "manual",
+              updatedAt: new Date().toISOString(),
+            }
+          : null,
         cost,
         ingredients: parseListMultiline(ingredients),
         steps: parseListMultiline(steps),
+        notes: notes.trim(),
+        sourceUrl: sourceUrlForSave,
+        sourceMetadata: sourceMetadataForSave,
         tags: [...tags],
         cookbooks: selectedCookbookObjs,
         createdAt: editingRecipe ? editingRecipe.createdAt : new Date().toISOString(),
@@ -1155,11 +1192,14 @@ export default function AddRecipe() {
               title: newRecipe.title,
               imageUrl: finalImageUri ?? null,
               cookingTimeMinutes: newRecipe.cookingTime || 30,
-              servings: newRecipe.servings || 2,
+              servings: newRecipe.servings ?? null,
               difficulty: difficultyForSync,
               ...(costForSync !== null ? { cost: costForSync } : {}),
               ingredients: [...newRecipe.ingredients],
               steps: [...newRecipe.steps],
+              notes: newRecipe.notes ?? "",
+              sourceUrl: newRecipe.sourceUrl ?? null,
+              sourceMetadata: newRecipe.sourceMetadata ?? null,
               cookbookIds: newRecipe.cookbooks.map((cb) => cb.id),
               tags: [...newRecipe.tags],
               nutritionInfo: newRecipe.nutritionInfo ?? null,
@@ -1293,6 +1333,10 @@ export default function AddRecipe() {
         id: editingRecipe?.id || "draft-recipe-estimate",
         title: title.trim() || "Recipe",
         servings: parseInt(servings, 10) > 0 ? Math.max(parseInt(servings, 10), 1) : null,
+        sourceUrl: editingRecipe?.sourceUrl ?? draftSourceMetadata?.sourceUrl ?? null,
+        sourceMetadata:
+          getRecipeSourceMetadata(editingRecipe) ??
+          normalizeRecipeSourceMetadata(draftSourceMetadata),
         ingredients: parseListMultiline(ingredients),
         nutritionInfo: null,
         nutrition: null,
@@ -1375,13 +1419,32 @@ export default function AddRecipe() {
           headerShown: true,
           title: editingRecipe ? t("recipes.edit_recipe") : t("recipes.add_recipe"),
           headerTransparent: false,
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => (
-            <TouchableOpacity onPress={() => router.back()} style={{ padding: 8 }}>
-              <Ionicons name="arrow-back" size={26} color="#fff" />
+            <TouchableOpacity onPress={() => router.back()} style={styles.headerIconButton}>
+              <Ionicons name="arrow-back" size={26} color={headerText} />
             </TouchableOpacity>
+          ),
+          headerRight: () => (
+            editingRecipe ? (
+              <TouchableOpacity
+                onPress={() => {
+                  if (!saving) void saveRecipe();
+                }}
+                disabled={saving}
+                style={[styles.headerIconButton, { opacity: saving ? 0.65 : 1 }]}
+                accessibilityRole="button"
+                accessibilityLabel={t("common.save", { defaultValue: "Save" })}
+              >
+                {saving ? (
+                  <ActivityIndicator size="small" color={headerText} />
+                ) : (
+                  <MaterialIcons name="save" size={24} color={headerText} />
+                )}
+              </TouchableOpacity>
+            ) : null
           ),
           headerTitleStyle: { fontWeight: "600" },
         }}
@@ -1415,7 +1478,7 @@ export default function AddRecipe() {
             value={title}
             onChangeText={(text) => setTitle(sanitizeInput(text))}
             placeholder={t("recipes.title_placeholder")}
-            placeholderTextColor="#888"
+            placeholderTextColor={subText}
           />
 
           {/* Cooking Time */}
@@ -1425,7 +1488,7 @@ export default function AddRecipe() {
             value={cookingTime}
             onChangeText={(text) => setCookingTime(sanitizeInput(text))}
             placeholder="e.g. 30"
-            placeholderTextColor="#888"
+            placeholderTextColor={subText}
             keyboardType="numeric"
           />
 
@@ -1446,7 +1509,7 @@ export default function AddRecipe() {
                 style={{
                   flex: 1,
                   marginHorizontal: 4,
-                  ...(difficulty === value && bg !== "#fff" ? { backgroundColor: "#E27D60" } : {}),
+                  ...(difficulty === value ? { backgroundColor: cta } : {}),
                 }}
               />
             ))}
@@ -1463,7 +1526,7 @@ export default function AddRecipe() {
               setServings(numeric);
             }}
             placeholder="e.g. 4"
-            placeholderTextColor="#888"
+            placeholderTextColor={subText}
             keyboardType="numeric"
           />
 
@@ -1486,10 +1549,10 @@ export default function AddRecipe() {
             value={ingredients}
             onChangeText={(text) => setIngredients(normalizeListInput(text, "bullet"))}
             placeholder={t("recipes.ingredients_placeholder")}
-            placeholderTextColor="#888"
+            placeholderTextColor={subText}
             multiline
             minHeight={80}
-            maxHeight={260}
+            maxHeight={520}
           />
 
           {/* Preparation */}
@@ -1511,10 +1574,39 @@ export default function AddRecipe() {
             value={steps}
             onChangeText={(text) => setSteps(normalizeListInput(text, "numbered"))}
             placeholder={t("recipes.preparation_placeholder")}
-            placeholderTextColor="#888"
+            placeholderTextColor={subText}
             multiline
             minHeight={120}
-            maxHeight={320}
+            maxHeight={680}
+          />
+
+          {/* Notes */}
+          <Text style={[styles.label, { color: text }]}>{t("recipes.notes", { defaultValue: "Notes" })}</Text>
+          <Text style={[styles.helperText, styles.sectionHintTight, { color: isDark ? "#c8ced8" : "#667085" }]}>
+            {t("recipes.notes_helper", {
+              defaultValue: "Add origin, links, preferred brands, or other details.",
+            })}
+          </Text>
+          <AutoExpandingTextInput
+            style={[
+              styles.input,
+              styles.expandingField,
+              {
+                textAlignVertical: "top",
+                color: text,
+                borderColor: border,
+                backgroundColor: card,
+              },
+            ]}
+            value={notes}
+            onChangeText={(value) => setNotes(sanitizeInput(value, true))}
+            placeholder={t("recipes.notes_placeholder", {
+              defaultValue: "e.g. Original recipe link or ingredient notes",
+            })}
+            placeholderTextColor={subText}
+            multiline
+            minHeight={84}
+            maxHeight={220}
           />
 
           {/* Nutrition Info */}
@@ -1534,9 +1626,7 @@ export default function AddRecipe() {
                       ? "#3b4352"
                       : "#d7dce5"
                     : hasAtLeastOneIngredientLine && !nutritionEstimateLocked
-                    ? bg !== "#fff"
-                      ? "#E27D60"
-                      : "#293a53"
+                    ? cta
                     : isDark
                     ? "#3b4352"
                     : "#d7dce5",
@@ -1545,9 +1635,7 @@ export default function AddRecipe() {
                       ? "#3b4352"
                       : "#d7dce5"
                     : hasAtLeastOneIngredientLine && !nutritionEstimateLocked
-                    ? bg !== "#fff"
-                      ? "#E27D60"
-                      : "#293a53"
+                    ? cta
                     : isDark
                     ? "#3b4352"
                     : "#d7dce5",
@@ -1691,7 +1779,7 @@ export default function AddRecipe() {
                           value={field.value}
                           onChangeText={(value) => field.onChange(sanitizeNutritionDecimalInput(value))}
                           placeholder="0"
-                          placeholderTextColor="#888"
+                          placeholderTextColor={subText}
                           keyboardType={Platform.OS === "ios" ? "decimal-pad" : "numeric"}
                         />
                       </View>
@@ -1728,14 +1816,12 @@ export default function AddRecipe() {
                       onValueChange={() => toggleCookbook(cb.id)}
                       thumbColor={
                         selectedCookbooks.includes(cb.id)
-                          ? bg !== "#fff"
-                            ? "#E27D60"
-                            : "#293a53"
+                            ? cta
                           : undefined
                       }
                       trackColor={{
                         false: "#ccc",
-                        true: bg !== "#fff" ? "#f2a48f" : "#a0b9d6",
+                        true: isDark ? "#f2a48f" : "#a0b9d6",
                       }}
                     />
                     <Text style={{ marginLeft: 12, color: text, fontSize: 16 }}>{cb.name}</Text>
@@ -1755,7 +1841,7 @@ export default function AddRecipe() {
                   },
                 ]}
                 placeholder={t("recipes.add_cookbook")}
-                placeholderTextColor="#888"
+                placeholderTextColor={subText}
                 value={newCookbookName}
                 onChangeText={(text) => setNewCookbookName(sanitizeInput(text))}
               />
@@ -1766,7 +1852,7 @@ export default function AddRecipe() {
                 fullWidth={false}
                 style={StyleSheet.flatten([
                   styles.inputRowButton,
-                  bg !== "#fff" ? { backgroundColor: "#E27D60" } : {},
+                  { backgroundColor: cta },
                 ])}
               />
             </View>
@@ -1800,7 +1886,7 @@ export default function AddRecipe() {
                   },
                 ]}
                 placeholder={t("recipes.add_tag")}
-                placeholderTextColor="#888"
+                placeholderTextColor={subText}
                 value={newTag}
                 onChangeText={(text) => setNewTag(sanitizeInput(text))}
                 onSubmitEditing={addTag}
@@ -1813,7 +1899,7 @@ export default function AddRecipe() {
                 fullWidth={false}
                 style={StyleSheet.flatten([
                   styles.inputRowButton,
-                  bg !== "#fff" ? { backgroundColor: "#E27D60" } : {},
+                  { backgroundColor: cta },
                 ])}
               />
             </View>
@@ -1838,9 +1924,10 @@ export default function AddRecipe() {
             variant="primary"
             fullWidth
             disabled={saving}
+            leftIcon={editingRecipe && !saving ? <MaterialIcons name="save" size={20} color="#fff" /> : undefined}
             style={StyleSheet.flatten([
               { marginTop: 10, opacity: saving ? 0.7 : 1 },
-              bg !== "#fff" ? { backgroundColor: "#E27D60" } : {},
+              { backgroundColor: cta },
             ])}
           />
         </KeyboardAwareScrollView>
@@ -1852,8 +1939,14 @@ export default function AddRecipe() {
         title={t("economy.insufficient_title", "Not enough Eggs")}
         body={
           insufficientModal.context === "nutrition_estimate"
-            ? `You need 1 Egg to estimate recipe nutrition values. Currently, you have ${insufficientModal.remaining} Eggs.`
-            : `You need 1 Egg to create a new cookbook. Currently, you have ${insufficientModal.remaining} Eggs.`
+            ? t("economy.insufficient_recipe_estimate_body_short", {
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need 1 egg to estimate recipe nutrition values. You have {{remaining}}.",
+              })
+            : t("economy.insufficient_cookbook_body_short", {
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need 1 egg to create a new cookbook. You have {{remaining}}.",
+              })
         }
         featuredOffer={featuredOffer}
         availableRewardsCount={availableRewardsCount}
@@ -1883,8 +1976,7 @@ const TagChip: React.FC<{
   border: string;
   textColor: string;
 }> = React.memo(({ label, selected, onPress, card, border, textColor }) => {
-  // Use ThemeContext to get bg color for dark/light mode
-  const { bg } = useThemeColors ? useThemeColors() : { bg: "#fff" };
+  const { cta } = useThemeColors();
   return (
     <TouchableOpacity
       onPress={onPress}
@@ -1892,16 +1984,8 @@ const TagChip: React.FC<{
       style={[
         styles.tagChip,
         {
-          backgroundColor: selected
-            ? bg !== "#fff"
-              ? "#E27D60"
-              : "#293a53"
-            : card,
-          borderColor: selected
-            ? bg !== "#fff"
-              ? "#E27D60"
-              : "#293a53"
-            : border,
+          backgroundColor: selected ? cta : card,
+          borderColor: selected ? cta : border,
         },
       ]}
     >
@@ -1912,6 +1996,12 @@ const TagChip: React.FC<{
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20 },
+  headerIconButton: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   label: { fontSize: 16, fontWeight: "500", marginTop: 15, marginBottom: 5 },
   sectionHeaderRow: {
     flexDirection: "row",
@@ -1970,7 +2060,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 12,
     borderRadius: 10,
-    fontSize: 16,
+    fontSize: 15,
     marginBottom: 10,
     minHeight: 44,
   },
@@ -2132,7 +2222,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   buyBtnCookies: {
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 14,
@@ -2181,10 +2271,16 @@ const AutoExpandingTextInput: React.FC<AutoExpandingTextInputProps> = ({
   maxHeight = 200,
   style,
   value,
+  onBlur,
+  onContentSizeChange,
+  onFocus,
   ...props
 }) => {
   const [inputHeight, setInputHeight] = useState(minHeight);
+  const [contentExceedsMaxHeight, setContentExceedsMaxHeight] = useState(false);
+  const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<RNTextInput>(null);
+  const hasFocusedRef = useRef(false);
 
   useEffect(() => {
     if (typeof value !== "string") {
@@ -2192,17 +2288,34 @@ const AutoExpandingTextInput: React.FC<AutoExpandingTextInputProps> = ({
       return;
     }
 
+    if (isFocused || hasFocusedRef.current) return;
+
     const lineCount = Math.max(1, value.split("\n").length);
     const estimatedHeight = 24 + lineCount * 22;
-    setInputHeight(Math.max(minHeight, Math.min(maxHeight, estimatedHeight)));
-  }, [value, minHeight, maxHeight]);
+    setInputHeight((currentHeight) =>
+      Math.max(currentHeight, Math.max(minHeight, Math.min(maxHeight, estimatedHeight)))
+    );
+  }, [value, minHeight, maxHeight, isFocused]);
 
   const handleContentSizeChange = (event: any) => {
+    onContentSizeChange?.(event);
+    const measuredHeight = Number(event.nativeEvent?.contentSize?.height);
+    if (!Number.isFinite(measuredHeight)) return;
+
     const newHeight = Math.max(
       minHeight,
-      Math.min(maxHeight, event.nativeEvent.contentSize.height)
+      Math.min(maxHeight, Math.ceil(measuredHeight))
     );
-    setInputHeight(newHeight);
+    setInputHeight((currentHeight) => {
+      const isGrowing = newHeight > currentHeight;
+      if (isGrowing && !isFocused && hasFocusedRef.current) {
+        return currentHeight;
+      }
+
+      setContentExceedsMaxHeight(measuredHeight > maxHeight + 1);
+      if (Math.abs(currentHeight - newHeight) < 2) return currentHeight;
+      return newHeight;
+    });
   };
 
   return (
@@ -2211,11 +2324,21 @@ const AutoExpandingTextInput: React.FC<AutoExpandingTextInputProps> = ({
       value={value}
       ref={inputRef}
       multiline
+      scrollEnabled={contentExceedsMaxHeight}
       style={[
         style,
         { minHeight, maxHeight, height: inputHeight }
       ]}
+      onBlur={(event) => {
+        setIsFocused(false);
+        onBlur?.(event);
+      }}
       onContentSizeChange={handleContentSizeChange}
+      onFocus={(event) => {
+        hasFocusedRef.current = true;
+        setIsFocused(true);
+        onFocus?.(event);
+      }}
     />
   );
 };

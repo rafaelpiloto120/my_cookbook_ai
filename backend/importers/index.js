@@ -488,6 +488,18 @@ function normalizeRecipeCandidate(candidate, sourceLabel = "import", options = {
       candidate.collections ??
       candidate.keywords
   );
+  const notes = sanitizeLine(
+    candidate.recipeNotes ??
+      candidate.recipe_notes ??
+      candidate.extraNotes ??
+      candidate.extra_notes ??
+      candidate.comments ??
+      candidate.comment ??
+      candidate.sourceUrl ??
+      candidate.url ??
+      "",
+    2000
+  );
 
   const servings = parseServings(
     candidate.servings ??
@@ -549,6 +561,7 @@ function normalizeRecipeCandidate(candidate, sourceLabel = "import", options = {
     updatedAt: Date.now(),
     image: resolvedImage,
     imageUrl: resolvedImage,
+    notes,
     cookbooks: [],
     isDeleted: false,
   };

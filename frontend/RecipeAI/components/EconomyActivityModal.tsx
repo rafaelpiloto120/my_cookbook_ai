@@ -4,6 +4,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 
 import type { EconomyLedgerEntry } from "../lib/economy/client";
 import { formatEconomyActivityDate, getEconomyActivityLabel } from "../lib/economy/activity";
+import { useThemeColors } from "../context/ThemeContext";
 
 type Props = {
   visible: boolean;
@@ -17,6 +18,8 @@ type Props = {
   loadingText: string;
   emptyText: string;
   balanceAfterLabel: string;
+  positiveDeltaColor?: string;
+  negativeDeltaColor?: string;
   locale?: string;
   entries: EconomyLedgerEntry[];
   loading: boolean;
@@ -26,7 +29,6 @@ type Props = {
 
 export default function EconomyActivityModal({
   visible,
-  isDark,
   card,
   border,
   text,
@@ -36,12 +38,16 @@ export default function EconomyActivityModal({
   loadingText,
   emptyText,
   balanceAfterLabel,
+  positiveDeltaColor,
+  negativeDeltaColor,
   locale,
   entries,
   loading,
   onClose,
   t,
 }: Props) {
+  const { sectionTitle, success, accentText } = useThemeColors();
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={[styles.modalOverlay, { backgroundColor: backdrop }]} onPress={onClose}>
@@ -50,7 +56,7 @@ export default function EconomyActivityModal({
           onStartShouldSetResponder={() => true}
         >
           <View style={styles.header}>
-            <Text style={[styles.title, { color: isDark ? "#f5f5f5" : "#293a53" }]}>{title}</Text>
+            <Text style={[styles.title, { color: sectionTitle }]}>{title}</Text>
             <Pressable style={styles.closeButton} onPress={onClose} hitSlop={12}>
               <MaterialIcons name="close" size={26} color={subText} />
             </Pressable>
@@ -64,7 +70,9 @@ export default function EconomyActivityModal({
             <ScrollView showsVerticalScrollIndicator={false}>
               {entries.map((entry, index) => {
                 const delta = typeof entry.delta === "number" ? entry.delta : 0;
-                const deltaColor = delta >= 0 ? "#2E8B57" : "#E27D60";
+                const deltaColor = delta >= 0
+                  ? positiveDeltaColor ?? success
+                  : negativeDeltaColor ?? accentText;
                 const deltaPrefix = delta > 0 ? "+" : "";
                 return (
                   <View

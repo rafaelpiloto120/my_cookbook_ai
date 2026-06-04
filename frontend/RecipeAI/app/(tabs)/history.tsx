@@ -14,6 +14,7 @@ import {
   NativeScrollEvent,
   ScrollView,
   TouchableWithoutFeedback,
+  Share,
 } from "react-native";
 import { getAuth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
@@ -27,6 +28,8 @@ import AppButton from "../../components/AppButton";
 import { Ionicons } from "@expo/vector-icons";
 import AppCard from "../../components/AppCard";
 import ImportFileModal from "../../components/ImportFileModal";
+import NewRecipeOptionsModal from "../../components/NewRecipeOptionsModal";
+import RecipeTagRow from "../../components/RecipeTagRow";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { useAuth } from "../../context/AuthContext";
@@ -37,6 +40,7 @@ import {
   getRecipeCaloriesPerServing,
 } from "../../lib/recipes/nutrition";
 import { normalizeRecipeDifficulty } from "../../lib/recipes/difficulty";
+import { formatImportedRecipeNote } from "../../lib/recipes/importNotes";
 import { getApiBaseUrl as getResolvedApiBaseUrl } from "../../lib/config/api";
 import {
   claimEconomyReward,
@@ -47,6 +51,7 @@ import {
   type EconomyCatalogOffer,
 } from "../../lib/economy/client";
 import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
+import { formatEconomyUnits } from "../../lib/economy/format";
 import {
   claimRewardKeysSequentially,
   getRecipeRewardKeysForCount,
@@ -66,6 +71,15 @@ interface Recipe {
   tags: string[];
   createdAt: string;
   updatedAt?: number | string;
+  notes?: string;
+  sourceUrl?: string | null;
+  sourceMetadata?: {
+    sourceUrl?: string | null;
+    source?: string | null;
+    importedServings?: number | null;
+    importedNutritionInfo?: RecipeNutritionInfo | null;
+    importedAt?: string | null;
+  } | null;
   image?: string;
   imageUrl?: string;
   cookbooks?: (string | { id: string; name: string })[];
@@ -219,7 +233,9 @@ export default function History() {
   const [importFileError, setImportFileError] = useState<string | null>(null);
 
   const router = useRouter();
-  const { bg, text, subText, card, border, isDark } = useThemeColors();
+  const { bg, text, subText, card, border, cta, isDark, headerBg, headerText } = useThemeColors();
+  const inlineAccentColor = isDark ? "#F2D6A3" : cta;
+  const chipBg = isDark ? card : "#F6EBD3";
   const { t } = useTranslation();
   const auth = useAuth();
   // Prefer the singleton engine (always available). AuthContext may expose one too.
@@ -755,6 +771,7 @@ export default function History() {
 
   // --- Delete modal state
   const [deleteTarget, setDeleteTarget] = useState<{ id: string, type: "recipe" | "cookbook" } | null>(null);
+  const [recipeActionTarget, setRecipeActionTarget] = useState<Recipe | null>(null);
 
   // --- Create cookbook
   const createCookbook = async () => {
@@ -806,6 +823,26 @@ export default function History() {
   // --- Delete recipe
   const deleteRecipe = (id: string) => {
     setDeleteTarget({ id, type: "recipe" });
+  };
+
+  const editRecipe = (recipe: Recipe) => {
+    setRecipeActionTarget(null);
+    router.push({ pathname: "/add-recipe", params: { editId: recipe.id } } as any);
+  };
+
+  const shareRecipe = async (recipe: Recipe) => {
+    setRecipeActionTarget(null);
+    try {
+      const message = `${recipe.title}\n\n${t("recipes.ingredients")}:\n${recipe.ingredients.join(
+        "\n"
+      )}\n\n${t("recipes.preparation")}:\n${recipe.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
+      await Share.share({
+        message,
+        title: recipe.title,
+      });
+    } catch (error) {
+      Alert.alert(t("common.error_generic"), t("recipes.share_error"));
+    }
   };
 
   // --- Delete cookbook
@@ -920,7 +957,12 @@ export default function History() {
   // --- Filtered recipes
   const filteredRecipes = recipes.filter((r) => {
     if ((r as any)?.isDeleted) return false;
-    const matchesSearch = r.title.toLowerCase().includes(search.toLowerCase());
+    const searchTerm = search.trim().toLowerCase();
+    const recipeTags = getNormalizedTags(r.tags);
+    const matchesSearch =
+      searchTerm.length === 0 ||
+      r.title.toLowerCase().includes(searchTerm) ||
+      recipeTags.some((tag) => tag.toLowerCase().includes(searchTerm));
     const matchesDiff =
       selectedDifficulties.length === 0 ||
       selectedDifficulties.includes(normalizeRecipeDifficulty(r.difficulty));
@@ -928,9 +970,7 @@ export default function History() {
       selectedCalories.length === 0 ||
       selectedCalories.includes(getRecipeCalorieBucket(r));
 
-    const normalizedTags = getNormalizedTags(r.tags).map((t) =>
-      t.toLowerCase()
-    );
+    const normalizedTags = recipeTags.map((t) => t.toLowerCase());
     const matchesTags =
       selectedTags.length === 0 ||
       normalizedTags.some((t) =>
@@ -1019,31 +1059,47 @@ export default function History() {
       <Stack.Screen
         options={{
           title: t("recipes.my_recipes"),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
         }}
       />
 
       {/* Tabs */}
-      <View style={styles.tabRow}>
+      <View style={[styles.tabRow, { backgroundColor: card, borderColor: border }]}>
         <TouchableOpacity
           style={[
             styles.tab,
-            { backgroundColor: activeTab === "all" ? "#F5F5F5" : "#ddd" },
+            { backgroundColor: activeTab === "all" ? cta : "transparent" },
           ]}
           onPress={() => setActiveTab("all")}
         >
-          <Text>{t("recipes.all_recipes")}</Text>
+          <Text
+            style={[
+              styles.tabText,
+              { color: activeTab === "all" ? "#fff" : text },
+            ]}
+            numberOfLines={1}
+          >
+            {t("recipes.all_recipes")}
+          </Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[
             styles.tab,
-            { backgroundColor: activeTab === "cookbooks" ? "#F5F5F5" : "#ddd" },
+            { backgroundColor: activeTab === "cookbooks" ? cta : "transparent" },
           ]}
           onPress={() => setActiveTab("cookbooks")}
         >
-          <Text>{t("recipes.cookbooks")}</Text>
+          <Text
+            style={[
+              styles.tabText,
+              { color: activeTab === "cookbooks" ? "#fff" : text },
+            ]}
+            numberOfLines={1}
+          >
+            {t("recipes.cookbooks")}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -1051,7 +1107,7 @@ export default function History() {
       {activeTab === "all" ? (
         <>
           {/* Search + filter */}
-          <View style={styles.searchRow}>
+          <View style={[styles.searchRow, { backgroundColor: card, borderColor: border }]}>
             <MaterialIcons
               name="search"
               size={22}
@@ -1059,14 +1115,14 @@ export default function History() {
               style={{ marginRight: 6 }}
             />
             <TextInput
-              style={{ flex: 1, color: text }}
+              style={{ flex: 1, color: text, fontSize: 15 }}
               placeholder={t("recipes.search_placeholder")}
               placeholderTextColor={subText}
               value={search}
               onChangeText={setSearch}
             />
             <TouchableOpacity onPress={() => setFilterVisible(true)}>
-              <MaterialIcons name="filter-list" size={24} color="#293a53" />
+              <MaterialIcons name="filter-list" size={24} color={inlineAccentColor} />
             </TouchableOpacity>
           </View>
 
@@ -1087,6 +1143,7 @@ export default function History() {
             ref={listRef}
             data={visibleRecipes}
             keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.recipeListContent}
             renderItem={({ item }) => (
               <TouchableOpacity
                 onPress={() =>
@@ -1111,11 +1168,16 @@ export default function History() {
                         {item.title}
                       </Text>
                       <TouchableOpacity
-                        onPress={() => deleteRecipe(item.id)}
-                        style={styles.deleteButton}
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          setRecipeActionTarget(item);
+                        }}
+                        style={styles.recipeActionButton}
+                        accessibilityRole="button"
+                        accessibilityLabel={t("common.more", { defaultValue: "More options" })}
                       >
                         <MaterialIcons
-                          name="delete-outline"
+                          name="more-vert"
                           size={22}
                           color={subText}
                         />
@@ -1131,20 +1193,14 @@ export default function History() {
                       </Text>
                       {getRecipeCaloriesPerServing(item) !== null ? (
                         <View style={styles.metaCalories}>
-                          <MaterialCommunityIcons name="fire" size={14} color="#E27D60" />
+                          <MaterialCommunityIcons name="fire" size={14} color={inlineAccentColor} />
                           <Text style={[styles.metaText, { color: subText }]}>
                             {`${Math.round(getRecipeCaloriesPerServing(item) as number)} kcal`}
                           </Text>
                         </View>
                       ) : null}
                     </View>
-                    <View style={styles.tagRow}>
-                      {getNormalizedTags(item.tags).slice(0, 3).map((t, i) => (
-                        <View key={i} style={styles.tagChip}>
-                          <Text style={styles.tagText}>{t}</Text>
-                        </View>
-                      ))}
-                    </View>
+                    <RecipeTagRow tags={getNormalizedTags(item.tags)} />
                   </View>
                 </AppCard>
               </TouchableOpacity>
@@ -1155,7 +1211,7 @@ export default function History() {
                   {t("recipes.no_recipes")}
                 </Text>
                 <TouchableOpacity onPress={() => router.push("/")}>
-                  <Text style={{ color: "#E27D60", fontWeight: "600" }}>
+                  <Text style={{ color: inlineAccentColor, fontWeight: "600" }}>
                     {t("recipes.create_in_ai_kitchen")}
                   </Text>
                 </TouchableOpacity>
@@ -1183,7 +1239,7 @@ export default function History() {
             data={visibleCookbooks}
             keyExtractor={(item) => item.id}
             numColumns={2}
-            contentContainerStyle={{ paddingBottom: 10 }}
+            contentContainerStyle={styles.cookbookListContent}
             renderItem={({ item }) => {
               const firstRecipe = recipes.find(
                 (r) =>
@@ -1225,7 +1281,7 @@ export default function History() {
                   {t("recipes.no_cookbooks") || "No cookbooks yet."}
                 </Text>
                 <TouchableOpacity onPress={() => setNewCookbookVisible(true)}>
-                  <Text style={{ color: "#E27D60", fontWeight: "600", textAlign: "center" }}>
+                  <Text style={{ color: "#8A4B16", fontWeight: "600", textAlign: "center" }}>
                     {t("recipes.add_cookbook") || "Add cookbook"}
                   </Text>
                 </TouchableOpacity>
@@ -1236,91 +1292,42 @@ export default function History() {
       )}
 
       {/* FAB */}
-      {activeTab === "all" ? (
-        <TouchableOpacity
-          style={styles.fab}
-          onPress={() => setNewRecipeVisible(true)}
-        >
-          <MaterialIcons name="edit" size={22} color="#fff" />
-          <Text style={styles.fabText}>{t("recipes.new_recipe")}</Text>
-        </TouchableOpacity>
-      ) : (
-        <TouchableOpacity
-          style={styles.fab}
-          onPress={() => setNewCookbookVisible(true)}
-        >
-          <MaterialIcons name="add" size={22} color="#fff" />
-          <Text style={styles.fabText}>{t("recipes.add_cookbook")}</Text>
-        </TouchableOpacity>
-      )}
-      {/* New Recipe modal */}
-      <Modal visible={newRecipeVisible} transparent animationType="fade">
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPressOut={() => setNewRecipeVisible(false)}
-        >
-          <View style={[styles.modalContent, { backgroundColor: card }]}>
-            <View style={styles.modalHeader}>
-              <Text
-                style={[
-                  styles.modalTitle,
-                  // If dark mode, override color to text for visibility
-                  bg !== "#fff" ? { color: text } : null,
-                ]}
-              >
-                {t("recipes.new_recipe")}
-              </Text>
-              <TouchableOpacity onPress={() => setNewRecipeVisible(false)}>
-                <MaterialIcons name="close" size={24} color="#293a53" />
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity
-              style={styles.addOptionRow}
-              onPress={() => {
-                setNewRecipeVisible(false);
-                router.push("/add-recipe");
-              }}
-            >
-              <Text style={styles.addOptionEmoji}>✍️</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.addOptionText}>{t("recipes.manual_recipe")}</Text>
-                <Text style={styles.addOptionSub}>{t("recipes.manual_recipe_sub")}</Text>
-              </View>
-              <MaterialIcons name="chevron-right" size={24} color={subText} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.addOptionRow}
-              onPress={() => {
-                setNewRecipeVisible(false);
-                setImportUrlVisible(true);
-              }}
-            >
-              <Text style={styles.addOptionEmoji}>🌐</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.addOptionText}>{t("recipes.import_from_url")}</Text>
-                <Text style={styles.addOptionSub}>{t("recipes.import_desc")}</Text>
-              </View>
-              <MaterialIcons name="chevron-right" size={24} color={subText} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.addOptionRow}
-              onPress={() => {
-                setNewRecipeVisible(false);
-                setImportFileError(null);
-                setImportFileVisible(true);
-              }}
-            >
-              <Text style={styles.addOptionEmoji}>📁</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.addOptionText}>{t("recipes.import_from_file")}</Text>
-                <Text style={styles.addOptionSub}>{t("recipes.import_from_file_sub")}</Text>
-              </View>
-              <MaterialIcons name="chevron-right" size={24} color={subText} />
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      </Modal>
+      <View pointerEvents="box-none" style={styles.fabWrap}>
+        {activeTab === "all" ? (
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={() => setNewRecipeVisible(true)}
+          >
+            <MaterialIcons name="edit" size={22} color="#fff" />
+            <Text style={styles.fabText}>{t("recipes.new_recipe")}</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={() => setNewCookbookVisible(true)}
+          >
+            <MaterialIcons name="add" size={22} color="#fff" />
+            <Text style={styles.fabText}>{t("recipes.add_cookbook")}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      <NewRecipeOptionsModal
+        visible={newRecipeVisible}
+        onClose={() => setNewRecipeVisible(false)}
+        onManualRecipe={() => {
+          setNewRecipeVisible(false);
+          router.push("/add-recipe");
+        }}
+        onImportUrl={() => {
+          setNewRecipeVisible(false);
+          setImportUrlVisible(true);
+        }}
+        onImportFile={() => {
+          setNewRecipeVisible(false);
+          setImportFileError(null);
+          setImportFileVisible(true);
+        }}
+      />
 
       <ImportFileModal
         visible={importFileVisible}
@@ -1371,7 +1378,7 @@ export default function History() {
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg !== "#fff" ? text : "#293a53"}
+                  color={bg !== "#fff" ? text : "#8F5E43"}
                 />
               </TouchableOpacity>
             </View>
@@ -1447,13 +1454,13 @@ export default function History() {
               </View>
             ) : null}
             {importError ? (
-              <Text style={{ color: "#E27D60", marginBottom: 6, fontSize: 13 }}>
+              <Text style={{ color: "#8A4B16", marginBottom: 6, fontSize: 13 }}>
                 {importError}
               </Text>
             ) : null}
             <TouchableOpacity
               style={{
-                backgroundColor: "#E27D60",
+                backgroundColor: "#8A4B16",
                 borderRadius: 8,
                 paddingVertical: 12,
                 alignItems: "center",
@@ -1576,7 +1583,27 @@ export default function History() {
                     return;
                   }
                   const data = await res.json();
-                  const recipe = data.recipe;
+                  const sourceUrl = data.recipe?.sourceUrl || trimmedUrl;
+                  const recipe = {
+                    ...data.recipe,
+                    notes: formatImportedRecipeNote(
+                      data.recipe?.notes,
+                      sourceUrl,
+                      isInstagram ? "instagram_reel" : "url",
+                      t
+                    ),
+                    sourceUrl,
+                    sourceMetadata: data.recipe?.sourceMetadata ?? {
+                      sourceUrl,
+                      source: isInstagram ? "instagram_reel" : "url",
+                      importedServings:
+                        typeof data.recipe?.servings === "number" && Number.isFinite(data.recipe.servings)
+                          ? data.recipe.servings
+                          : null,
+                      importedNutritionInfo: data.recipe?.nutritionInfo ?? null,
+                      importedAt: new Date().toISOString(),
+                    },
+                  };
 
                   if (isInstagram) {
                     setImportUrlLoadingText(
@@ -1716,7 +1743,7 @@ export default function History() {
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg !== "#fff" ? text : "#293a53"}
+                  color={bg !== "#fff" ? text : "#8F5E43"}
                 />
               </TouchableOpacity>
             </View>
@@ -1760,11 +1787,11 @@ export default function History() {
           onPressOut={() => setFilterVisible(false)}
         >
           <TouchableWithoutFeedback>
-            <View style={styles.modalContent}>
+            <View style={[styles.modalContent, { backgroundColor: card }]}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>{t("recipes.filters")}</Text>
+                <Text style={[styles.modalTitle, { color: text }]}>{t("recipes.filters")}</Text>
                 <TouchableOpacity onPress={() => setFilterVisible(false)}>
-                  <MaterialIcons name="close" size={24} color="#293a53" />
+                  <MaterialIcons name="close" size={24} color={inlineAccentColor} />
                 </TouchableOpacity>
               </View>
               <ScrollView
@@ -1773,7 +1800,7 @@ export default function History() {
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={true}
               >
-                <Text style={styles.modalSubtitle}>{t("recipes.difficulty")}</Text>
+                <Text style={[styles.modalSubtitle, { color: text }]}>{t("recipes.difficulty")}</Text>
                 <View style={styles.filterRow}>
                   {["Easy", "Moderate", "Challenging"].map((d) => (
                     <TouchableOpacity
@@ -1781,9 +1808,8 @@ export default function History() {
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedDifficulties.includes(d)
-                            ? "#293a53"
-                            : "#E0E0E0",
+                          backgroundColor: selectedDifficulties.includes(d) ? cta : chipBg,
+                          borderColor: selectedDifficulties.includes(d) ? cta : border,
                         },
                       ]}
                       onPress={() =>
@@ -1792,7 +1818,7 @@ export default function History() {
                     >
                       <Text
                         style={{
-                          color: selectedDifficulties.includes(d) ? "#fff" : "#000",
+                          color: selectedDifficulties.includes(d) ? "#fff" : text,
                         }}
                       >
                         {t(`difficulty.${d.toLowerCase()}`)}
@@ -1801,7 +1827,7 @@ export default function History() {
                   ))}
                 </View>
 
-                <Text style={styles.modalSubtitle}>
+                <Text style={[styles.modalSubtitle, { color: text }]}>
                   {t("recipes.calories", { defaultValue: "Calories" })}
                 </Text>
                 <View style={styles.filterRow}>
@@ -1811,9 +1837,8 @@ export default function History() {
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedCalories.includes(option.value)
-                            ? "#293a53"
-                            : "#E0E0E0",
+                          backgroundColor: selectedCalories.includes(option.value) ? cta : chipBg,
+                          borderColor: selectedCalories.includes(option.value) ? cta : border,
                         },
                       ]}
                       onPress={() =>
@@ -1822,7 +1847,7 @@ export default function History() {
                     >
                       <Text
                         style={{
-                          color: selectedCalories.includes(option.value) ? "#fff" : "#000",
+                          color: selectedCalories.includes(option.value) ? "#fff" : text,
                         }}
                       >
                         {option.label}
@@ -1833,11 +1858,11 @@ export default function History() {
 
                 {allTags.length > 0 && (
                   <>
-                    <Text style={styles.modalSubtitle}>{t("recipes.tags")}</Text>
+                    <Text style={[styles.modalSubtitle, { color: text }]}>{t("recipes.tags")}</Text>
                     <TextInput
-                      style={styles.filterSearchInput}
+                      style={[styles.filterSearchInput, { borderColor: border, color: text, backgroundColor: bg }]}
                       placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
-                      placeholderTextColor="#7A8597"
+                      placeholderTextColor={subText}
                       value={filterTagSearch}
                       onChangeText={(value) => {
                         setFilterTagSearch(value);
@@ -1851,16 +1876,15 @@ export default function History() {
                           style={[
                             styles.filterOption,
                             {
-                              backgroundColor: selectedTags.includes(tag)
-                                ? "#293a53"
-                                : "#E0E0E0",
+                              backgroundColor: selectedTags.includes(tag) ? cta : chipBg,
+                              borderColor: selectedTags.includes(tag) ? cta : border,
                             },
                           ]}
                           onPress={() => toggleFilter(selectedTags, tag, setSelectedTags)}
                         >
                           <Text
                             style={{
-                              color: selectedTags.includes(tag) ? "#fff" : "#000",
+                              color: selectedTags.includes(tag) ? "#fff" : text,
                             }}
                           >
                             {tag}
@@ -1881,7 +1905,7 @@ export default function History() {
                           setVisibleFilterTagCount((prev) => prev + FILTER_TAGS_INITIAL_VISIBLE)
                         }
                       >
-                        <Text style={styles.filterMoreText}>
+                        <Text style={[styles.filterMoreText, { color: inlineAccentColor }]}>
                           {t("recipes.show_more_tags", {
                             defaultValue: "Show more tags",
                           })}
@@ -1894,7 +1918,7 @@ export default function History() {
                 <TouchableOpacity
                   style={[
                     styles.filterOption,
-                    { backgroundColor: "#E0E0E0", marginTop: 12 },
+                    { backgroundColor: chipBg, borderColor: border, marginTop: 12 },
                   ]}
                   onPress={() => {
                     setSelectedDifficulties([]);
@@ -1906,7 +1930,7 @@ export default function History() {
                 >
                   <Text
                     style={{
-                      color: "#293a53",
+                      color: inlineAccentColor,
                       fontWeight: "600",
                       textAlign: "center",
                     }}
@@ -1934,7 +1958,7 @@ export default function History() {
                   {t("recipes.sort_by", { defaultValue: "Sort by" })}
                 </Text>
                 <TouchableOpacity onPress={() => setSortVisible(false)}>
-                  <MaterialIcons name="close" size={24} color="#293a53" />
+                  <MaterialIcons name="close" size={24} color="#8F5E43" />
                 </TouchableOpacity>
               </View>
               {sortOptions.map((option) => {
@@ -1967,7 +1991,7 @@ export default function History() {
                       {option.label}
                     </Text>
                     {isSelected ? (
-                      <MaterialIcons name="check" size={20} color="#293a53" />
+                      <MaterialIcons name="check" size={20} color="#8F5E43" />
                     ) : null}
                   </TouchableOpacity>
                 );
@@ -1998,7 +2022,7 @@ export default function History() {
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg !== "#fff" ? text : "#293a53"}
+                  color={bg !== "#fff" ? text : "#8F5E43"}
                 />
               </TouchableOpacity>
             </View>
@@ -2032,8 +2056,15 @@ export default function History() {
         title={t("economy.insufficient_title", "Not enough Eggs")}
         body={
           insufficientModal.context === "instagram_reel"
-            ? `You need ${INSTAGRAM_REEL_IMPORT_COST} Eggs to import a recipe from Instagram Reel. Currently, you have ${insufficientModal.remaining} Eggs.`
-            : `You need 1 Egg to create a new cookbook. Currently, you have ${insufficientModal.remaining} Eggs.`
+            ? t("economy.insufficient_instagram_reel_body_short", {
+                count: INSTAGRAM_REEL_IMPORT_COST,
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need {{count}} to import a recipe from an Instagram Reel. You have {{remaining}}.",
+              })
+            : t("economy.insufficient_cookbook_body_short", {
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need 1 egg to create a new cookbook. You have {{remaining}}.",
+              })
         }
         featuredOffer={featuredOffer}
         availableRewardsCount={availableRewardsCount}
@@ -2051,6 +2082,61 @@ export default function History() {
           goToStore();
         }}
       />
+
+      <Modal visible={!!recipeActionTarget} transparent animationType="fade">
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPressOut={() => setRecipeActionTarget(null)}
+        >
+          <View style={[styles.actionMenuContent, { backgroundColor: card }]}>
+            <View style={styles.modalHeader}>
+              <Text
+                style={[styles.modalTitle, { color: text, flex: 1, paddingRight: 12 }]}
+                numberOfLines={2}
+                ellipsizeMode="tail"
+              >
+                {recipeActionTarget?.title}
+              </Text>
+              <TouchableOpacity onPress={() => setRecipeActionTarget(null)}>
+                <MaterialIcons name="close" size={24} color={text} />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => recipeActionTarget && editRecipe(recipeActionTarget)}
+            >
+              <MaterialIcons name="edit" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.edit", { defaultValue: "Edit" })}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => recipeActionTarget && shareRecipe(recipeActionTarget)}
+            >
+              <MaterialIcons name="share" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.share", { defaultValue: "Share" })}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => {
+                if (!recipeActionTarget) return;
+                const id = recipeActionTarget.id;
+                setRecipeActionTarget(null);
+                deleteRecipe(id);
+              }}
+            >
+              <MaterialIcons name="delete-outline" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.delete")}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Delete confirmation modal */}
       <Modal visible={!!deleteTarget} transparent animationType="fade">
@@ -2077,7 +2163,7 @@ export default function History() {
                   name="close"
                   size={24}
                   // If dark mode, use text color for icon, else original
-                  color={bg !== "#fff" ? text : "#293a53"}
+                  color={bg !== "#fff" ? text : "#8F5E43"}
                 />
               </TouchableOpacity>
             </View>
@@ -2111,24 +2197,38 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   tabRow: {
     flexDirection: "row",
-    justifyContent: "center",
-    padding: 6,
-    backgroundColor: "#293a53", // same as header background
+    marginHorizontal: 14,
+    marginTop: 12,
+    marginBottom: 2,
+    padding: 4,
+    borderRadius: 12,
+    borderWidth: 1,
   },
   tab: {
     flex: 1,
-    marginHorizontal: 6,
-    paddingVertical: 8,
-    borderRadius: 20,
+    minHeight: 38,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderRadius: 9,
     alignItems: "center",
+    justifyContent: "center",
+  },
+  tabText: {
+    fontSize: 14,
+    fontWeight: "800",
   },
   searchRow: {
     flexDirection: "row",
     alignItems: "center",
-    margin: 12,
+    marginHorizontal: 14,
+    marginVertical: 12,
     paddingHorizontal: 12,
     borderRadius: 12,
-    backgroundColor: "#F5F5F5",
+    borderWidth: 1,
+  },
+  recipeListContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
   },
   recipeCard: { flexDirection: "row", padding: 10 },
   recipeImage: { width: 80, height: 80, borderRadius: 12, marginRight: 12 },
@@ -2162,45 +2262,55 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
   },
-  deleteButton: {
+  recipeActionButton: {
     paddingLeft: 6,
     paddingTop: 2,
   },
-  tagRow: {
+  actionMenuContent: {
+    width: 320,
+    borderRadius: 16,
+    padding: 20,
+  },
+  actionMenuRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 13,
   },
-  tagChip: {
-    backgroundColor: "#E27D60",
-    borderRadius: 12,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    marginRight: 6,
-    marginBottom: 4,
+  actionMenuText: {
+    fontSize: 15,
+    fontWeight: "700",
   },
-  tagText: {
-    color: "#fff",
-    fontSize: 12,
-    lineHeight: 14,
+  fabWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 24,
+    paddingHorizontal: 20,
+    alignItems: "flex-end",
   },
   fab: {
     flexDirection: "row",
     alignItems: "center",
-    position: "absolute",
-    bottom: 80,
-    right: 20,
-    backgroundColor: "#E27D60",
+    justifyContent: "center",
+    backgroundColor: "#8A4B16",
     borderRadius: 28,
     paddingHorizontal: 16,
     paddingVertical: 12,
+    minHeight: 48,
     elevation: 5,
   },
   fabText: { color: "#fff", fontWeight: "600", marginLeft: 6 },
   cookbookCard: {
     flex: 1,
-    margin: 6,
+    marginHorizontal: 6,
+    marginBottom: 12,
     borderRadius: 12,
     overflow: "hidden",
+  },
+  cookbookListContent: {
+    paddingHorizontal: 8,
+    paddingBottom: 10,
   },
   cookbookImage: { width: "100%", height: 140 },
   cookbookOverlay: {
@@ -2239,12 +2349,12 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: "bold",
-    color: "#293a53",
+    color: "#8F5E43",
   },
   modalSubtitle: {
     fontSize: 14,
     fontWeight: "600",
-    color: "#293a53",
+    color: "#8F5E43",
     marginTop: 10,
     marginBottom: 6,
   },
@@ -2255,12 +2365,10 @@ const styles = StyleSheet.create({
   },
   filterSearchInput: {
     borderWidth: 1,
-    borderColor: "#D9DEE8",
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 14,
-    color: "#293a53",
     marginBottom: 10,
   },
   filterEmptyText: {
@@ -2274,7 +2382,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   filterMoreText: {
-    color: "#293a53",
+    color: "#8F5E43",
     fontSize: 13,
     fontWeight: "700",
   },
@@ -2285,12 +2393,13 @@ const styles = StyleSheet.create({
   sortSummaryButton: {
     alignSelf: "flex-start",
     marginBottom: 10,
-    marginHorizontal: 16,
+    marginHorizontal: 14,
   },
   cookbookSortSummaryButton: {
     marginTop: 10,
   },
   filterOption: {
+    borderWidth: 1,
     borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -2306,11 +2415,11 @@ const styles = StyleSheet.create({
     borderBottomColor: "#EAEAEA",
   },
   sortOptionRowSelected: {
-    backgroundColor: "#F5F5F5",
+    backgroundColor: "#FFFDF7",
   },
   sortOptionText: {
     fontSize: 16,
-    color: "#293a53",
+    color: "#8F5E43",
   },
   sortOptionTextSelected: {
     fontWeight: "700",
@@ -2319,6 +2428,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 10,
     padding: 10,
+    fontSize: 15,
     // marginBottom now set inline for import modal
   },
   // Add Option Row Styles (consistent with cookbook/[id].tsx)
@@ -2327,7 +2437,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 14,
     paddingHorizontal: 10,
-    backgroundColor: "#F5F5F5",
+    backgroundColor: "#FFFDF7",
     borderRadius: 12,
     marginBottom: 10,
     marginTop: 0,
@@ -2339,7 +2449,7 @@ const styles = StyleSheet.create({
   },
   addOptionText: {
     fontWeight: "600",
-    color: "#293a53",
+    color: "#8F5E43",
     fontSize: 16,
     marginBottom: 2,
   },
@@ -2412,7 +2522,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   buyBtnCookies: {
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 14,

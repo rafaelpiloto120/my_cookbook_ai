@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from "react-native";
-import { Stack, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
 import { MaterialIcons } from "@expo/vector-icons";
@@ -20,6 +20,7 @@ import {
   updateWeightLog,
 } from "../../../lib/myDayWeight";
 import { useSyncEngine } from "../../../lib/sync/SyncEngine";
+import { refreshLocalReminderSchedule } from "../../../lib/notifications/localNotifications";
 
 type MeasurementSystem = "US" | "Metric";
 
@@ -52,13 +53,33 @@ function chartPointLabelWidth(value: number | string) {
   return Math.max(36, Math.min(56, String(value).length * 9 + 8));
 }
 
+function parseWeightDayKey(dayKey: string | null | undefined) {
+  const [year, month, day] = String(dayKey ?? "")
+    .split("-")
+    .map(Number);
+  const parsed = new Date(year, month - 1, day, 12, 0, 0, 0);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function formatChartDateLabel(dayKey: string | null | undefined, locale: string | undefined) {
+  const date = parseWeightDayKey(dayKey);
+  return new Intl.DateTimeFormat(locale, {
+    day: "numeric",
+    month: "numeric",
+  }).format(date);
+}
+
 export default function MyDayWeightScreen() {
+  const params = useLocalSearchParams<{ openLogWeight?: string; notificationNonce?: string }>();
   const { user } = useAuth();
   const { t, i18n } = useTranslation();
-  const { bg, text, subText, border, cta, primary, card, modalBackdrop } = useThemeColors();
+  const { bg, text, subText, border, cta, primary, secondary, card, modalBackdrop, isDark, headerBg, headerText } = useThemeColors();
   const { width: viewportWidth } = useWindowDimensions();
   const router = useRouter();
   const syncEngine = useSyncEngine();
+  const handledNotificationActionRef = useRef<string | null>(null);
+  const inlineAccentColor = isDark ? secondary : cta;
+  const progressTrackColor = isDark ? hexToRgba(text, 0.12) : hexToRgba(primary, 0.12);
   const [logs, setLogs] = useState<MyDayWeightLog[]>([]);
   const [profile, setProfile] = useState<MyDayProfile | null>(null);
   const [weightInput, setWeightInput] = useState("");
@@ -172,10 +193,30 @@ export default function MyDayWeightScreen() {
   }, [goalType, goalWeightNumber, latest, weightStartValue]);
   const rangeOptions = useMemo(
     () => [
-      { key: "week" as const, label: t("my_day.range_week", { defaultValue: "This week" }) },
-      { key: "month" as const, label: t("my_day.range_month", { defaultValue: "Last month" }) },
-      { key: "six_months" as const, label: t("my_day.range_six_months", { defaultValue: "Last 6 months" }) },
-      { key: "all" as const, label: t("my_day.range_all", { defaultValue: "All" }) },
+      {
+        key: "week" as const,
+        label: t("my_day.weight_range_week_compact", {
+          defaultValue: t("my_day.range_week", { defaultValue: "This week" }),
+        }),
+      },
+      {
+        key: "month" as const,
+        label: t("my_day.weight_range_month_compact", {
+          defaultValue: t("my_day.range_month", { defaultValue: "Last month" }),
+        }),
+      },
+      {
+        key: "six_months" as const,
+        label: t("my_day.weight_range_six_months_compact", {
+          defaultValue: t("my_day.range_six_months", { defaultValue: "Last 6 months" }),
+        }),
+      },
+      {
+        key: "all" as const,
+        label: t("my_day.weight_range_all_compact", {
+          defaultValue: t("my_day.range_all", { defaultValue: "All" }),
+        }),
+      },
     ],
     [t]
   );
@@ -192,9 +233,12 @@ export default function MyDayWeightScreen() {
     } else if (rangeKey === "six_months") {
       startDate.setMonth(now.getMonth() - 6);
     }
-    return allLogs.filter((log) => new Date(log.createdAt) >= startDate);
+    startDate.setHours(0, 0, 0, 0);
+    const startDayKey = getWeightDayKey(startDate);
+    const todayKey = getWeightDayKey(now);
+    return allLogs.filter((log) => log.dayKey >= startDayKey && log.dayKey <= todayKey);
   }, [allLogs, rangeKey]);
-  const chartLogs = filteredLogs.length > 0 ? filteredLogs : allLogs;
+  const chartLogs = filteredLogs;
   const chartMin = chartLogs.length > 0 ? Math.min(...chartLogs.map((log) => log.value), Number.isFinite(goalWeightNumber) ? goalWeightNumber : Infinity) : 0;
   const chartMax = chartLogs.length > 0 ? Math.max(...chartLogs.map((log) => log.value), Number.isFinite(goalWeightNumber) ? goalWeightNumber : -Infinity) : 1;
   const chartRange = Math.max(chartMax - chartMin, 0.5);
@@ -204,14 +248,15 @@ export default function MyDayWeightScreen() {
   const chartXAxisBottomOffset = 22;
   const chartXAxisY = chartTopPadding + chartHeight + chartBottomInset - chartXAxisBottomOffset;
   const pointStart = 10;
-  const chartViewportWidth = Math.max(viewportWidth - 122, 220);
+  const pointEndInset = 18;
+  const chartViewportWidth = Math.max(viewportWidth - 106, 220);
   const pointGap =
     chartLogs.length > 1
-      ? Math.max(42, (chartViewportWidth - pointStart * 2 - 24) / (chartLogs.length - 1))
+      ? Math.max(42, (chartViewportWidth - pointStart - pointEndInset) / (chartLogs.length - 1))
       : 0;
   const chartWidth =
     chartLogs.length > 1
-      ? Math.max(chartViewportWidth, pointStart * 2 + (chartLogs.length - 1) * pointGap + 24)
+      ? Math.max(chartViewportWidth, pointStart + (chartLogs.length - 1) * pointGap + pointEndInset)
       : chartViewportWidth;
   const chartPoints = chartLogs.map((log, index) => ({
     ...log,
@@ -241,8 +286,8 @@ export default function MyDayWeightScreen() {
     return deduped;
   }, [chartMax, chartMin, chartRange, goalWeightNumber]);
   const selectedEntry =
-    allLogs.find((log) => log.id === selectedEntryId) ??
-    allLogs[allLogs.length - 1] ??
+    chartLogs.find((log) => log.id === selectedEntryId) ??
+    chartLogs[chartLogs.length - 1] ??
     null;
   const selectedEntryIndex = selectedEntry
     ? allLogs.findIndex((log) => log.id === selectedEntry.id)
@@ -273,6 +318,7 @@ export default function MyDayWeightScreen() {
     if (!Number.isFinite(parsed) || parsed <= 0) return;
     const [year, month, day] = selectedDay.split("-").map(Number);
     const targetDate = year && month && day ? new Date(year, month - 1, day) : new Date();
+    if (getWeightDayKey(targetDate) > getWeightDayKey(new Date())) return;
     if (editingLog) {
       const updated = await updateWeightLog(editingLog.id, parsed, targetDate, measurement);
       if (updated && typeof (syncEngine as any)?.markMyDayWeightDirty === "function") {
@@ -298,6 +344,9 @@ export default function MyDayWeightScreen() {
         });
       }
     }
+    refreshLocalReminderSchedule().catch((err) => {
+      console.warn("[WeightDetails] notification schedule refresh failed", err);
+    });
     const nextLogs = await loadWeightLogs();
     setLogs(nextLogs);
     const savedDayKey = getWeightDayKey(targetDate);
@@ -315,6 +364,14 @@ export default function MyDayWeightScreen() {
     setSelectedDay("");
     setWeightModalVisible(true);
   };
+
+  useEffect(() => {
+    if (params.openLogWeight !== "1") return;
+    const nonce = params.notificationNonce || "openLogWeight";
+    if (handledNotificationActionRef.current === nonce) return;
+    handledNotificationActionRef.current = nonce;
+    openCreateModal();
+  }, [params.openLogWeight, params.notificationNonce]);
 
   const openEditModal = (log: MyDayWeightLog) => {
     setEditingLog(log);
@@ -359,6 +416,9 @@ export default function MyDayWeightScreen() {
   }, [displayedGoalWeight, goalType, latest, t, unit, weightRemainingToGoal]);
 
   const displayedDay = selectedDay || getWeightDayKey(new Date());
+  const todayWeightKey = getWeightDayKey(new Date());
+  const selectedDayIsFuture = displayedDay > todayWeightKey;
+  const canSaveWeight = Number(weightInput.replace(",", ".")) > 0 && !selectedDayIsFuture;
   const [selectedYear, selectedMonth] = displayedDay.split("-").map(Number);
   const monthLabel = new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(calendarMonth);
   const dateFormatter = useMemo(
@@ -370,8 +430,11 @@ export default function MyDayWeightScreen() {
       }),
     [i18n.language]
   );
+  const interactiveIconColor = isDark ? "#FFFFFF" : primary;
   const monthStartWeekday = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1).getDay();
   const daysInMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
+  const currentCalendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const canGoNextCalendarMonth = calendarMonth < currentCalendarMonth;
   const calendarCells = [
     ...Array.from({ length: monthStartWeekday }).map(() => null),
     ...Array.from({ length: daysInMonth }).map((_, index) => index + 1),
@@ -444,7 +507,7 @@ export default function MyDayWeightScreen() {
   }, [allLogs, goalType, goalWeightNumber, t]);
   const selectedFeedback = selectedEntry ? entryFeedback.find((item) => item.id === selectedEntry.id) ?? null : null;
   const selectedFeedbackColor =
-    selectedFeedback?.tone === "positive" ? "#16A34A" : selectedFeedback?.tone === "warning" ? "#D97706" : "#DC2626";
+    selectedFeedback?.tone === "positive" ? "#16A34A" : selectedFeedback?.tone === "warning" ? inlineAccentColor : "#DC2626";
   const selectedFeedbackIcon =
     selectedFeedback?.tone === "positive" ? "sentiment-very-satisfied" : selectedFeedback?.tone === "warning" ? "warning-amber" : "error-outline";
   const selectedFeedbackShortMessage = useMemo(() => {
@@ -491,8 +554,8 @@ export default function MyDayWeightScreen() {
     const baselineY = chartXAxisY;
     return `${trendPath} L ${lastPoint.x} ${baselineY} L ${firstPoint.x} ${baselineY} Z`;
   }, [chartPoints, chartXAxisY, trendPath]);
-  const chartFillColor = useMemo(() => hexToRgba(cta, 0.14), [cta]);
-  const goalLineColor = useMemo(() => hexToRgba(cta, 0.6), [cta]);
+  const chartFillColor = useMemo(() => hexToRgba(inlineAccentColor, isDark ? 0.18 : 0.14), [inlineAccentColor, isDark]);
+  const goalLineColor = useMemo(() => hexToRgba(inlineAccentColor, 0.6), [inlineAccentColor]);
   const trendSkPath = useMemo(() => (trendPath ? Skia.Path.MakeFromSVGString(trendPath) : null), [trendPath]);
   const areaSkPath = useMemo(() => (areaPath ? Skia.Path.MakeFromSVGString(areaPath) : null), [areaPath]);
 
@@ -510,12 +573,12 @@ export default function MyDayWeightScreen() {
         options={{
           headerShown: true,
           title: t("my_day.weight_details_title", { defaultValue: "Weight details" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => (
             <TouchableOpacity activeOpacity={0.8} onPress={() => router.replace("/my-day")} style={styles.backButton}>
-              <MaterialIcons name="arrow-back" size={26} color="#fff" />
+              <MaterialIcons name="arrow-back" size={26} color={headerText} />
             </TouchableOpacity>
           ),
         }}
@@ -540,13 +603,13 @@ export default function MyDayWeightScreen() {
               </Text>
             </View>
           </View>
-          <View style={[styles.weightProgressTrack, { backgroundColor: `${primary}1F` }]}>
+          <View style={[styles.weightProgressTrack, { backgroundColor: progressTrackColor }]}>
             <View
               style={[
                 styles.weightProgressFill,
                 {
                   width: `${Math.max(weightProgressRatio * 100, latest ? 12 : 0)}%`,
-                  backgroundColor: cta,
+                  backgroundColor: inlineAccentColor,
                 },
               ]}
             />
@@ -562,10 +625,10 @@ export default function MyDayWeightScreen() {
               </Text>
             ) : null}
             {displayedGoalWeight ? (
-              <Text style={[styles.weightProgressMeta, { color: cta }]}>{String(progressText)}</Text>
+              <Text style={[styles.weightProgressMeta, { color: inlineAccentColor }]}>{String(progressText)}</Text>
             ) : (
               <TouchableOpacity activeOpacity={0.85} onPress={() => router.replace("/my-day")}>
-                <Text style={[styles.weightProgressMeta, { color: cta }]}>{String(progressText)}</Text>
+                <Text style={[styles.weightProgressMeta, { color: inlineAccentColor }]}>{String(progressText)}</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -596,11 +659,7 @@ export default function MyDayWeightScreen() {
               </Text>
             </View>
           </View>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.rangeChipsRow}
-          >
+          <View style={styles.rangeChipsRow}>
             {rangeOptions.map((option) => {
               const selected = option.key === rangeKey;
               return (
@@ -616,17 +675,23 @@ export default function MyDayWeightScreen() {
                   ]}
                   onPress={() => setRangeKey(option.key)}
                 >
-                  <Text style={[styles.rangeChipText, { color: selected ? "#fff" : text }]}>
+                  <Text style={[styles.rangeChipText, { color: selected ? "#fff" : text }]} numberOfLines={1}>
                     {option.label}
                   </Text>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
           {logs.length === 0 ? (
             <Text style={[styles.emptyText, { color: subText }]}>
               {t("my_day.weight_empty", {
                 defaultValue: "Your weight evolution will appear once you start logging entries.",
+              })}
+            </Text>
+          ) : chartLogs.length === 0 ? (
+            <Text style={[styles.emptyText, { color: subText }]}>
+              {t("my_day.weight_range_empty", {
+                defaultValue: "No weight entries in this period.",
               })}
             </Text>
           ) : (
@@ -638,12 +703,12 @@ export default function MyDayWeightScreen() {
                     return (
                       <View key={`${entry.value}-${index}`} style={[styles.chartAxisEntry, { top }]}>
                         {entry.goal ? (
-                          <MaterialIcons name="flag-circle" size={13} color={cta} style={{ marginRight: 4 }} />
+                          <MaterialIcons name="flag-circle" size={13} color={inlineAccentColor} style={{ marginRight: 4 }} />
                         ) : null}
                         <Text
                           style={[
                             styles.chartAxisLabel,
-                            { color: entry.goal ? cta : subText, fontWeight: entry.goal ? "800" : "600" },
+                            { color: entry.goal ? inlineAccentColor : subText, fontWeight: entry.goal ? "800" : "600" },
                           ]}
                         >
                           {entry.value.toFixed(1)}
@@ -687,7 +752,7 @@ export default function MyDayWeightScreen() {
                       {trendSkPath ? (
                         <SkiaPath
                           path={trendSkPath}
-                          color={cta}
+                          color={inlineAccentColor}
                           style="stroke"
                           strokeWidth={3.5}
                           strokeCap="round"
@@ -715,15 +780,15 @@ export default function MyDayWeightScreen() {
                           ]}
                           onPress={() => setSelectedEntryId(point.id)}
                         >
-                          <Text style={[styles.chartPointValue, { color: selected ? cta : text }]}>
+                          <Text style={[styles.chartPointValue, { color: selected ? inlineAccentColor : text }]}>
                             {point.value}
                           </Text>
                           <View
                             style={[
                               styles.chartPointDot,
                               {
-                                backgroundColor: selected ? cta : bg,
-                                borderColor: selected ? cta : primary,
+                                backgroundColor: selected ? inlineAccentColor : bg,
+                                borderColor: selected ? inlineAccentColor : interactiveIconColor,
                               },
                             ]}
                           />
@@ -742,13 +807,13 @@ export default function MyDayWeightScreen() {
                           key={`label-${point.id}`}
                           style={[
                             styles.chartDateLabel,
-                            { color: subText, left: Math.max(0, point.x - 22) },
+                            {
+                              color: subText,
+                              left: Math.min(chartWidth - 44, Math.max(0, point.x - 22)),
+                            },
                           ]}
                         >
-                          {new Intl.DateTimeFormat(i18n.language || undefined, {
-                            day: "numeric",
-                            month: "short",
-                          }).format(new Date(point.createdAt))}
+                          {formatChartDateLabel(point.dayKey, i18n.language || undefined)}
                         </Text>
                       );
                     })}
@@ -762,7 +827,7 @@ export default function MyDayWeightScreen() {
                       {selectedEntry.value} {unit}
                     </Text>
                     <Text style={[styles.timelineDetailsDate, { color: subText }]}>
-                      {dateFormatter.format(new Date(selectedEntry.createdAt))}
+                      {dateFormatter.format(parseWeightDayKey(selectedEntry.dayKey))}
                     </Text>
                   </View>
                   <View style={styles.chartSelectionRight}>
@@ -804,7 +869,7 @@ export default function MyDayWeightScreen() {
               {entryFeedback.slice(0, historyVisibleCount).map((item, index) => {
                 const log = allLogs.find((entry) => entry.id === item.id);
                 if (!log) return null;
-                const iconColor = item.tone === "positive" ? "#16A34A" : item.tone === "warning" ? "#D97706" : "#DC2626";
+                const iconColor = item.tone === "positive" ? "#16A34A" : item.tone === "warning" ? inlineAccentColor : "#DC2626";
                 const previous = (() => {
                   const logIndex = allLogs.findIndex((entry) => entry.id === log.id);
                   return logIndex > 0 ? allLogs[logIndex - 1] : null;
@@ -827,7 +892,7 @@ export default function MyDayWeightScreen() {
                       <View style={styles.feedbackTopRow}>
                         <View>
                           <Text style={[styles.feedbackDate, { color: text }]}>
-                            {dateFormatter.format(new Date(log.createdAt))}
+                            {dateFormatter.format(parseWeightDayKey(log.dayKey))}
                           </Text>
                           <Text style={[styles.feedbackWeight, { color: text }]}>
                             {`${log.value} ${unit}`}
@@ -852,14 +917,14 @@ export default function MyDayWeightScreen() {
                     <View style={styles.historyActions}>
                       <TouchableOpacity
                         activeOpacity={0.85}
-                        style={[styles.historyActionButton, { borderColor: border, backgroundColor: bg }]}
+                        style={styles.historyActionButton}
                         onPress={() => openEditModal(log)}
                       >
-                        <MaterialIcons name="edit" size={16} color={text} />
+                        <MaterialIcons name="edit" size={17} color={interactiveIconColor} />
                       </TouchableOpacity>
                       <TouchableOpacity
                         activeOpacity={0.85}
-                        style={[styles.historyActionButton, { borderColor: border, backgroundColor: bg }]}
+                        style={styles.historyActionButton}
                         onPress={() =>
                           Alert.alert(
                             t("common.delete", { defaultValue: "Delete" }),
@@ -889,7 +954,7 @@ export default function MyDayWeightScreen() {
                           )
                         }
                       >
-                        <MaterialIcons name="delete-outline" size={18} color={cta} />
+                        <MaterialIcons name="delete-outline" size={18} color={subText} />
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -901,7 +966,7 @@ export default function MyDayWeightScreen() {
                   style={styles.historyMoreButton}
                   onPress={() => setHistoryVisibleCount((prev) => prev + 5)}
                 >
-                  <Text style={[styles.historyMoreText, { color: cta }]}>
+                  <Text style={[styles.historyMoreText, { color: inlineAccentColor }]}>
                     {t("common.view_more", { defaultValue: "View more" })}
                   </Text>
                 </TouchableOpacity>
@@ -912,12 +977,18 @@ export default function MyDayWeightScreen() {
       </ScrollView>
 
       <View pointerEvents="box-none" style={styles.floatingActionsWrap}>
-        <TouchableOpacity activeOpacity={0.88} style={[styles.floatingLogWeightButton, { backgroundColor: cta }]} onPress={openCreateModal}>
-          <MaterialIcons name="monitor-weight" size={18} color="#fff" />
-          <Text style={styles.floatingLogWeightText}>
-            {t("my_day.log_weight", { defaultValue: "Log weight" })}
-          </Text>
-        </TouchableOpacity>
+        <View style={styles.floatingActions}>
+          <TouchableOpacity
+            activeOpacity={0.88}
+            style={[styles.floatingLogWeightButton, { backgroundColor: cta }]}
+            onPress={openCreateModal}
+          >
+            <MaterialIcons name="monitor-weight" size={16} color="#fff" />
+            <Text style={styles.floatingLogWeightText} numberOfLines={1}>
+              {t("my_day.log_weight", { defaultValue: "Log weight" })}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <Modal visible={weightModalVisible} transparent animationType="slide" onRequestClose={closeWeightModal}>
@@ -929,7 +1000,7 @@ export default function MyDayWeightScreen() {
           >
             <View style={[styles.weightModalCard, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
               <View style={styles.weightModalHeader}>
-                <Text style={[styles.sectionTitle, { color: text, marginBottom: 0 }]}>
+                <Text style={[styles.weightModalTitle, { color: text }]}>
                   {editingLog
                     ? t("my_day.edit_weight", { defaultValue: "Edit weight" })
                     : t("my_day.log_weight", { defaultValue: "Log weight" })}
@@ -938,20 +1009,39 @@ export default function MyDayWeightScreen() {
                   <MaterialIcons name="close" size={22} color={subText} />
                 </TouchableOpacity>
               </View>
-              <Text style={[styles.metaText, { color: subText }]}>
+              <Text style={[styles.modalHelp, { color: subText }]}>
                 {t("my_day.weight_modal_hint", {
                   defaultValue: "Add your weight and pick the date you want to track.",
                 })}
               </Text>
-              <View style={styles.weightModalFields}>
+
+              <Text style={[styles.weightFieldLabel, { color: subText }]}>
+                {t("my_day.weight_value", { defaultValue: "Weight" })}
+              </Text>
+              <View style={styles.weightValueRow}>
                 <TextInput
                   value={weightInput}
                   onChangeText={(value) => setWeightInput(sanitizeWeightInput(value))}
                   keyboardType="decimal-pad"
-                  placeholder={measurement === "US" ? "165" : "72"}
+                  placeholder={
+                    measurement === "US"
+                      ? t("my_day.weight_value_placeholder_us", { defaultValue: "e.g.: 165" })
+                      : t("my_day.weight_value_placeholder", { defaultValue: "e.g.: 72" })
+                  }
                   placeholderTextColor={subText}
-                  style={[styles.input, { color: text, borderColor: border, backgroundColor: bg }]}
+                  style={[
+                    styles.input,
+                    styles.weightValueInput,
+                    { color: text, borderColor: border, backgroundColor: bg },
+                  ]}
                 />
+                <Text style={[styles.weightUnitText, { color: text }]}>{unit}</Text>
+              </View>
+
+              <Text style={[styles.weightFieldLabel, { color: subText }]}>
+                {t("my_day.date", { defaultValue: "Date" })}
+              </Text>
+              <View style={styles.weightDateRow}>
                 <TouchableOpacity
                   activeOpacity={0.85}
                   style={[styles.dateInput, { borderColor: border, backgroundColor: bg }]}
@@ -964,10 +1054,13 @@ export default function MyDayWeightScreen() {
                     setCalendarVisible(true);
                   }}
                 >
-                  <Text style={{ color: selectedDay ? text : subText, fontSize: 14 }}>
-                    {selectedDay || t("my_day.weight_pick_date", { defaultValue: "Pick date" })}
+                  <Text style={[styles.weightDateText, { color: text }]}>
+                    {displayedDay}
                   </Text>
                 </TouchableOpacity>
+                <View style={styles.dateIcon}>
+                  <MaterialIcons name="calendar-today" size={18} color={inlineAccentColor} />
+                </View>
               </View>
               <View style={styles.weightModalActions}>
                 <TouchableOpacity activeOpacity={0.85} style={[styles.modalSecondaryButton, { borderColor: border, backgroundColor: bg }]} onPress={closeWeightModal}>
@@ -975,7 +1068,15 @@ export default function MyDayWeightScreen() {
                     {t("common.cancel", { defaultValue: "Cancel" })}
                   </Text>
                 </TouchableOpacity>
-                <TouchableOpacity activeOpacity={0.85} style={[styles.button, { backgroundColor: cta }]} onPress={handleSave}>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={[
+                    styles.button,
+                    { backgroundColor: cta, opacity: canSaveWeight ? 1 : 0.55 },
+                  ]}
+                  disabled={!canSaveWeight}
+                  onPress={handleSave}
+                >
                   <Text style={styles.buttonText}>{t("common.save")}</Text>
                 </TouchableOpacity>
               </View>
@@ -992,14 +1093,15 @@ export default function MyDayWeightScreen() {
                 activeOpacity={0.85}
                 onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}
               >
-                <MaterialIcons name="chevron-left" size={22} color={primary} />
+                <MaterialIcons name="chevron-left" size={22} color={interactiveIconColor} />
               </TouchableOpacity>
               <Text style={[styles.calendarTitle, { color: text }]}>{monthLabel}</Text>
               <TouchableOpacity
                 activeOpacity={0.85}
+                disabled={!canGoNextCalendarMonth}
                 onPress={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}
               >
-                <MaterialIcons name="chevron-right" size={22} color={primary} />
+                <MaterialIcons name="chevron-right" size={22} color={canGoNextCalendarMonth ? primary : subText} />
               </TouchableOpacity>
             </View>
             <View style={styles.calendarWeekRow}>
@@ -1016,16 +1118,18 @@ export default function MyDayWeightScreen() {
                     ? null
                     : `${calendarMonth.getFullYear()}-${`${calendarMonth.getMonth() + 1}`.padStart(2, "0")}-${`${day}`.padStart(2, "0")}`;
                 const todayKey = getWeightDayKey(new Date());
+                const isFuture = value != null && value > todayKey;
                 const isSelected = value === selectedDay || (!selectedDay && value === todayKey);
                 return (
                   <TouchableOpacity
                     key={`${value}-${index}`}
                     activeOpacity={0.85}
-                    disabled={day == null}
+                    disabled={day == null || isFuture}
                     style={[
                       styles.calendarCell,
                       isSelected && { backgroundColor: cta },
                       day == null && { opacity: 0 },
+                      isFuture && { opacity: 0.28 },
                     ]}
                     onPress={() => {
                       if (!value) return;
@@ -1138,18 +1242,23 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   rangeChipsRow: {
+    flexDirection: "row",
+    flexWrap: "nowrap",
     paddingBottom: 14,
-    gap: 8,
+    gap: 6,
   },
   rangeChip: {
     borderWidth: 1,
     borderRadius: 999,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     paddingVertical: 7,
+    flexShrink: 1,
+    maxWidth: "100%",
   },
   rangeChipText: {
     fontSize: 12,
     fontWeight: "700",
+    flexShrink: 1,
   },
   chartFrame: {
     flexDirection: "row",
@@ -1171,9 +1280,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
   },
-  chartScrollContent: {
-    paddingRight: 16,
-  },
+  chartScrollContent: {},
   chartCanvas: {
     position: "relative",
     marginBottom: 8,
@@ -1222,6 +1329,8 @@ const styles = StyleSheet.create({
   chartDateLabel: {
     position: "absolute",
     bottom: 0,
+    width: 44,
+    textAlign: "center",
     fontSize: 11,
     fontWeight: "600",
   },
@@ -1353,34 +1462,68 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  weightModalFields: {
+  modalHelp: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  weightFieldLabel: {
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+    marginBottom: 6,
+  },
+  weightValueRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 14,
     marginBottom: 14,
   },
-  input: {
+  weightValueInput: {
     flex: 1,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+  },
+  weightUnitText: {
+    minWidth: 28,
     fontSize: 15,
+    fontWeight: "800",
+  },
+  input: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  weightDateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   dateInput: {
-    width: 118,
+    flex: 1,
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 10,
     paddingHorizontal: 12,
-    paddingVertical: 12,
-    fontSize: 14,
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-start",
+  },
+  dateIcon: {
+    minWidth: 28,
+    height: 44,
+    alignItems: "center",
     justifyContent: "center",
   },
+  weightDateText: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
   button: {
-    borderRadius: 12,
+    borderRadius: 10,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   buttonText: {
     color: "#fff",
@@ -1412,10 +1555,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   historyActionButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    borderWidth: 1,
+    width: 24,
+    height: 24,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1434,9 +1575,10 @@ const styles = StyleSheet.create({
   },
   weightModalKeyboard: {
     width: "100%",
-    paddingHorizontal: 20,
+    alignItems: "center",
   },
   weightModalCard: {
+    width: "92%",
     borderRadius: 18,
     borderWidth: 1,
     padding: 18,
@@ -1445,18 +1587,23 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    marginBottom: 8,
+  },
+  weightModalTitle: {
+    fontSize: 20,
+    fontWeight: "800",
   },
   weightModalActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 10,
+    marginTop: 14,
   },
   modalSecondaryButton: {
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 10,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   modalSecondaryButtonText: {
     fontSize: 14,
@@ -1466,28 +1613,37 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     right: 0,
-    bottom: 18,
+    bottom: 24,
     paddingHorizontal: 16,
-    alignItems: "flex-end",
-    pointerEvents: "box-none",
+  },
+  floatingActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: 8,
   },
   floatingLogWeightButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "center",
+    gap: 5,
     borderRadius: 999,
-    paddingHorizontal: 16,
+    minWidth: 118,
+    maxWidth: 166,
+    minHeight: 48,
+    paddingHorizontal: 12,
     paddingVertical: 12,
     shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.18,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
+    shadowRadius: 16,
+    elevation: 8,
   },
   floatingLogWeightText: {
     color: "#fff",
     fontSize: 14,
     fontWeight: "700",
+    flexShrink: 1,
   },
   calendarCard: {
     width: "86%",

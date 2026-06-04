@@ -13,6 +13,7 @@ export type MyDayWeightLog = {
 };
 
 export const MY_DAY_WEIGHT_KEY = "myDayWeightLogs";
+const MY_DAY_WEIGHT_SYNC_KEY = "sync_myday_weights";
 
 function kgToPounds(value: number) {
   return value * 2.2046226218;
@@ -165,6 +166,40 @@ export async function deleteWeightLog(id: string): Promise<void> {
   const logs = await loadWeightLogs();
   const next = logs.filter((log) => log.id !== id);
   await saveWeightLogs(next);
+
+  try {
+    const raw = await AsyncStorage.getItem(MY_DAY_WEIGHT_SYNC_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const now = Date.now();
+    let changed = false;
+    const nextSync = parsed.map((item) => {
+      const itemId = String(item?.id ?? item?.data?.id ?? "");
+      if (itemId !== id) return item;
+      changed = true;
+      return {
+        ...item,
+        id,
+        data: {
+          ...(item?.data ?? {}),
+          id,
+          isDeleted: true,
+          updatedAt: now,
+          schemaVersion: item?.data?.schemaVersion ?? 1,
+        },
+        sync: {
+          ...(item?.sync ?? {}),
+          dirty: true,
+        },
+      };
+    });
+    if (changed) {
+      await AsyncStorage.setItem(MY_DAY_WEIGHT_SYNC_KEY, JSON.stringify(nextSync));
+    }
+  } catch {
+    // Deleting the visible local entry should still succeed if sync metadata is unavailable.
+  }
 }
 
 export function latestWeightLog(logs: MyDayWeightLog[]) {

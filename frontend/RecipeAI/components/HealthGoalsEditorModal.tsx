@@ -484,8 +484,10 @@ export default function HealthGoalsEditorModal({
                                     {option.label}
                                   </Text>
                                 </View>
-                                {showTargetInput ? (
-                                  <View style={styles.goalTargetWrap}>
+                                {showTargetInput || (selected && option.key === "maintain") ? (
+                                  <View style={[styles.goalTargetWrap, !showTargetInput && styles.goalTargetPlaceholder]}>
+                                    {showTargetInput ? (
+                                    <>
                                     <TextInput
                                       value={draft.targetWeight}
                                       onChangeText={(value) => handleTargetWeightChange(value, option.key as "lose" | "gain")}
@@ -504,6 +506,8 @@ export default function HealthGoalsEditorModal({
                                     <Text style={[styles.goalTargetUnit, { color: selected ? "rgba(255,255,255,0.75)" : subText }]}>
                                       {measurement === "US" ? "lb" : "kg"}
                                     </Text>
+                                    </>
+                                    ) : null}
                                   </View>
                                 ) : null}
                               </TouchableOpacity>
@@ -604,7 +608,7 @@ export default function HealthGoalsEditorModal({
                                   key={field.key}
                                   style={[
                                     styles.planGridCard,
-                                    { backgroundColor: bg },
+                                    { backgroundColor: bg, borderColor: border },
                                     planMode === "auto" ? styles.planGridCardAuto : null,
                                   ]}
                                 >
@@ -906,10 +910,14 @@ const styles = StyleSheet.create({
   },
   goalTargetWrap: {
     width: 112,
+    minHeight: 39,
     marginLeft: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+  },
+  goalTargetPlaceholder: {
+    opacity: 0,
   },
   goalTargetInput: {
     borderWidth: 1,
@@ -975,6 +983,7 @@ const styles = StyleSheet.create({
   },
   planGridCard: {
     width: "48.5%",
+    borderWidth: 1,
     borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 12,

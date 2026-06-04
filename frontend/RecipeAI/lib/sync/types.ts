@@ -67,9 +67,18 @@ export interface RecipeDoc {
   servings?: number | null;
   cost?: CostLevel;
   nutritionInfo?: RecipeNutritionInfo | null;
+  sourceUrl?: string | null;
+  sourceMetadata?: {
+    sourceUrl?: string | null;
+    source?: string | null;
+    importedServings?: number | null;
+    importedNutritionInfo?: RecipeNutritionInfo | null;
+    importedAt?: string | null;
+  } | null;
 
   ingredients: Ingredient[];
   steps: InstructionStep[];
+  notes?: string | null;
 
   cookbookIds: string[];         // which cookbooks this recipe belongs to
   tags: string[];

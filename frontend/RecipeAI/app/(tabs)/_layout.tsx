@@ -13,7 +13,7 @@ import { getApiBaseUrl } from "../../lib/config/api";
 import { loadLastMainTab, mainTabFromPathname, saveLastMainTab } from "../../lib/navigation/lastMainTab";
 
 export default function TabLayout() {
-  const { isDark, bg, text } = useThemeColors();
+  const { isDark, bg, text, tabBarBg, tabBarActive, tabBarInactive } = useThemeColors();
 
   const { t } = useTranslation();
 
@@ -145,11 +145,11 @@ export default function TabLayout() {
           headerStyle: { backgroundColor: bg },
           headerTintColor: text,
           headerTitleStyle: { fontWeight: "600" },
-          tabBarStyle: { backgroundColor: "#293a53" },
-          tabBarActiveTintColor: "#ffbd80ff",
-          tabBarInactiveTintColor: "#fff",
+          tabBarStyle: { backgroundColor: tabBarBg },
+          tabBarActiveTintColor: tabBarActive,
+          tabBarInactiveTintColor: tabBarInactive,
           tabBarIcon: ({ color, focused }) => {
-            const tintColor = focused ? "#ffbd80ff" : "#fff";
+            const tintColor = focused ? tabBarActive : tabBarInactive;
             const scale = focused ? 1.1 : 1;
             let iconName: keyof typeof MaterialIcons.glyphMap = "book";
 

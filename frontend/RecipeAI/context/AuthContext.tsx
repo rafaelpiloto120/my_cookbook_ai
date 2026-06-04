@@ -548,7 +548,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     >
       {loading ? (
         <View style={styles.loadingGate}>
-          <ActivityIndicator size="large" color="#E4795B" />
+          <ActivityIndicator size="large" color="#8A4B16" />
           <Text style={styles.loadingTitle}>{loadingMessage}</Text>
           <Text style={styles.loadingSubtitle}>
             This should only take a moment.
@@ -574,21 +574,21 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#FFF8F4",
+    backgroundColor: "#FFFDF7",
     paddingHorizontal: 28,
   },
   loadingTitle: {
     marginTop: 18,
     fontSize: 18,
     fontWeight: "700",
-    color: "#263341",
+    color: "#2B2118",
     textAlign: "center",
   },
   loadingSubtitle: {
     marginTop: 8,
     fontSize: 14,
     lineHeight: 20,
-    color: "#5E6B78",
+    color: "#7B6A57",
     textAlign: "center",
   },
 });

@@ -14,7 +14,8 @@ import { Stack } from "expo-router";
 import { MaterialIcons } from "@expo/vector-icons";
 import { useTranslation } from "react-i18next";
 
-import { useThemeColors, useTheme } from "../context/ThemeContext";
+import { useThemeColors } from "../context/ThemeContext";
+import EggIcon from "../components/EggIcon";
 import { faqCategoryMeta, getFaqItems, type FaqCategoryId } from "../lib/faq";
 
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -23,9 +24,18 @@ if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental
 
 export default function FaqScreen() {
   const { t } = useTranslation();
-  const { bg, text, card, border, subText } = useThemeColors();
-  const { theme } = useTheme();
-  const isDark = theme === "dark";
+  const {
+    bg,
+    text,
+    card,
+    border,
+    subText,
+    cta,
+    headerBg,
+    headerText,
+    selectedText,
+    mutedText,
+  } = useThemeColors();
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<"all" | FaqCategoryId>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -54,8 +64,8 @@ export default function FaqScreen() {
       <Stack.Screen
         options={{
           title: t("profile.faq", { defaultValue: "FAQ" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
         }}
       />
@@ -88,6 +98,10 @@ export default function FaqScreen() {
         <View style={styles.categoryList}>
           {faqCategoryMeta.map((category) => {
             const selected = selectedCategory === category.id;
+            const isEconomyCategory = category.id === "eggs";
+            const label = isEconomyCategory
+              ? t("economy.cookies", { defaultValue: category.fallback })
+              : t(category.labelKey, { defaultValue: category.fallback });
             return (
               <Pressable
                 key={category.id}
@@ -98,18 +112,26 @@ export default function FaqScreen() {
                 style={[
                   styles.categoryChip,
                   {
-                    backgroundColor: selected ? "#E27D60" : card,
-                    borderColor: selected ? "#E27D60" : border,
+                    backgroundColor: selected ? cta : card,
+                    borderColor: selected ? cta : border,
                   },
                 ]}
               >
-                <MaterialIcons
-                  name={category.icon as any}
-                  size={16}
-                  color={selected ? "#fff" : subText}
-                />
-                <Text style={[styles.categoryText, { color: selected ? "#fff" : text }]}>
-                  {t(category.labelKey, { defaultValue: category.fallback })}
+                {isEconomyCategory ? (
+                  <EggIcon
+                    size={16}
+                    variant="mono"
+                    tintColor={selected ? selectedText : subText}
+                  />
+                ) : (
+                  <MaterialIcons
+                    name={category.icon as any}
+                    size={16}
+                    color={selected ? selectedText : subText}
+                  />
+                )}
+                <Text style={[styles.categoryText, { color: selected ? selectedText : text }]}>
+                  {label}
                 </Text>
               </Pressable>
             );
@@ -151,7 +173,7 @@ export default function FaqScreen() {
                   </Pressable>
                   {expanded ? (
                     <View style={[styles.answerBlock, { borderTopColor: border }]}>
-                      <Text style={[styles.answerText, { color: isDark ? "#d7dce5" : "#5f6978" }]}>
+                      <Text style={[styles.answerText, { color: mutedText }]}>
                         {item.answer}
                       </Text>
                     </View>

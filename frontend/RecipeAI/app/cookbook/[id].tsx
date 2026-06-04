@@ -11,6 +11,7 @@ import {
   TextInput,
   Alert,
   ScrollView,
+  Share,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -19,7 +20,10 @@ import { MaterialIcons, Ionicons, MaterialCommunityIcons } from "@expo/vector-ic
 import AppCard from "../../components/AppCard";
 import AppButton from "../../components/AppButton";
 import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
+import { formatEconomyUnits } from "../../lib/economy/format";
 import ImportFileModal from "../../components/ImportFileModal";
+import NewRecipeOptionsModal from "../../components/NewRecipeOptionsModal";
+import RecipeTagRow from "../../components/RecipeTagRow";
 import { useThemeColors } from "../../context/ThemeContext";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -33,6 +37,7 @@ import { syncEngine as syncEngineSingleton } from "../../lib/sync/SyncEngine";
 import { importRecipesFromFile } from "../../utils/importFromFile";
 import { getDeviceId } from "../../utils/deviceId";
 import { getRecipeCaloriesPerServing } from "../../lib/recipes/nutrition";
+import { formatImportedRecipeNote } from "../../lib/recipes/importNotes";
 import {
   claimEconomyReward,
   fetchEconomyCatalogBundle,
@@ -82,7 +87,9 @@ function getRecipeCalorieBucket(recipe: any): CalorieFilterOption {
 export default function CookbookDetail() {
   const { id } = useLocalSearchParams(); // cookbook id from route
   const router = useRouter();
-  const { bg, text, subText, card, border, isDark } = useThemeColors();
+  const { bg, text, subText, card, border, cta, secondary, isDark, headerBg, headerText } = useThemeColors();
+  const inlineAccentColor = isDark ? secondary : cta;
+  const chipBg = isDark ? card : "#F6EBD3";
   const { t } = useTranslation();
 
   const syncEngine = syncEngineSingleton as any;
@@ -102,6 +109,7 @@ export default function CookbookDetail() {
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<{ id: string, type: "recipe" } | null>(null);
+  const [recipeActionTarget, setRecipeActionTarget] = useState<any | null>(null);
 
   // edit modal
   const [editVisible, setEditVisible] = useState(false);
@@ -602,18 +610,22 @@ export default function CookbookDetail() {
   };
 
   const filteredRecipes = recipes.filter((recipe) => {
-    const titleMatch = recipe.title.toLowerCase().includes(search.toLowerCase());
+    const searchTerm = search.trim().toLowerCase();
+    const recipeTags = getNormalizedTags(recipe.tags);
+    const searchMatch =
+      searchTerm.length === 0 ||
+      recipe.title.toLowerCase().includes(searchTerm) ||
+      recipeTags.some((tag) => tag.toLowerCase().includes(searchTerm));
     const difficultyMatch =
       selectedDifficulties.length === 0 ||
       selectedDifficulties.includes(normalizeRecipeDifficulty(recipe.difficulty));
     const caloriesMatch =
       selectedCalories.length === 0 ||
       selectedCalories.includes(getRecipeCalorieBucket(recipe));
-    const recipeTags = getNormalizedTags(recipe.tags);
     const tagsMatch =
       selectedTags.length === 0 ||
       selectedTags.every((tag) => recipeTags.includes(tag));
-    return titleMatch && difficultyMatch && caloriesMatch && tagsMatch;
+    return searchMatch && difficultyMatch && caloriesMatch && tagsMatch;
   });
 
   const visibleRecipes = [...filteredRecipes].sort((a, b) => {
@@ -730,6 +742,28 @@ export default function CookbookDetail() {
     setDeleteTarget({ id: recipeId, type: "recipe" });
   };
 
+  const editRecipe = (recipe: any) => {
+    setRecipeActionTarget(null);
+    router.push({ pathname: "/add-recipe", params: { editId: recipe.id } } as any);
+  };
+
+  const shareRecipe = async (recipe: any) => {
+    setRecipeActionTarget(null);
+    try {
+      const ingredients = Array.isArray(recipe.ingredients) ? recipe.ingredients : [];
+      const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+      const message = `${recipe.title}\n\n${t("recipes.ingredients")}:\n${ingredients.join(
+        "\n"
+      )}\n\n${t("recipes.preparation")}:\n${steps.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}`;
+      await Share.share({
+        message,
+        title: recipe.title,
+      });
+    } catch (error) {
+      Alert.alert(t("common.error_generic"), t("recipes.share_error"));
+    }
+  };
+
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     const recipeId = deleteTarget.id;
@@ -798,8 +832,8 @@ export default function CookbookDetail() {
       <Stack.Screen
         options={{
           title: cookbookName,
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => (
             <TouchableOpacity
@@ -810,7 +844,7 @@ export default function CookbookDetail() {
                 })
               }
             >
-              <MaterialIcons name="arrow-back" size={24} color="#fff" />
+              <MaterialIcons name="arrow-back" size={24} color={headerText} />
             </TouchableOpacity>
           ),
           headerRight: () => (
@@ -820,21 +854,21 @@ export default function CookbookDetail() {
                 setEditVisible(true);
               }}
             >
-              <MaterialIcons name="edit" size={24} color="#fff" />
+              <MaterialIcons name="edit" size={24} color={headerText} />
             </TouchableOpacity>
           ),
         }}
       />
 
       {/* Search and Filter Bar */}
-      <View style={[styles.searchRow]}>
+      <View style={[styles.searchRow, { backgroundColor: card, borderColor: border }]}>
         <MaterialIcons name="search" size={24} color={subText} style={{ marginRight: 8 }} />
         <TextInput
           placeholder={t("recipes.search_placeholder")}
           placeholderTextColor={subText}
           value={search}
           onChangeText={setSearch}
-          style={{ flex: 1, color: text, fontSize: 16, height: 40 }}
+          style={{ flex: 1, color: text, fontSize: 15, height: 40 }}
         />
         <TouchableOpacity onPress={() => setFilterVisible(true)}>
           <MaterialIcons name="filter-list" size={24} color={subText} />
@@ -860,7 +894,7 @@ export default function CookbookDetail() {
             {t("recipes.no_recipes")}
           </Text>
           <TouchableOpacity onPress={() => router.push("/")}>
-            <Text style={{ color: "#E27D60", fontWeight: "600" }}>
+            <Text style={{ color: inlineAccentColor, fontWeight: "600" }}>
               {t("recipes.create_in_ai_kitchen")}
             </Text>
           </TouchableOpacity>
@@ -869,8 +903,9 @@ export default function CookbookDetail() {
         <FlatList
           data={visibleRecipes}
           keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.recipeListContent}
           renderItem={({ item }) => {
-            const recipeTags = getNormalizedTags(item.tags).slice(0, 3);
+            const recipeTags = getNormalizedTags(item.tags);
             return (
               <TouchableOpacity
                 onPress={() =>
@@ -895,11 +930,16 @@ export default function CookbookDetail() {
                         {item.title}
                       </Text>
                       <TouchableOpacity
-                        onPress={() => deleteRecipe(item.id)}
-                        style={styles.deleteButton}
+                        onPress={(event) => {
+                          event.stopPropagation();
+                          setRecipeActionTarget(item);
+                        }}
+                        style={styles.recipeActionButton}
                         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={t("common.more", { defaultValue: "More options" })}
                       >
-                        <MaterialIcons name="delete-outline" size={22} color={subText} />
+                        <MaterialIcons name="more-vert" size={22} color={subText} />
                       </TouchableOpacity>
                     </View>
                     <View style={styles.metaRow}>
@@ -912,22 +952,14 @@ export default function CookbookDetail() {
                       </Text>
                       {getRecipeCaloriesPerServing(item) !== null ? (
                         <View style={styles.metaCalories}>
-                          <MaterialCommunityIcons name="fire" size={14} color="#E27D60" />
+                          <MaterialCommunityIcons name="fire" size={14} color={inlineAccentColor} />
                           <Text style={[styles.metaText, { color: subText }]}>
                             {`${Math.round(getRecipeCaloriesPerServing(item) as number)} kcal`}
                           </Text>
                         </View>
                       ) : null}
                     </View>
-                    {recipeTags.length > 0 && (
-                      <View style={styles.tagRow}>
-                        {recipeTags.map((tag) => (
-                          <View key={tag} style={[styles.tagChip, { backgroundColor: "#E27D60" }]}>
-                            <Text style={styles.tagText}>{tag}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    )}
+                    <RecipeTagRow tags={recipeTags} />
                   </View>
                 </AppCard>
               </TouchableOpacity>
@@ -961,7 +993,7 @@ export default function CookbookDetail() {
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg === "#fff" ? "#293a53" : "#fff"}
+                  color={inlineAccentColor}
                 />
               </TouchableOpacity>
             </View>
@@ -979,7 +1011,7 @@ export default function CookbookDetail() {
                 }
                 style={{ width: 80, height: 80, borderRadius: 40, marginBottom: 6, borderWidth: 1, borderColor: border }}
               />
-              <Text style={{ color: "#E27D60", fontSize: 13 }}>
+              <Text style={{ color: inlineAccentColor, fontSize: 13 }}>
                 {cookbookImage ? t("recipes.tap_to_change_image") : t("recipes.tap_to_upload_image")}
               </Text>
             </TouchableOpacity>
@@ -1014,11 +1046,11 @@ export default function CookbookDetail() {
           onPressOut={() => setFilterVisible(false)}
         >
           <TouchableWithoutFeedback>
-            <View style={styles.modalContent}>
+            <View style={[styles.modalContent, { backgroundColor: card }]}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>{t("recipes.filters")}</Text>
+                <Text style={[styles.modalTitle, { color: text }]}>{t("recipes.filters")}</Text>
                 <TouchableOpacity onPress={() => setFilterVisible(false)}>
-                  <MaterialIcons name="close" size={24} color="#293a53" />
+                  <MaterialIcons name="close" size={24} color={inlineAccentColor} />
                 </TouchableOpacity>
               </View>
 
@@ -1028,7 +1060,7 @@ export default function CookbookDetail() {
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={true}
               >
-                <Text style={styles.modalSubtitle}>{t("recipes.difficulty")}</Text>
+                <Text style={[styles.modalSubtitle, { color: text }]}>{t("recipes.difficulty")}</Text>
                 <View style={styles.filterRow}>
                   {Object.entries(difficultyMap(t)).map(([key, label]) => (
                     <TouchableOpacity
@@ -1036,9 +1068,8 @@ export default function CookbookDetail() {
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedDifficulties.includes(key)
-                            ? "#293a53"
-                            : "#E0E0E0",
+                          backgroundColor: selectedDifficulties.includes(key) ? cta : chipBg,
+                          borderColor: selectedDifficulties.includes(key) ? cta : border,
                         },
                       ]}
                       onPress={() =>
@@ -1047,7 +1078,7 @@ export default function CookbookDetail() {
                     >
                       <Text
                         style={{
-                          color: selectedDifficulties.includes(key) ? "#fff" : "#000",
+                          color: selectedDifficulties.includes(key) ? "#fff" : text,
                         }}
                       >
                         {label}
@@ -1056,7 +1087,7 @@ export default function CookbookDetail() {
                   ))}
                 </View>
 
-                <Text style={styles.modalSubtitle}>
+                <Text style={[styles.modalSubtitle, { color: text }]}>
                   {t("recipes.calories", { defaultValue: "Calories" })}
                 </Text>
                 <View style={styles.filterRow}>
@@ -1066,9 +1097,8 @@ export default function CookbookDetail() {
                       style={[
                         styles.filterOption,
                         {
-                          backgroundColor: selectedCalories.includes(option.value)
-                            ? "#293a53"
-                            : "#E0E0E0",
+                          backgroundColor: selectedCalories.includes(option.value) ? cta : chipBg,
+                          borderColor: selectedCalories.includes(option.value) ? cta : border,
                         },
                       ]}
                       onPress={() =>
@@ -1077,7 +1107,7 @@ export default function CookbookDetail() {
                     >
                       <Text
                         style={{
-                          color: selectedCalories.includes(option.value) ? "#fff" : "#000",
+                          color: selectedCalories.includes(option.value) ? "#fff" : text,
                         }}
                       >
                         {option.label}
@@ -1088,7 +1118,7 @@ export default function CookbookDetail() {
 
                 {allTags.length > 0 && (
                   <>
-                    <Text style={styles.modalSubtitle}>{t("recipes.tags")}</Text>
+                    <Text style={[styles.modalSubtitle, { color: text }]}>{t("recipes.tags")}</Text>
                     <TextInput
                       style={[styles.input, styles.filterSearchInput, { borderColor: border, color: text }]}
                       placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
@@ -1106,16 +1136,15 @@ export default function CookbookDetail() {
                           style={[
                             styles.filterOption,
                             {
-                              backgroundColor: selectedTags.includes(tag)
-                                ? "#293a53"
-                                : "#E0E0E0",
+                              backgroundColor: selectedTags.includes(tag) ? cta : chipBg,
+                              borderColor: selectedTags.includes(tag) ? cta : border,
                             },
                           ]}
                           onPress={() => toggleSelection(tag, selectedTags, setSelectedTags)}
                         >
                           <Text
                             style={{
-                              color: selectedTags.includes(tag) ? "#fff" : "#000",
+                              color: selectedTags.includes(tag) ? "#fff" : text,
                             }}
                           >
                             {tag}
@@ -1136,7 +1165,7 @@ export default function CookbookDetail() {
                           setVisibleFilterTagCount((prev) => prev + FILTER_TAGS_INITIAL_VISIBLE)
                         }
                       >
-                        <Text style={[styles.filterMoreText, { color: text }]}>
+                        <Text style={[styles.filterMoreText, { color: inlineAccentColor }]}>
                           {t("recipes.show_more_tags", { defaultValue: "Show more tags" })}
                         </Text>
                       </TouchableOpacity>
@@ -1147,7 +1176,7 @@ export default function CookbookDetail() {
                 <TouchableOpacity
                   style={[
                     styles.filterOption,
-                    { backgroundColor: "#E0E0E0", marginTop: 12 },
+                    { backgroundColor: chipBg, borderColor: border, marginTop: 12 },
                   ]}
                   onPress={() => {
                     setSelectedDifficulties([]);
@@ -1159,7 +1188,7 @@ export default function CookbookDetail() {
                 >
                   <Text
                     style={{
-                      color: "#293a53",
+                      color: inlineAccentColor,
                       fontWeight: "600",
                       textAlign: "center",
                     }}
@@ -1181,13 +1210,13 @@ export default function CookbookDetail() {
           onPressOut={() => setSortVisible(false)}
         >
           <TouchableWithoutFeedback>
-            <View style={styles.modalContent}>
+            <View style={[styles.modalContent, { backgroundColor: card }]}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
+                <Text style={[styles.modalTitle, { color: text }]}>
                   {t("recipes.sort_by", { defaultValue: "Sort by" })}
                 </Text>
                 <TouchableOpacity onPress={() => setSortVisible(false)}>
-                  <MaterialIcons name="close" size={24} color="#293a53" />
+                  <MaterialIcons name="close" size={24} color={inlineAccentColor} />
                 </TouchableOpacity>
               </View>
               {sortOptions.map((option) => {
@@ -1197,7 +1226,8 @@ export default function CookbookDetail() {
                     key={option.value}
                     style={[
                       styles.sortOptionRow,
-                      isSelected ? styles.sortOptionRowSelected : null,
+                      isSelected ? { backgroundColor: chipBg } : null,
+                      { borderBottomColor: border },
                     ]}
                     onPress={() => {
                       setSortBy(option.value);
@@ -1207,13 +1237,14 @@ export default function CookbookDetail() {
                     <Text
                       style={[
                         styles.sortOptionText,
+                        { color: isSelected ? inlineAccentColor : text },
                         isSelected ? styles.sortOptionTextSelected : null,
                       ]}
                     >
                       {option.label}
                     </Text>
                     {isSelected ? (
-                      <MaterialIcons name="check" size={20} color="#293a53" />
+                      <MaterialIcons name="check" size={20} color={inlineAccentColor} />
                     ) : null}
                   </TouchableOpacity>
                 );
@@ -1223,88 +1254,25 @@ export default function CookbookDetail() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Add Recipe Modal (styled like History.tsx) */}
-      <Modal visible={addVisible} transparent animationType="fade">
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPressOut={() => setAddVisible(false)}
-        >
-          <View style={[styles.modalContent, { backgroundColor: card, width: 320, alignItems: "stretch", padding: 0 }]}>
-            <View style={[styles.modalHeader, { width: "100%", padding: 20, paddingBottom: 8 }]}>
-              <Text style={[styles.modalTitle, { color: text }]}>{t("recipes.new_recipe")}</Text>
-              <TouchableOpacity onPress={() => setAddVisible(false)}>
-                <MaterialIcons
-                  name="close"
-                  size={24}
-                  color={bg === "#fff" ? "#293a53" : "#fff"}
-                />
-              </TouchableOpacity>
-            </View>
-            <View style={{ paddingHorizontal: 12, paddingBottom: 16 }}>
-              {/* Manual Recipe */}
-              <TouchableOpacity
-                style={styles.addOptionRow}
-                onPress={() => {
-                  setAddVisible(false);
-                  router.push({ pathname: "/add-recipe", params: { cookbookId: id } });
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.addOptionEmoji}>✍️</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.addOptionText, { color: text }]}>{t("recipes.manual_recipe")}</Text>
-                  <Text style={[styles.addOptionSub, { color: subText }]}>
-                    {t("recipes.manual_recipe_sub")}
-                  </Text>
-                </View>
-                <MaterialIcons name="chevron-right" size={24} color={subText} />
-              </TouchableOpacity>
-
-              {/* Import from URL */}
-              <TouchableOpacity
-                style={styles.addOptionRow}
-                onPress={() => {
-                  setAddVisible(false);
-                  setTimeout(() => setImportUrlVisible(true), 200);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.addOptionEmoji}>🌐</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.addOptionText, { color: text }]}>{t("recipes.import_from_url")}</Text>
-                  <Text style={[styles.addOptionSub, { color: subText }]}>
-                    {t("recipes.import_desc")}
-                  </Text>
-                </View>
-                <MaterialIcons name="chevron-right" size={24} color={subText} />
-              </TouchableOpacity>
-
-              {/* Import from File/App */}
-              <TouchableOpacity
-                style={styles.addOptionRow}
-                onPress={() => {
-                  setAddVisible(false);
-                  setImportFileError("");
-                  setTimeout(() => {
-                    setImportFileVisible(true);
-                  }, 200);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.addOptionEmoji}>📁</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.addOptionText, { color: text }]}>{t("recipes.import_from_file")}</Text>
-                  <Text style={[styles.addOptionSub, { color: subText }]}>
-                    {t("recipes.import_from_file_sub")}
-                  </Text>
-                </View>
-                <MaterialIcons name="chevron-right" size={24} color={subText} />
-              </TouchableOpacity>
-            </View>
-          </View>
-        </TouchableOpacity>
-      </Modal>
+      <NewRecipeOptionsModal
+        visible={addVisible}
+        onClose={() => setAddVisible(false)}
+        onManualRecipe={() => {
+          setAddVisible(false);
+          router.push({ pathname: "/add-recipe", params: { cookbookId: id } });
+        }}
+        onImportUrl={() => {
+          setAddVisible(false);
+          setTimeout(() => setImportUrlVisible(true), 200);
+        }}
+        onImportFile={() => {
+          setAddVisible(false);
+          setImportFileError("");
+          setTimeout(() => {
+            setImportFileVisible(true);
+          }, 200);
+        }}
+      />
 
       <ImportFileModal
         visible={importFileVisible}
@@ -1340,7 +1308,7 @@ export default function CookbookDetail() {
               <Text
                 style={[
                   styles.modalTitle,
-                  bg !== "#fff" ? { color: text } : null,
+                  { color: text },
                 ]}
               >
                 {t("recipes.import_from_url")}
@@ -1354,7 +1322,7 @@ export default function CookbookDetail() {
                 <MaterialIcons
                   name="close"
                   size={24}
-                  color={bg !== "#fff" ? text : "#293a53"}
+                  color={inlineAccentColor}
                 />
               </TouchableOpacity>
             </View>
@@ -1392,7 +1360,7 @@ export default function CookbookDetail() {
                   borderRadius: 10,
                   padding: 12,
                   marginBottom: 10,
-                  backgroundColor: bg !== "#fff" ? "#ffffff10" : "#F8F5F1",
+                  backgroundColor: isDark ? "#ffffff10" : "#F8F5F1",
                 }}
               >
                 <Text style={{ color: text, fontWeight: "700", marginBottom: 4 }}>
@@ -1431,13 +1399,13 @@ export default function CookbookDetail() {
               </View>
             ) : null}
             {importError ? (
-              <Text style={{ color: "#E27D60", marginBottom: 6, fontSize: 13 }}>
+              <Text style={{ color: inlineAccentColor, marginBottom: 6, fontSize: 13 }}>
                 {importError}
               </Text>
             ) : null}
             <TouchableOpacity
               style={{
-                backgroundColor: "#E27D60",
+                backgroundColor: cta,
                 borderRadius: 8,
                 paddingVertical: 12,
                 alignItems: "center",
@@ -1561,7 +1529,27 @@ export default function CookbookDetail() {
                     return;
                   }
                   // Validate minimal fields (title, ingredients, steps)
-                  const r = data.recipe;
+                  const sourceUrl = data.recipe?.sourceUrl || trimmedUrl;
+                  const r = {
+                    ...data.recipe,
+                    notes: formatImportedRecipeNote(
+                      data.recipe?.notes,
+                      sourceUrl,
+                      isInstagram ? "instagram_reel" : "url",
+                      t
+                    ),
+                    sourceUrl,
+                    sourceMetadata: data.recipe?.sourceMetadata ?? {
+                      sourceUrl,
+                      source: isInstagram ? "instagram_reel" : "url",
+                      importedServings:
+                        typeof data.recipe?.servings === "number" && Number.isFinite(data.recipe.servings)
+                          ? data.recipe.servings
+                          : null,
+                      importedNutritionInfo: data.recipe?.nutritionInfo ?? null,
+                      importedAt: new Date().toISOString(),
+                    },
+                  };
                   if (!r.title || !r.ingredients || !r.steps) {
                     let errMsg = t("recipes.invalid_import");
                     setImportError(errMsg);
@@ -1712,7 +1700,11 @@ export default function CookbookDetail() {
         visible={insufficientModalVisible}
         isDark={isDark}
         title={t("economy.insufficient_title", "Not enough Eggs")}
-        body={`You need ${INSTAGRAM_REEL_IMPORT_COST} Eggs to import a recipe from Instagram Reel. Currently, you have ${insufficientCookiesRemaining} Eggs.`}
+        body={t("economy.insufficient_instagram_reel_body_short", {
+          count: INSTAGRAM_REEL_IMPORT_COST,
+          remaining: formatEconomyUnits(t, insufficientCookiesRemaining),
+          defaultValue: "You need {{count}} to import a recipe from an Instagram Reel. You have {{remaining}}.",
+        })}
         featuredOffer={featuredOffer}
         availableRewardsCount={availableRewardsCount}
         onClose={() => setInsufficientModalVisible(false)}
@@ -1746,7 +1738,7 @@ export default function CookbookDetail() {
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: text }]}>{t("recipes.success_import_title")}</Text>
               <TouchableOpacity onPress={() => setSuccessVisible(false)}>
-                <MaterialIcons name="close" size={24} color="#293a53" />
+                <MaterialIcons name="close" size={24} color={inlineAccentColor} />
               </TouchableOpacity>
             </View>
             <Text style={{ color: subText, marginBottom: 18, fontSize: 16 }}>
@@ -1765,11 +1757,66 @@ export default function CookbookDetail() {
                 }}
                 style={{ paddingHorizontal: 8, paddingVertical: 6 }}
               >
-                <Text style={{ color: "#3b4a6b", fontWeight: "bold", fontSize: 15, textTransform: "uppercase" }}>
+                <Text style={{ color: inlineAccentColor, fontWeight: "bold", fontSize: 15, textTransform: "uppercase" }}>
                   {t("recipes.open_recipe")}
                 </Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      <Modal visible={!!recipeActionTarget} transparent animationType="fade">
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPressOut={() => setRecipeActionTarget(null)}
+        >
+          <View style={[styles.actionMenuContent, { backgroundColor: card }]}>
+            <View style={styles.modalHeader}>
+              <Text
+                style={[styles.modalTitle, { color: text, flex: 1, paddingRight: 12 }]}
+                numberOfLines={2}
+                ellipsizeMode="tail"
+              >
+                {recipeActionTarget?.title}
+              </Text>
+              <TouchableOpacity onPress={() => setRecipeActionTarget(null)}>
+                <MaterialIcons name="close" size={24} color={text} />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => recipeActionTarget && editRecipe(recipeActionTarget)}
+            >
+              <MaterialIcons name="edit" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.edit", { defaultValue: "Edit" })}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => recipeActionTarget && shareRecipe(recipeActionTarget)}
+            >
+              <MaterialIcons name="share" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.share", { defaultValue: "Share" })}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => {
+                if (!recipeActionTarget) return;
+                const recipeId = recipeActionTarget.id;
+                setRecipeActionTarget(null);
+                deleteRecipe(recipeId);
+              }}
+            >
+              <MaterialIcons name="delete-outline" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("common.delete")}
+              </Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -1831,6 +1878,10 @@ export default function CookbookDetail() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  recipeListContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+  },
   recipeCard: { flexDirection: "row", padding: 10 },
   recipeImage: { width: 80, height: 80, borderRadius: 12, marginRight: 12 },
   cardTitle: {
@@ -1863,9 +1914,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
   },
-  deleteButton: {
+  recipeActionButton: {
     paddingLeft: 6,
     paddingTop: 2,
+  },
+  actionMenuContent: {
+    width: 320,
+    borderRadius: 16,
+    padding: 20,
+  },
+  actionMenuRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 13,
+  },
+  actionMenuText: {
+    fontSize: 15,
+    fontWeight: "700",
   },
   fab: {
     flexDirection: "row",
@@ -1873,7 +1939,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     bottom: 80,
     right: 20,
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     borderRadius: 28,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -1890,7 +1956,6 @@ const styles = StyleSheet.create({
   },
   modalContent: {
     width: 320,
-    backgroundColor: "#fff",
     borderRadius: 12,
     padding: 20,
     maxHeight: "80%",
@@ -1908,7 +1973,6 @@ const styles = StyleSheet.create({
   modalSubtitle: {
     fontSize: 14,
     fontWeight: "600",
-    color: "#293a53",
     marginTop: 10,
     marginBottom: 6,
   },
@@ -1934,6 +1998,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   filterOption: {
+    borderWidth: 1,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
@@ -1946,14 +2011,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#EAEAEA",
-  },
-  sortOptionRowSelected: {
-    backgroundColor: "#F5F5F5",
   },
   sortOptionText: {
     fontSize: 16,
-    color: "#293a53",
   },
   sortOptionTextSelected: {
     fontWeight: "700",
@@ -1963,6 +2023,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
     marginBottom: 12,
+    fontSize: 15,
   },
   searchRow: {
     flexDirection: "row",
@@ -1970,7 +2031,7 @@ const styles = StyleSheet.create({
     margin: 12,
     paddingHorizontal: 12,
     borderRadius: 12,
-    backgroundColor: "#F5F5F5",
+    borderWidth: 1,
   },
   resultMetaText: {
     fontSize: 13,
@@ -1981,23 +2042,6 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginBottom: 6,
     marginHorizontal: 16,
-  },
-  tagRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    paddingRight: 3, // small right padding so last tag doesn't touch the edge
-  },
-  tagChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  tagText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#fff",
   },
   filterSectionTitle: {
     fontSize: 16,
@@ -2011,7 +2055,6 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     paddingHorizontal: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: "#ececec",
     backgroundColor: "transparent",
   },
   addOptionEmoji: {

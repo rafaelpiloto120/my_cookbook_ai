@@ -9,6 +9,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { useThemeColors } from "../context/ThemeContext";
+import { formatImportedRecipeNote } from "../lib/recipes/importNotes";
+import { RecipeNutritionInfo, normalizeRecipeNutritionInfo } from "../lib/recipes/nutrition";
 
 type DraftRecipe = {
   title: string;
@@ -22,6 +24,15 @@ type DraftRecipe = {
   image?: string;
   imageUrl?: string;
   notes?: string;
+  sourceUrl?: string;
+  sourceMetadata?: {
+    sourceUrl?: string | null;
+    source?: string | null;
+    importedServings?: number | null;
+    importedNutritionInfo?: RecipeNutritionInfo | null;
+    importedAt?: string | null;
+  } | null;
+  nutritionInfo?: RecipeNutritionInfo | null;
   warnings?: string[];
 };
 
@@ -64,6 +75,14 @@ function normalizeLines(value: unknown): string[] {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function notesWithSourceUrl(notes: unknown, sourceUrl: unknown): string | undefined {
+  const cleanNotes = typeof notes === "string" ? notes.trim() : "";
+  const cleanUrl = typeof sourceUrl === "string" ? sourceUrl.trim() : "";
+  if (!cleanUrl) return cleanNotes || undefined;
+  if (!cleanNotes) return cleanUrl;
+  return cleanNotes.includes(cleanUrl) ? cleanNotes : `${cleanNotes}\n${cleanUrl}`;
 }
 
 function normalizeRecipeDraft(params: Record<string, string | string[] | undefined>): DraftRecipe {
@@ -110,7 +129,18 @@ function normalizeRecipeDraft(params: Record<string, string | string[] | undefin
       tags: normalizeLines(draft.tags),
       image: typeof draft.image === "string" ? draft.image : undefined,
       imageUrl: typeof draft.imageUrl === "string" ? draft.imageUrl : undefined,
-      notes: typeof draft.notes === "string" ? draft.notes : undefined,
+      notes: notesWithSourceUrl(draft.notes, (draft as any).sourceUrl),
+      sourceUrl: typeof (draft as any).sourceUrl === "string" ? (draft as any).sourceUrl : undefined,
+      sourceMetadata:
+        (draft as any).sourceMetadata && typeof (draft as any).sourceMetadata === "object"
+          ? {
+              ...(draft as any).sourceMetadata,
+              importedNutritionInfo: normalizeRecipeNutritionInfo(
+                (draft as any).sourceMetadata.importedNutritionInfo
+              ),
+            }
+          : undefined,
+      nutritionInfo: normalizeRecipeNutritionInfo((draft as any).nutritionInfo ?? (draft as any).nutrition),
       warnings: normalizeLines(draft.warnings),
     };
   }
@@ -145,7 +175,8 @@ function normalizeRecipeDraft(params: Record<string, string | string[] | undefin
     tags: normalizeLines(parseParamValue(params.tags)),
     image: parseParamValue(params.image) || undefined,
     imageUrl: parseParamValue(params.imageUrl) || undefined,
-    notes: parseParamValue(params.notes) || undefined,
+    notes: notesWithSourceUrl(parseParamValue(params.notes), parseParamValue(params.sourceUrl)),
+    sourceUrl: parseParamValue(params.sourceUrl) || undefined,
     warnings: normalizeLines(parseParamValue(params.warnings)),
   };
 }
@@ -153,7 +184,7 @@ function normalizeRecipeDraft(params: Record<string, string | string[] | undefin
 export default function ImportRecipeLinkScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
-  const { bg, text, subText, card } = useThemeColors();
+  const { bg, text, subText, card, cta, secondary, isDark, headerBg, headerText } = useThemeColors();
   const { t } = useTranslation();
   const [error, setError] = useState<string | null>(null);
   const hasHandledRef = useRef(false);
@@ -165,8 +196,31 @@ export default function ImportRecipeLinkScreen() {
     const handleImport = async () => {
       try {
         const draft = normalizeRecipeDraft(params);
+        const recipeDraft = {
+          ...draft,
+          notes: formatImportedRecipeNote(
+            draft.notes,
+            draft.sourceUrl,
+            draft.sourceUrl && /instagram\.com\/reel\//i.test(draft.sourceUrl)
+              ? "instagram_reel"
+              : "url",
+            t
+          ),
+          sourceMetadata: draft.sourceMetadata ?? {
+            sourceUrl: draft.sourceUrl ?? null,
+            source: draft.sourceUrl && /instagram\.com\/reel\//i.test(draft.sourceUrl)
+              ? "instagram_reel"
+              : "url",
+            importedServings:
+              typeof draft.servings === "number" && Number.isFinite(draft.servings)
+                ? draft.servings
+                : null,
+            importedNutritionInfo: draft.nutritionInfo ?? null,
+            importedAt: new Date().toISOString(),
+          },
+        };
         const draftKey = `pending_import_recipe_draft_${Date.now()}`;
-        await AsyncStorage.setItem(draftKey, JSON.stringify(draft));
+        await AsyncStorage.setItem(draftKey, JSON.stringify(recipeDraft));
         router.replace({ pathname: "/add-recipe", params: { draftKey } } as any);
       } catch (err: any) {
         setError(
@@ -185,8 +239,8 @@ export default function ImportRecipeLinkScreen() {
       <Stack.Screen
         options={{
           title: t("recipes.import_recipe_title", { defaultValue: "Import Recipe" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
         }}
       />
@@ -201,7 +255,7 @@ export default function ImportRecipeLinkScreen() {
           </>
         ) : (
           <>
-            <ActivityIndicator size="large" color="#E27D60" />
+            <ActivityIndicator size="large" color={isDark ? secondary : cta} />
             <Text style={[styles.title, { color: text }]}>
               {t("recipes.import_opening_draft_title", { defaultValue: "Opening recipe draft" })}
             </Text>

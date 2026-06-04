@@ -47,7 +47,7 @@ function StepList({ steps, textColor, subTextColor, noteText }: StepListProps) {
 }
 
 export default function ImportHelpScreen() {
-  const { bg, text, subText } = useThemeColors();
+  const { bg, text, subText, headerBg, headerText } = useThemeColors();
   const { t } = useTranslation();
 
   return (
@@ -55,8 +55,8 @@ export default function ImportHelpScreen() {
       <Stack.Screen
         options={{
           title: t("recipes.import_help_title", { defaultValue: "Import Help" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
         }}
       />
@@ -267,7 +267,7 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     alignItems: "center",
     justifyContent: "center",
     marginRight: 10,
@@ -295,7 +295,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   codeText: {
-    color: "#f5f5f5",
+    color: "#FFF8EA",
     fontFamily: "monospace",
     fontSize: 12,
     lineHeight: 18,

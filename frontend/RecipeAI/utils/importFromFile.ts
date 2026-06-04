@@ -36,6 +36,7 @@ export type ImportedRecipe = {
   cost: "Cheap" | "Medium" | "Expensive";
   ingredients: string[];
   steps: string[];
+  notes?: string;
   tags: string[];
   createdAt: number | string;
   updatedAt: number | string;
@@ -200,6 +201,7 @@ function normalizeImportedRecipe(
         cost,
         ingredients: Array.isArray(raw?.ingredients) ? raw.ingredients.filter(Boolean) : [],
         steps: Array.isArray(raw?.steps) ? raw.steps.filter(Boolean) : [],
+        notes: typeof raw?.notes === "string" ? raw.notes.trim() : "",
         tags: Array.isArray(raw?.tags) ? raw.tags.filter(Boolean) : [],
         createdAt: raw?.createdAt ?? now,
         updatedAt: now,

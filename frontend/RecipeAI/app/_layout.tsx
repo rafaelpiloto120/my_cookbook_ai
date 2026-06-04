@@ -11,6 +11,12 @@ import { getOrCreateDeviceId } from "../utils/deviceId";
 import { auth } from "../firebaseConfig";
 import { syncIngredientCatalog } from "../lib/ingredients/catalogSync";
 import { getApiBaseUrl } from "../lib/config/api";
+import { PREFS_UPDATED, prefsEvents } from "../lib/prefs";
+import {
+  addLocalNotificationResponseListener,
+  configureLocalNotifications,
+  refreshLocalReminderSchedule,
+} from "../lib/notifications/localNotifications";
 
 function RootStack() {
   const { bg, text } = useThemeColors();
@@ -74,6 +80,42 @@ export default function RootLayout() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    configureLocalNotifications().catch((err) => {
+      console.warn("[Notifications] configure failed", err);
+    });
+    refreshLocalReminderSchedule().catch((err) => {
+      console.warn("[Notifications] initial schedule refresh failed", err);
+    });
+
+    const onPrefsUpdated = () => {
+      refreshLocalReminderSchedule().catch((err) => {
+        console.warn("[Notifications] prefs schedule refresh failed", err);
+      });
+    };
+    prefsEvents.on(PREFS_UPDATED, onPrefsUpdated);
+
+    const responseSub = addLocalNotificationResponseListener((screen, action) => {
+      const notificationNonce = String(Date.now());
+      if (screen === "/my-day/weight") {
+        router.push({
+          pathname: "/my-day/weight",
+          params: action === "logWeight" ? { openLogWeight: "1", notificationNonce } : { notificationNonce },
+        } as any);
+      } else if (screen === "/my-day") {
+        router.push({
+          pathname: "/my-day",
+          params: action === "addMeal" ? { openAddMeal: "1", notificationNonce } : { notificationNonce },
+        } as any);
+      }
+    });
+
+    return () => {
+      prefsEvents.off(PREFS_UPDATED, onPrefsUpdated);
+      responseSub.remove();
+    };
+  }, [router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -167,6 +209,9 @@ export default function RootLayout() {
           console.log("[SyncEngine] App returned to foreground, requesting sync (app-foreground)");
           // requestSync already handles errors internally
           syncEngine.requestSync("app-foreground");
+          refreshLocalReminderSchedule().catch((err) => {
+            console.warn("[Notifications] foreground schedule refresh failed", err);
+          });
         }
       }
     );

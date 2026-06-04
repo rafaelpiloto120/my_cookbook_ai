@@ -35,7 +35,7 @@ export default function StartCooking() {
   const [steps, setSteps] = useState<string[]>([]);
   const router = useRouter();
   const nav = useNavigation();
-  const { bg, text, subText } = useThemeColors();
+  const { bg, text, subText, cta, secondary, isDark, headerBg, headerText } = useThemeColors();
 
   // keep screen awake
   useKeepAwake();
@@ -156,7 +156,7 @@ export default function StartCooking() {
       <View style={[styles.center, { backgroundColor: bg }]}>
         <Text style={{ color: text }}>{t("recipes.no_steps")}</Text>
         <TouchableOpacity onPress={() => router.back()} style={{ marginTop: 20 }}>
-          <Text style={{ color: "#E27D60", fontWeight: "600" }}>{t("recipes.back")}</Text>
+          <Text style={{ color: isDark ? secondary : cta, fontWeight: "600" }}>{t("recipes.back")}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -171,8 +171,8 @@ export default function StartCooking() {
           headerShown: true,
           title: t("recipes.cooking_mode"),
           presentation: "fullScreenModal",
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => <View />, // no default back
           headerRight: () => (
@@ -185,7 +185,7 @@ export default function StartCooking() {
               }
               style={{ padding: 8 }}
             >
-              <MaterialIcons name="close" size={26} color="#fff" />
+            <MaterialIcons name="close" size={26} color={headerText} />
             </TouchableOpacity>
           ),
         }}
@@ -196,11 +196,11 @@ export default function StartCooking() {
       </Text>
 
       {/* Progress Bar */}
-      <View style={styles.progressContainer}>
+      <View style={[styles.progressContainer, { backgroundColor: isDark ? `${text}1F` : "#ccc" }]}>
         <View
           style={[
             styles.progressBar,
-            { width: `${((currentStep + 1) / steps.length) * 100}%` },
+            { width: `${((currentStep + 1) / steps.length) * 100}%`, backgroundColor: isDark ? secondary : cta },
           ]}
         />
       </View>
@@ -262,12 +262,11 @@ const styles = StyleSheet.create({
 
   progressContainer: {
     height: 8,
-    backgroundColor: "#ccc",
     borderRadius: 4,
     overflow: "hidden",
     marginBottom: 10,
   },
-  progressBar: { height: "100%", backgroundColor: "#E27D60" },
+  progressBar: { height: "100%" },
   progressText: { textAlign: "center", marginBottom: 20, fontWeight: "600" },
 
   stepOuter: {
@@ -288,7 +287,7 @@ const styles = StyleSheet.create({
   navButton: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 28,

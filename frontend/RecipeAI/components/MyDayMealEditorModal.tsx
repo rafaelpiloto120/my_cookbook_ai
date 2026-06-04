@@ -333,14 +333,6 @@ export default function MyDayMealEditorModal({
                     <Text style={[styles.planHint, { color: subText }]}>
                       {nutritionMode === "auto" ? nutritionHintAuto : nutritionHintManual}
                     </Text>
-                    {nutritionMode === "auto" && nutritionLoading && nutritionLoadingLabel ? (
-                      <View style={styles.planLoadingRow}>
-                        <ActivityIndicator size="small" color={cta} />
-                        <Text style={[styles.planHint, styles.planLoadingText, { color: subText }]}>
-                          {nutritionLoadingLabel}
-                        </Text>
-                      </View>
-                    ) : null}
                   </View>
                 </View>
 
@@ -367,46 +359,55 @@ export default function MyDayMealEditorModal({
                   </TouchableOpacity>
                 </View>
 
-                <View style={styles.planGrid}>
-                  {[nutritionFields.slice(0, 2), nutritionFields.slice(2, 4)].map((row, rowIndex) => (
-                    <View key={`nutrition-row-${rowIndex}`} style={styles.planGridRow}>
-                      {row.map((field) => (
-                        <View
-                          key={field.key}
-                          style={[
-                            styles.planGridCard,
-                            { backgroundColor: bg },
-                            nutritionMode === "auto" ? styles.planGridCardAuto : null,
-                          ]}
-                        >
-                          <Text style={[styles.planMetricLabel, { color: subText }]}>{field.label}</Text>
-                          {nutritionMode === "manual" ? (
-                            <View style={styles.planGridManualWrap}>
-                              <View style={styles.planGridManualInputRow}>
-                                <TextInput
-                                  value={field.value}
-                                  onChangeText={field.onChange}
-                                  keyboardType="decimal-pad"
-                                  style={[styles.planMetricInputInline, { color: text, borderColor: border, backgroundColor: card }]}
-                                  placeholder="0"
-                                  placeholderTextColor={subText}
-                                />
-                                <Text style={[styles.planMetricUnitInline, { color: subText }]}>{field.unit ?? ""}</Text>
+                {nutritionMode === "auto" && nutritionLoading ? (
+                  <View style={[styles.planLoadingCard, { backgroundColor: bg, borderColor: border }]}>
+                    <ActivityIndicator size="large" color={cta} />
+                    <Text style={[styles.planLoadingCardText, { color: subText }]}>
+                      {nutritionLoadingLabel || "Calculating nutrients. Please wait."}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.planGrid}>
+                    {[nutritionFields.slice(0, 2), nutritionFields.slice(2, 4)].map((row, rowIndex) => (
+                      <View key={`nutrition-row-${rowIndex}`} style={styles.planGridRow}>
+                        {row.map((field) => (
+                          <View
+                            key={field.key}
+                            style={[
+                              styles.planGridCard,
+                              { backgroundColor: bg, borderColor: border },
+                              nutritionMode === "auto" ? styles.planGridCardAuto : null,
+                            ]}
+                          >
+                            <Text style={[styles.planMetricLabel, { color: subText }]}>{field.label}</Text>
+                            {nutritionMode === "manual" ? (
+                              <View style={styles.planGridManualWrap}>
+                                <View style={styles.planGridManualInputRow}>
+                                  <TextInput
+                                    value={field.value}
+                                    onChangeText={field.onChange}
+                                    keyboardType="decimal-pad"
+                                    style={[styles.planMetricInputInline, { color: text, borderColor: border, backgroundColor: card }]}
+                                    placeholder="0"
+                                    placeholderTextColor={subText}
+                                  />
+                                  <Text style={[styles.planMetricUnitInline, { color: subText }]}>{field.unit ?? ""}</Text>
+                                </View>
                               </View>
-                            </View>
-                          ) : (
-                            <View style={styles.planGridValueWrap}>
-                              <Text style={[styles.planMetricValueInline, { color: text }]}>{field.value}</Text>
-                              {field.unit ? (
-                                <Text style={[styles.planMetricUnitInline, { color: subText }]}>{field.unit}</Text>
-                              ) : null}
-                            </View>
-                          )}
-                        </View>
-                      ))}
-                    </View>
-                  ))}
-                </View>
+                            ) : (
+                              <View style={styles.planGridValueWrap}>
+                                <Text style={[styles.planMetricValueInline, { color: text }]}>{field.value}</Text>
+                                {field.unit ? (
+                                  <Text style={[styles.planMetricUnitInline, { color: subText }]}>{field.unit}</Text>
+                                ) : null}
+                              </View>
+                            )}
+                          </View>
+                        ))}
+                      </View>
+                    ))}
+                  </View>
+                )}
               </View>
             </ScrollView>
           )}
@@ -640,15 +641,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  planLoadingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 8,
-  },
-  planLoadingText: {
-    flex: 1,
-  },
   planHeader: {
     marginBottom: 8,
   },
@@ -685,6 +677,22 @@ const styles = StyleSheet.create({
   planGrid: {
     marginTop: 0,
   },
+  planLoadingCard: {
+    borderWidth: 1,
+    minHeight: 194,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  planLoadingCardText: {
+    marginTop: 14,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "700",
+    textAlign: "center",
+  },
   planGridRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -692,6 +700,7 @@ const styles = StyleSheet.create({
   },
   planGridCard: {
     width: "48.5%",
+    borderWidth: 1,
     borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 12,

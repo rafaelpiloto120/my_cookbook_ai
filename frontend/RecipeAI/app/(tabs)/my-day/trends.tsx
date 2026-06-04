@@ -34,6 +34,25 @@ type DayInsight = {
   message: string;
 };
 
+function hexToRgba(color: string, alpha: number) {
+  if (!color.startsWith("#")) return color;
+  const normalized = color.slice(1);
+  const expanded =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((char) => char + char)
+          .join("")
+      : normalized.slice(0, 6);
+
+  const r = Number.parseInt(expanded.slice(0, 2), 16);
+  const g = Number.parseInt(expanded.slice(2, 4), 16);
+  const b = Number.parseInt(expanded.slice(4, 6), 16);
+
+  if ([r, g, b].some((value) => Number.isNaN(value))) return color;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function getMondayWeekStart(date = new Date()) {
   const start = new Date(date);
   start.setHours(0, 0, 0, 0);
@@ -66,8 +85,10 @@ function formatWeekRangeLabel(weekStart: Date, locale: string) {
 
 export default function MyDayTrendsScreen() {
   const { t, i18n } = useTranslation();
-  const { bg, text, subText, cta, isDark } = useThemeColors();
+  const { bg, text, subText, cta, secondary, isDark, headerBg, headerText } = useThemeColors();
   const router = useRouter();
+  const inlineAccentColor = isDark ? secondary : cta;
+  const timelineAccentBg = hexToRgba(inlineAccentColor, 0.28);
   const [historyPoints, setHistoryPoints] = useState<HistoryPoint[]>([]);
   const [target, setTarget] = useState<number | null>(null);
   const [plan, setPlan] = useState<MyDayPlan | null>(null);
@@ -274,12 +295,12 @@ export default function MyDayTrendsScreen() {
         options={{
           headerShown: true,
           title: t("my_day.trend_details", { defaultValue: "Trend details" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => (
             <TouchableOpacity activeOpacity={0.8} onPress={() => router.replace("/my-day")} style={styles.backButton}>
-              <MaterialIcons name="arrow-back" size={26} color="#fff" />
+              <MaterialIcons name="arrow-back" size={26} color={headerText} />
             </TouchableOpacity>
           ),
         }}
@@ -368,7 +389,7 @@ export default function MyDayTrendsScreen() {
                         style={[
                           styles.trendBarFill,
                           {
-                            backgroundColor: cta,
+                            backgroundColor: inlineAccentColor,
                             height: `${Math.max(actualHeight, 8)}%`,
                           },
                         ]}
@@ -417,8 +438,8 @@ export default function MyDayTrendsScreen() {
                     ]}
                   >
                     <View style={styles.timelineLineWrap}>
-                      <View style={[styles.timelineDot, { backgroundColor: cta }]} />
-                      <View style={[styles.timelineLine, { backgroundColor: `${cta}44` }]} />
+                      <View style={[styles.timelineDot, { backgroundColor: inlineAccentColor }]} />
+                      <View style={[styles.timelineLine, { backgroundColor: timelineAccentBg }]} />
                     </View>
                     <View style={styles.historyCopy}>
                       <View style={styles.historyTopRow}>

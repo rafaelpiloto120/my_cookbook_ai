@@ -33,7 +33,7 @@ const SYNC_KEYS = {
   COOKBOOKS: "sync_cookbooks",
 };
 
-const HEADER_BG = "#293a53";
+const HEADER_BG = "#8F5E43";
 // Android: ensure navigation header accounts for the system status bar height
 const ANDROID_STATUS_BAR_HEIGHT =
   Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0;
@@ -615,7 +615,7 @@ export default function Onboarding() {
                           alignItems: "center",
                           paddingVertical: 12,
                           borderBottomWidth: StyleSheet.hairlineWidth,
-                          borderBottomColor: "#e0e0e0",
+                          borderBottomColor: "#F6EBD3",
                         }}
                         onPress={async () => {
                           const lng = option.code as SupportedLanguage;
@@ -638,7 +638,7 @@ export default function Onboarding() {
                           {option.label}
                         </Text>
                         {language === option.code && (
-                          <MaterialIcons name="check" size={20} color="#E27D60" style={{ marginLeft: "auto" }} />
+                          <MaterialIcons name="check" size={20} color="#8A4B16" style={{ marginLeft: "auto" }} />
                         )}
                       </TouchableOpacity>
                     ))}
@@ -677,8 +677,8 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       dietary.includes(k)
-                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => toggleDietary(k)}
                   >
@@ -689,8 +689,8 @@ export default function Onboarding() {
                   style={[
                     styles.chip,
                     dietary.length === 0
-                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                      ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                      : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                   ]}
                   onPress={() => setDietary([])}
                 >
@@ -708,8 +708,8 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       avoid.includes(k)
-                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => toggleAvoid(k)}
                   >
@@ -720,8 +720,8 @@ export default function Onboarding() {
                   style={[
                     styles.chip,
                     avoid.length === 0
-                      ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                      : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                      ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                      : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                   ]}
                   onPress={() => { setAvoid([]); setAvoidOther(""); }}
                 >
@@ -786,8 +786,8 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       themeMode === m.k
-                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => setThemeMode(m.k as ThemeMode)}
                   >
@@ -810,8 +810,8 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       measure === m.k
-                        ? { backgroundColor: "#E27D60", borderColor: "#E27D60", borderWidth: 1 }
-                        : { backgroundColor: "#E0E0E0", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
+                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => setMeasure(m.k as Measure)}
                   >
@@ -884,7 +884,7 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     borderRadius: 12,
     padding: 12,
-    fontSize: 16,
+    fontSize: 15,
     minHeight: 48,
     marginTop: 8,
   },

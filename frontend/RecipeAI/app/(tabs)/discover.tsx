@@ -154,7 +154,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    fontSize: 16,
+    fontSize: 15,
     marginBottom: 16,
   },
   sectionTitle: { fontSize: 20, fontWeight: "700", marginVertical: 12 },
@@ -170,7 +170,7 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   tag: {
-    backgroundColor: "#C2B2B4",
+    backgroundColor: "#F2D6A3",
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,

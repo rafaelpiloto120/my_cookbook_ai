@@ -2,17 +2,19 @@
 import React from "react";
 import { Stack } from "expo-router";
 import { useTranslation } from "react-i18next";
+import { useThemeColors } from "../../context/ThemeContext";
 
 export default function EconomyLayout() {
   const { t } = useTranslation();
+  const { headerBg, headerText } = useThemeColors();
 
   return (
     <Stack
       screenOptions={{
         presentation: "modal",
         headerShown: true,
-        headerStyle: { backgroundColor: "#293a53" },
-        headerTintColor: "#fff",
+        headerStyle: { backgroundColor: headerBg },
+        headerTintColor: headerText,
         headerTitleAlign: "center",
       }}
     >

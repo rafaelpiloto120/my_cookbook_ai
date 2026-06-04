@@ -18,11 +18,11 @@ export default function FooterNav() {
         <MaterialIcons
           name="psychology"
           size={22}
-          color={pathname.includes("/index") ? "#E27D60" : subText}
+          color={pathname.includes("/index") ? "#8A4B16" : subText}
         />
         <Text
           style={{
-            color: pathname.includes("/index") ? "#E27D60" : subText,
+            color: pathname.includes("/index") ? "#8A4B16" : subText,
             fontSize: 12,
           }}
         >
@@ -37,11 +37,11 @@ export default function FooterNav() {
         <MaterialIcons
           name="book"
           size={22}
-          color={pathname.includes("/history") ? "#E27D60" : subText}
+          color={pathname.includes("/history") ? "#8A4B16" : subText}
         />
         <Text
           style={{
-            color: pathname.includes("/history") ? "#E27D60" : subText,
+            color: pathname.includes("/history") ? "#8A4B16" : subText,
             fontSize: 12,
           }}
         >

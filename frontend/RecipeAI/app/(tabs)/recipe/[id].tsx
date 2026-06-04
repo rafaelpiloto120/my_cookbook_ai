@@ -14,6 +14,7 @@ import {
   TouchableWithoutFeedback,
   Pressable,
   ActivityIndicator,
+  Linking,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -32,6 +33,7 @@ import {
 import AppCard from "../../../components/AppCard";
 import InsufficientCookiesModal from "../../../components/InsufficientCookiesModal";
 import EggIcon from "../../../components/EggIcon";
+import { formatEconomyUnits } from "../../../lib/economy/format";
 import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { syncEngine } from "../../../lib/sync/SyncEngine";
@@ -42,6 +44,8 @@ import {
 import { normalizeRecipeDifficulty } from "../../../lib/recipes/difficulty";
 import {
   estimateRecipeNutrition,
+  getRecipeSourceMetadata,
+  normalizeRecipeSourceMetadata,
   resolveRecipeNutritionEstimate,
   SavedRecipe,
 } from "../../../lib/myDayRecipes";
@@ -60,6 +64,9 @@ interface Recipe {
   tags: string[];
   createdAt: string;
   updatedAt?: number | string;
+  notes?: string;
+  sourceUrl?: string | null;
+  sourceMetadata?: SavedRecipe["sourceMetadata"];
   image?: string;
   cookbooks?: (string | { id: string; name: string })[];
   isDeleted?: boolean;
@@ -87,6 +94,37 @@ interface Cookbook {
   isDeleted?: boolean;
 }
 
+const URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
+
+function splitTextIntoLinkParts(value: string) {
+  const parts: { text: string; url?: string }[] = [];
+  let lastIndex = 0;
+
+  value.replace(URL_PATTERN, (match, _capture, offset) => {
+    if (offset > lastIndex) {
+      parts.push({ text: value.slice(lastIndex, offset) });
+    }
+
+    const trailing = match.match(/[),.;:!?]+$/)?.[0] ?? "";
+    const cleanMatch = trailing ? match.slice(0, -trailing.length) : match;
+    parts.push({
+      text: cleanMatch,
+      url: cleanMatch.startsWith("http") ? cleanMatch : `https://${cleanMatch}`,
+    });
+    if (trailing) {
+      parts.push({ text: trailing });
+    }
+    lastIndex = offset + match.length;
+    return match;
+  });
+
+  if (lastIndex < value.length) {
+    parts.push({ text: value.slice(lastIndex) });
+  }
+
+  return parts.length ? parts : [{ text: value }];
+}
+
 export default function RecipeDetail() {
   const insets = useSafeAreaInsets();
   const auth = getAuth();
@@ -101,14 +139,17 @@ export default function RecipeDetail() {
   const [cookbookNames, setCookbookNames] = useState<string[]>([]);
   const [isSaved, setIsSaved] = useState(false);
   const [isEstimatingNutrition, setIsEstimatingNutrition] = useState(false);
+  const [recipeActionsVisible, setRecipeActionsVisible] = useState(false);
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const router = useRouter();
-  const { bg, text, subText } = useThemeColors();
+  const { bg, text, subText, card, border, cta, secondary, isDark, headerBg, headerText } = useThemeColors();
   const { t, i18n } = useTranslation();
 
   // economy / cookies gating (cookbook creation)
   const backendUrl = getApiBaseUrl();
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
-  const isDark = bg !== "#fff";
+  const inlineAccentColor = isDark ? secondary : cta;
+  const chipBg = isDark ? card : secondary;
 
   const [insufficientModal, setInsufficientModal] = useState<{
     visible: boolean;
@@ -355,7 +396,7 @@ export default function RecipeDetail() {
       console.warn("[RecipeDetail] nutrition estimate consume exception; blocking estimate", err);
       Alert.alert(
         t("common.error", "Error"),
-        t("economy.try_again", "Couldn't verify your Egg balance. Please try again.")
+        t("economy.try_again", "Couldn't verify your balance. Please try again.")
       );
       return false;
     }
@@ -567,77 +608,97 @@ export default function RecipeDetail() {
 
   const deleteRecipe = async () => {
     if (!currentRecipe) return;
-    Alert.alert(t("recipes.delete_recipe_confirm"), t("recipes.delete_recipe_desc"), [
-      { text: t("common.cancel"), style: "cancel" },
-      {
-        text: t("common.delete"),
-        style: "destructive",
-        onPress: async () => {
-          // Mark deleted locally (dirty) + trigger a full sync.
-          // We intentionally run a full sync because cookbook/preferences may have pending dirty state too.
-          if (syncEngine) {
-            try {
-              const recipeSync = (syncEngine as any)?.recipeSync;
-              if (recipeSync && typeof recipeSync.markLocalDeleted === "function") {
-                await recipeSync.markLocalDeleted(currentRecipe.id);
-              }
-              // Trigger a full sync immediately (bypass throttling).
-              await syncEngine.syncAll("manual", { bypassThrottle: true });
-            } catch (e) {
-              console.warn("[RecipeDetail] deleteRecipe sync failed", e);
-            }
-          }
+    const recipeToDelete = currentRecipe;
+    const now = Date.now();
+    const deletedRecipe = {
+      ...recipeToDelete,
+      isDeleted: true,
+      updatedAt: now,
+    };
 
-          // 🔹 Analytics: manual recipe deleted (reuses /analytics-event)
-          try {
-            const backendUrl = getApiBaseUrl();
-            if (backendUrl && currentRecipe) {
-              const currentUser = auth.currentUser;
-              const userId = currentUser?.uid ?? null;
+    try {
+      const stored = await AsyncStorage.getItem("recipes");
+      const arr: Recipe[] = stored ? JSON.parse(stored) : [];
+      const next = Array.isArray(arr)
+        ? arr
+            .map((recipe) => (recipe?.id === recipeToDelete.id ? deletedRecipe : recipe))
+            .filter((recipe) => recipe?.id !== recipeToDelete.id)
+        : [];
 
-              let deviceId: string | null = null;
-              try {
-                deviceId = await getDeviceId();
-              } catch (e) {
-                console.warn("[RecipeDetail] getDeviceId failed for delete analytics", e);
-              }
+      if (syncEngine && typeof (syncEngine as any).saveLocalRecipesSnapshot === "function") {
+        await (syncEngine as any).saveLocalRecipesSnapshot(next);
+      } else {
+        await AsyncStorage.setItem("recipes", JSON.stringify(next));
+      }
 
-              const headers: Record<string, string> = {
-                "Content-Type": "application/json",
-              };
-              if (deviceId) headers["x-device-id"] = deviceId;
-              if (userId) headers["x-user-id"] = userId;
+      if (syncEngine && typeof (syncEngine as any).markRecipeDirty === "function") {
+        await (syncEngine as any).markRecipeDirty(deletedRecipe);
+      } else if (syncEngine) {
+        const recipeSync = (syncEngine as any)?.recipeSync;
+        if (recipeSync && typeof recipeSync.markLocalDeleted === "function") {
+          await recipeSync.markLocalDeleted(recipeToDelete.id);
+        }
+      }
 
-              fetch(`${backendUrl}/analytics-event`, {
-                method: "POST",
-                headers,
-                body: JSON.stringify({
-                  eventType: "manual_recipe_deleted",
-                  userId,
-                  deviceId,
-                  metadata: {
-                    source: "recipe_detail",
-                    recipeId: currentRecipe.id,
-                    title: currentRecipe.title,
-                    hasImage: !!currentRecipe.image,
-                    ingredientsCount: currentRecipe.ingredients.length,
-                    stepsCount: currentRecipe.steps.length,
-                    tagsCount: currentRecipe.tags.length,
-                    cookbooksCount: currentRecipe.cookbooks ? currentRecipe.cookbooks.length : 0,
-                  },
-                }),
-              }).catch((err) => {
-                console.warn("[RecipeDetail] analytics-event fetch failed", err);
-              });
-            }
-          } catch (e) {
-            console.warn("[RecipeDetail] analytics logging failed", e);
-          }
+      if (syncEngine && typeof (syncEngine as any).forceSyncNow === "function") {
+        await (syncEngine as any).forceSyncNow("manual");
+      } else if (syncEngine && typeof (syncEngine as any).syncAll === "function") {
+        await (syncEngine as any).syncAll("manual", { bypassThrottle: true });
+      } else if (syncEngine && typeof (syncEngine as any).requestSync === "function") {
+        (syncEngine as any).requestSync("manual");
+      }
+    } catch (e) {
+      console.warn("[RecipeDetail] deleteRecipe sync failed", e);
+    }
 
-          router.back();
-        },
-      },
-    ]);
+    // 🔹 Analytics: manual recipe deleted (reuses /analytics-event)
+    try {
+      const backendUrl = getApiBaseUrl();
+      if (backendUrl) {
+        const currentUser = auth.currentUser;
+        const userId = currentUser?.uid ?? null;
+
+        let deviceId: string | null = null;
+        try {
+          deviceId = await getDeviceId();
+        } catch (e) {
+          console.warn("[RecipeDetail] getDeviceId failed for delete analytics", e);
+        }
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (deviceId) headers["x-device-id"] = deviceId;
+        if (userId) headers["x-user-id"] = userId;
+
+        fetch(`${backendUrl}/analytics-event`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            eventType: "manual_recipe_deleted",
+            userId,
+            deviceId,
+            metadata: {
+              source: "recipe_detail",
+              recipeId: recipeToDelete.id,
+              title: recipeToDelete.title,
+              hasImage: !!recipeToDelete.image,
+              ingredientsCount: recipeToDelete.ingredients.length,
+              stepsCount: recipeToDelete.steps.length,
+              tagsCount: recipeToDelete.tags.length,
+              cookbooksCount: recipeToDelete.cookbooks ? recipeToDelete.cookbooks.length : 0,
+            },
+          }),
+        }).catch((err) => {
+          console.warn("[RecipeDetail] analytics-event fetch failed", err);
+        });
+      }
+    } catch (e) {
+      console.warn("[RecipeDetail] analytics logging failed", e);
+    }
+
+    setDeleteConfirmVisible(false);
+    router.replace("/(tabs)/history");
   };
 
 
@@ -825,6 +886,9 @@ const saveRecipe = async () => {
         ...(costForSync !== null ? { cost: costForSync } : {}),
         ingredients: Array.isArray(withUpdatedAt.ingredients) ? [...withUpdatedAt.ingredients] : [],
         steps: Array.isArray(withUpdatedAt.steps) ? [...withUpdatedAt.steps] : [],
+        notes: typeof withUpdatedAt.notes === "string" ? withUpdatedAt.notes : "",
+        sourceUrl: withUpdatedAt.sourceUrl ?? withUpdatedAt.sourceMetadata?.sourceUrl ?? null,
+        sourceMetadata: withUpdatedAt.sourceMetadata ?? null,
         cookbookIds,
         tags: Array.isArray(withUpdatedAt.tags) ? [...withUpdatedAt.tags] : [],
         createdAt: createdAtTs,
@@ -878,6 +942,10 @@ const estimateNutritionForRecipe = async () => {
       id: currentRecipe.id,
       title: currentRecipe.title,
       servings: Number(currentRecipe.servings) > 0 ? Math.max(Number(currentRecipe.servings), 1) : null,
+      sourceUrl: currentRecipe.sourceUrl ?? currentRecipe.sourceMetadata?.sourceUrl ?? null,
+      sourceMetadata:
+        getRecipeSourceMetadata(currentRecipe) ??
+        normalizeRecipeSourceMetadata(currentRecipe.sourceMetadata),
       ingredients: currentRecipe.ingredients || [],
       nutritionInfo: null,
       nutrition: null,
@@ -993,6 +1061,9 @@ const estimateNutritionForRecipe = async () => {
           ...(costForSync !== null ? { cost: costForSync } : {}),
           ingredients: Array.isArray(updatedRecipe.ingredients) ? [...updatedRecipe.ingredients] : [],
           steps: Array.isArray(updatedRecipe.steps) ? [...updatedRecipe.steps] : [],
+          notes: typeof updatedRecipe.notes === "string" ? updatedRecipe.notes : "",
+          sourceUrl: updatedRecipe.sourceUrl ?? updatedRecipe.sourceMetadata?.sourceUrl ?? null,
+          sourceMetadata: updatedRecipe.sourceMetadata ?? null,
           cookbookIds,
           tags: Array.isArray(updatedRecipe.tags) ? [...updatedRecipe.tags] : [],
           nutritionInfo: updatedRecipe.nutritionInfo ?? null,
@@ -1108,24 +1179,29 @@ return (
       options={{
         headerShown: true,
         title: t("recipes.open_recipe"),
-        headerStyle: { backgroundColor: "#293a53" },
-        headerTintColor: "#fff",
+        headerStyle: { backgroundColor: headerBg },
+        headerTintColor: headerText,
         headerTitleAlign: "center",
         headerLeft: () => (
           <TouchableOpacity
             onPress={handleBack}
             style={{ padding: 8 }}
           >
-            <MaterialIcons name="arrow-back" size={26} color="#fff" />
+            <MaterialIcons name="arrow-back" size={26} color={headerText} />
           </TouchableOpacity>
         ),
         headerRight: () => (
           <View style={{ flexDirection: "row" }}>
-            <TouchableOpacity onPress={shareRecipe} style={{ padding: 8 }}>
-              <MaterialIcons name="share" size={26} color="#fff" />
-            </TouchableOpacity>
             <TouchableOpacity onPress={editRecipe} style={{ padding: 8 }}>
-              <MaterialIcons name="edit" size={26} color="#fff" />
+              <MaterialIcons name="edit" size={26} color={headerText} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setRecipeActionsVisible(true)}
+              style={{ padding: 8 }}
+              accessibilityRole="button"
+              accessibilityLabel={t("common.more", { defaultValue: "More options" })}
+            >
+              <MaterialIcons name="more-vert" size={26} color={headerText} />
             </TouchableOpacity>
           </View>
         ),
@@ -1169,7 +1245,7 @@ return (
               </View>
               {caloriesPerServing !== null ? (
                 <View style={styles.quickInfoItem}>
-                  <MaterialCommunityIcons name="fire" size={16} color="#E27D60" />
+                  <MaterialCommunityIcons name="fire" size={16} color={inlineAccentColor} />
                   <Text style={[styles.quickInfoText, { color: text }]}>
                     {`${Math.round(caloriesPerServing)} kcal`}
                   </Text>
@@ -1184,23 +1260,23 @@ return (
           </Text>
           <AppCard>
             <View style={styles.servingsRow}>
-              <Text style={styles.servingsLabel}>
+              <Text style={[styles.servingsLabel, { color: inlineAccentColor }]}>
                 {t("recipes.servings", { count: servings })}
               </Text>
               <View style={{ flexDirection: "row" }}>
                 <TouchableOpacity
-                  style={styles.stepperBtn}
+                  style={[styles.stepperBtn, { borderColor: inlineAccentColor }]}
                   onPress={() =>
                     setServings((prev) => (prev > 1 ? prev - 1 : 1))
                   }
                 >
-                  <Text style={styles.stepper}>−</Text>
+                  <Text style={[styles.stepper, { color: inlineAccentColor }]}>−</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.stepperBtn}
+                  style={[styles.stepperBtn, { borderColor: inlineAccentColor }]}
                   onPress={() => setServings((prev) => prev + 1)}
                 >
-                  <Text style={styles.stepper}>+</Text>
+                  <Text style={[styles.stepper, { color: inlineAccentColor }]}>+</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1292,16 +1368,12 @@ return (
                         ? isDark
                           ? "#3b4352"
                           : "#d7dce5"
-                        : bg !== "#fff"
-                        ? "#E27D60"
-                        : "#293a53",
+                        : cta,
                       borderColor: isEstimatingNutrition
                         ? isDark
                           ? "#3b4352"
                           : "#d7dce5"
-                        : bg !== "#fff"
-                        ? "#E27D60"
-                        : "#293a53",
+                        : cta,
                       opacity: isEstimatingNutrition ? 0.7 : 1,
                       alignSelf: "flex-start",
                     },
@@ -1342,6 +1414,31 @@ return (
             </>
           )}
 
+          {typeof currentRecipe.notes === "string" && currentRecipe.notes.trim() ? (
+            <>
+              <Text style={[styles.sectionTitle, { color: text }]}>
+                {t("recipes.notes", { defaultValue: "Notes" })}
+              </Text>
+              <AppCard>
+                <Text style={[styles.text, { color: text }]}>
+                  {splitTextIntoLinkParts(currentRecipe.notes.trim()).map((part, index) =>
+                    part.url ? (
+                      <Text
+                        key={`${part.url}-${index}`}
+                        style={[styles.linkText, { color: inlineAccentColor }]}
+                        onPress={() => Linking.openURL(part.url!)}
+                      >
+                        {part.text}
+                      </Text>
+                    ) : (
+                      <Text key={`${part.text}-${index}`}>{part.text}</Text>
+                    )
+                  )}
+                </Text>
+              </AppCard>
+            </>
+          ) : null}
+
           {/* Cookbook */}
           <Text style={[styles.sectionTitle, { color: text }]}>
             {t("recipes.cookbooks")}
@@ -1349,11 +1446,11 @@ return (
           <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
             {cookbookNames.length > 0 ? (
               cookbookNames.map((name, index) => (
-                <View key={index} style={styles.cookbookChip}>
+                <View key={index} style={[styles.cookbookChip, { backgroundColor: chipBg, borderColor: border }]}>
                   <Text
                     style={[
                       styles.cookbookChipText,
-                      { color: bg === "#fff" ? text : "#000" },
+                      { color: text },
                     ]}
                   >
                     {name}
@@ -1375,7 +1472,7 @@ return (
               </Text>
               <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
                 {currentRecipe.tags.map((tag, i) => (
-                  <Text key={i} style={styles.tag}>
+                  <Text key={i} style={[styles.tag, { backgroundColor: chipBg, color: text, borderColor: border }]}>
                     {tag}
                   </Text>
                 ))}
@@ -1412,6 +1509,100 @@ return (
           )}
         </Animated.View>
 
+        <Modal visible={recipeActionsVisible} transparent animationType="fade">
+          <TouchableOpacity
+            style={styles.modalOverlay}
+            activeOpacity={1}
+            onPressOut={() => setRecipeActionsVisible(false)}
+          >
+            <View style={[styles.actionMenuContent, { backgroundColor: card }]}>
+              <View style={styles.modalHeader}>
+                <Text
+                  style={[styles.modalTitle, { color: text, flex: 1, paddingRight: 12 }]}
+                  numberOfLines={2}
+                  ellipsizeMode="tail"
+                >
+                  {currentRecipe.title}
+                </Text>
+                <TouchableOpacity onPress={() => setRecipeActionsVisible(false)}>
+                  <MaterialIcons name="close" size={24} color={text} />
+                </TouchableOpacity>
+              </View>
+              <TouchableOpacity
+                style={styles.actionMenuRow}
+                onPress={() => {
+                  setRecipeActionsVisible(false);
+                  shareRecipe();
+                }}
+              >
+                <MaterialIcons name="share" size={22} color={inlineAccentColor} />
+                <Text style={[styles.actionMenuText, { color: text }]}>
+                  {t("common.share", { defaultValue: "Share" })}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.actionMenuRow}
+                onPress={() => {
+                  setRecipeActionsVisible(false);
+                  setDeleteConfirmVisible(true);
+                }}
+              >
+                <MaterialIcons name="delete-outline" size={22} color={inlineAccentColor} />
+                <Text style={[styles.actionMenuText, { color: text }]}>
+                  {t("common.delete")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+
+        <Modal visible={deleteConfirmVisible} transparent animationType="fade">
+          <TouchableOpacity
+            style={styles.modalOverlay}
+            activeOpacity={1}
+            onPressOut={() => setDeleteConfirmVisible(false)}
+          >
+            <View style={[styles.modalContent, { backgroundColor: card, width: 320 }]}>
+              <View style={styles.modalHeader}>
+                <Text
+                  style={[
+                    styles.modalTitle,
+                    {
+                      color: text,
+                      flex: 1,
+                      paddingRight: 12,
+                    },
+                  ]}
+                  numberOfLines={2}
+                  ellipsizeMode="tail"
+                >
+                  {t("recipes.delete_recipe_confirm")}
+                </Text>
+                <TouchableOpacity onPress={() => setDeleteConfirmVisible(false)}>
+                  <MaterialIcons name="close" size={24} color={text} />
+                </TouchableOpacity>
+              </View>
+              <Text style={{ color: subText, marginBottom: 18, fontSize: 15 }}>
+                {t("recipes.delete_recipe_desc")}
+              </Text>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: "#E53935",
+                  borderRadius: 8,
+                  paddingVertical: 12,
+                  alignItems: "center",
+                  marginTop: 4,
+                }}
+                onPress={deleteRecipe}
+              >
+                <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 16 }}>
+                  {t("common.delete")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+
         {/* Insufficient cookies modal (cookbooks) */}
         <InsufficientCookiesModal
           visible={insufficientModal.visible}
@@ -1419,8 +1610,14 @@ return (
           title={t("economy.insufficient_title", "Not enough Eggs")}
           body={
             insufficientModal.context === "nutrition_estimate"
-              ? `You need 1 Egg to estimate recipe nutrition values. Currently, you have ${insufficientModal.remaining} Eggs.`
-              : `You need 1 Egg to create a new cookbook. Currently, you have ${insufficientModal.remaining} Eggs.`
+              ? t("economy.insufficient_recipe_estimate_body_short", {
+                  remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                  defaultValue: "You need 1 egg to estimate recipe nutrition values. You have {{remaining}}.",
+                })
+              : t("economy.insufficient_cookbook_body_short", {
+                  remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                  defaultValue: "You need 1 egg to create a new cookbook. You have {{remaining}}.",
+                })
           }
           featuredOffer={featuredOffer}
           availableRewardsCount={availableRewardsCount}
@@ -1470,10 +1667,15 @@ const styles = StyleSheet.create({
   quickInfoText: { fontSize: 14 },
   sectionTitle: { fontSize: 18, fontWeight: "600", marginTop: 0, marginBottom: 6 },
   text: { fontSize: 16, marginBottom: 6, lineHeight: 22 },
+  linkText: {
+    color: "#8A4B16",
+    fontWeight: "600",
+    textDecorationLine: "underline",
+  },
   tag: {
-    backgroundColor: "#FFECB3",
     paddingHorizontal: 10,
     borderRadius: 16,
+    borderWidth: 1,
     fontSize: 13,
     marginRight: 6,
     marginBottom: 6,
@@ -1481,10 +1683,10 @@ const styles = StyleSheet.create({
     lineHeight: 26,
   },
   cookbookChip: {
-    backgroundColor: "#B3D4FC",
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 20,
+    borderWidth: 1,
     marginRight: 8,
     marginBottom: 8,
     justifyContent: "center",
@@ -1500,7 +1702,7 @@ const styles = StyleSheet.create({
   fab: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     borderRadius: 28,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -1584,7 +1786,6 @@ const styles = StyleSheet.create({
   servingsLabel: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#E27D60",
   },
   servingsDivider: {
     height: 1,
@@ -1594,12 +1795,10 @@ const styles = StyleSheet.create({
   stepper: {
     fontSize: 20,
     fontWeight: "600",
-    color: "#E27D60",
     textAlign: "center",
   },
   stepperBtn: {
     borderWidth: 1,
-    borderColor: "#E27D60",
     borderRadius: 4,
     paddingHorizontal: 12,
     paddingVertical: 2,
@@ -1617,6 +1816,21 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 20,
     maxHeight: "80%",
+  },
+  actionMenuContent: {
+    width: 320,
+    borderRadius: 16,
+    padding: 20,
+  },
+  actionMenuRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 13,
+  },
+  actionMenuText: {
+    fontSize: 15,
+    fontWeight: "700",
   },
   modalHeader: {
     flexDirection: "row",
@@ -1701,7 +1915,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   buyBtnCookies: {
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 14,

@@ -18,7 +18,7 @@ export const faqCategoryMeta: Array<{ id: "all" | FaqCategoryId; icon: string; l
   { id: "getting_started", icon: "info-outline", labelKey: "faq.category_getting_started", fallback: "Getting started" },
   { id: "my_day", icon: "today", labelKey: "faq.category_my_day", fallback: "My Day" },
   { id: "recipes", icon: "restaurant-menu", labelKey: "faq.category_recipes", fallback: "Recipes" },
-  { id: "eggs", icon: "card-giftcard", labelKey: "faq.category_eggs", fallback: "Eggs" },
+  { id: "eggs", icon: "egg", labelKey: "economy.cookies", fallback: "Ovos" },
   { id: "settings", icon: "settings", labelKey: "faq.category_settings", fallback: "Settings" },
 ];
 
@@ -186,6 +186,15 @@ export function getFaqItems(t: Translator): FaqItem[] {
       question: question(t, "faq.dark_mode", "How do I enable dark mode?"),
       answer: t("faq.dark_mode_answer", {
         defaultValue: "Go to Profile → General and toggle Dark Mode. The app will switch themes immediately.",
+      }),
+    },
+    {
+      id: "faq.notifications",
+      category: "settings",
+      question: question(t, "faq.notifications", "How do notifications work?"),
+      answer: t("faq.notifications_answer", {
+        defaultValue:
+          "Notifications are optional and disabled by default. You can enable meal reminders, weight reminders, and occasional offers or updates separately in Profile. To prevent spam, meal reminders must be at least 1 hour apart, and we skip meal reminders when your logged meals already cover them.",
       }),
     },
     {

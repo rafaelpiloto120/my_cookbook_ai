@@ -98,7 +98,7 @@ export default function SignInScreen() {
   const params = useLocalSearchParams<{ mode?: string }>();
   const initialMode: AuthMode = params?.mode === "signup" ? "signup" : "signin";
   const { login, signup, loginWithGoogle } = useAuth();
-  const { bg, text, subText, card, border } = useThemeColors();
+  const { bg, text, subText, card, border, headerBg, headerText } = useThemeColors();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -241,13 +241,13 @@ export default function SignInScreen() {
 
   return (
     <>
-      <StatusBar translucent={false} backgroundColor="#293a53" barStyle="light-content" />
+      <StatusBar translucent={false} backgroundColor={headerBg} barStyle="light-content" />
       <Stack.Screen
         options={{
           headerShown: true,
           title: isSignup ? t("auth.signup_title") : t("auth.signin_title"),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerBackVisible: true,
           headerRight: () => null,
@@ -300,7 +300,7 @@ export default function SignInScreen() {
           </View>
           <View style={{ width: "100%", alignItems: "flex-end", marginBottom: 8 }}>
             <TouchableOpacity onPress={handleForgotPassword} disabled={loading || googleLoading}>
-              <Text style={{ color: "#E27D60", fontWeight: "600" }}>{t("auth.forgot_password_link")}</Text>
+              <Text style={{ color: "#8A4B16", fontWeight: "600" }}>{t("auth.forgot_password_link")}</Text>
             </TouchableOpacity>
           </View>
           <Modal visible={showResetModal} transparent animationType="fade" onRequestClose={() => setShowResetModal(false)}>
@@ -353,7 +353,7 @@ export default function SignInScreen() {
                     style={{ paddingVertical: 10, paddingHorizontal: 12 }}
                     disabled={loading || googleLoading}
                   >
-                    <Text style={{ color: "#E27D60", fontWeight: "700" }}>{t("common.confirm")}</Text>
+                    <Text style={{ color: "#8A4B16", fontWeight: "700" }}>{t("common.confirm")}</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -412,8 +412,8 @@ export default function SignInScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
-  title: { fontSize: 24, fontWeight: "bold", marginBottom: 24, color: "#293a53" },
-  input: { width: "100%", borderWidth: 1, borderColor: "#ccc", borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 16 },
+  title: { fontSize: 24, fontWeight: "bold", marginBottom: 24, color: "#8F5E43" },
+  input: { width: "100%", borderWidth: 1, borderColor: "#ccc", borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 15 },
   passwordContainer: {
     width: "100%",
     flexDirection: "row",
@@ -444,7 +444,7 @@ const styles = StyleSheet.create({
   },
   button: {
     width: "100%",
-    backgroundColor: "#E27D60",
+    backgroundColor: "#8A4B16",
     padding: 14,
     borderRadius: 10,
     alignItems: "center",
@@ -487,6 +487,6 @@ const styles = StyleSheet.create({
     borderColor: "#edf0f4",
   },
   googleButtonText: { color: "#1f2933", fontWeight: "700", fontSize: 16 },
-  switchText: { color: "#293a53", marginTop: 10, fontSize: 15, textAlign: "center" },
-  linkText: { color: "#E27D60", fontWeight: "600" },
+  switchText: { color: "#8F5E43", marginTop: 10, fontSize: 15, textAlign: "center" },
+  linkText: { color: "#8A4B16", fontWeight: "600" },
 });

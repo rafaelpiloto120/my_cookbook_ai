@@ -12,6 +12,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import EconomyActivityModal from "../../components/EconomyActivityModal";
 import EggIcon from "../../components/EggIcon";
 import { fetchEconomyHistory, type EconomyLedgerEntry } from "../../lib/economy/client";
+import { formatEconomyUnits } from "../../lib/economy/format";
 import {
   initConnection,
   endConnection,
@@ -162,7 +163,22 @@ const renderRewardSubtitle = (bonus: BonusOffer, color: string, t: (key: string,
 
 export default function EconomyStoreScreen() {
   const { t, i18n } = useTranslation();
-  const { bg, text, card, border, isDark } = useThemeColors();
+  const {
+    bg,
+    text,
+    card,
+    border,
+    cta,
+    isDark,
+    mutedText,
+    softText,
+    accentText,
+    success,
+    softAccentBg,
+    softAccentBorder,
+    sectionTitle,
+    onCta,
+  } = useThemeColors();
   const router = useRouter();
   const params = useLocalSearchParams<{ highlight?: string; autoBuy?: string }>();
 
@@ -192,6 +208,16 @@ export default function EconomyStoreScreen() {
     () => bonuses.filter((b) => b.status === "redeemed"),
     [bonuses]
   );
+  const inlineAccentColor = accentText;
+  const positiveDeltaColor = success;
+  const softAccentChip = isDark
+    ? {
+        backgroundColor: softAccentBg,
+        borderColor: softAccentBorder,
+        borderWidth: 1,
+      }
+    : null;
+  const softAccentChipText = { color: inlineAccentColor };
 
   const openBonusAction = useCallback((bonus: BonusOffer) => {
     switch (bonus.action) {
@@ -687,7 +713,7 @@ export default function EconomyStoreScreen() {
       : undefined;
 
     const chipTextStyle = isDark
-      ? { color: "#F5F5F5" }
+      ? { color: text }
       : undefined;
 
     return (
@@ -845,28 +871,30 @@ export default function EconomyStoreScreen() {
   }, [loading, offers, onBuy, params.autoBuy, params.highlight]);
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }} edges={["top", "left", "right", "bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: bg }} edges={["top", "left", "right", "bottom"]}>
       <ScrollView
-        style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }}
+        style={{ flex: 1, backgroundColor: bg }}
         contentContainerStyle={[styles.container, { paddingBottom: 28 }]}
         keyboardShouldPersistTaps="handled"
       >
         {loading ? (
           <View style={styles.center}>
-            <ActivityIndicator size="large" />
-            <Text style={[styles.muted, { color: isDark ? "#ddd" : "#666", marginTop: 10 }]}>
+            <ActivityIndicator size="large" color={inlineAccentColor} />
+            <Text style={[styles.muted, { color: mutedText, marginTop: 10 }]}>
               {t("common.loading", "Loading...")}
             </Text>
           </View>
         ) : (
           <>
-            <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+            <Text style={[styles.sectionTitle, { color: sectionTitle }]}>
               {t("economy.cookies_balance", "Balance")}
             </Text>
             <View style={[styles.balanceCard, { backgroundColor: card, borderColor: border }]}>
               <View style={styles.balanceValueRow}>
                 <EggIcon size={24} />
-                <Text style={[styles.balanceValue, { color: text }]}>{balance === null ? "—" : balance} Eggs</Text>
+                <Text style={[styles.balanceValue, { color: text }]}>
+                  {balance === null ? "—" : formatEconomyUnits(t, balance)}
+                </Text>
               </View>
             </View>
             {isLoggedIn && !isAnon ? (
@@ -878,19 +906,19 @@ export default function EconomyStoreScreen() {
                     loadActivity();
                   }}
                 >
-                  <Text style={styles.activityLinkText}>
+                  <Text style={[styles.activityLinkText, { color: inlineAccentColor }]}>
                     {t("economy.cookies_activity", { defaultValue: "Activity" })}
                   </Text>
                 </TouchableOpacity>
               </View>
             ) : null}
 
-            <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+            <Text style={[styles.sectionTitle, { color: sectionTitle }]}>
               {t("economy.free_cookies", "Earn free")}
             </Text>
 
             {offers.length === 0 && bonuses.length === 0 ? (
-              <Text style={[styles.muted, { color: isDark ? "#ddd" : "#666" }]}>
+              <Text style={[styles.muted, { color: mutedText }]}>
                 {t("economy.no_offers", "No offers available right now.")}
               </Text>
             ) : (
@@ -900,10 +928,10 @@ export default function EconomyStoreScreen() {
                     <Text style={[styles.emptyStateTitle, { color: text }]}>
                       {t(
                         "economy.no_available_rewards_title",
-                        "You’ve claimed all available free Egg rewards for now."
+                        "You’ve claimed all available free rewards for now."
                       )}
                     </Text>
-                    <Text style={[styles.emptyStateBody, { color: isDark ? "#ddd" : "#666" }]}>
+                    <Text style={[styles.emptyStateBody, { color: mutedText }]}>
                       {t(
                         "economy.no_available_rewards_body",
                         "We may add new rewards from time to time, so keep an eye on this space."
@@ -931,12 +959,12 @@ export default function EconomyStoreScreen() {
                       <View key={b.id} style={[styles.offerCard, { backgroundColor: card, borderColor: border }]}>
                         <View style={styles.offerLeft}>
                           <View style={styles.offerMainRow}>
-                            <MaterialIcons name="card-giftcard" size={22} color="#E27D60" style={styles.cookieImageIcon} />
+                            <MaterialIcons name="card-giftcard" size={22} color={inlineAccentColor} style={styles.cookieImageIcon} />
                             <Text style={[styles.offerMainTitle, { color: text }]}>
-                              +{b.cookies} {t("economy.cookies", "Eggs")}
+                              +{formatEconomyUnits(t, b.cookies)}
                             </Text>
-                            <View style={[styles.freeChip, isDark ? styles.freeChipDark : null]}>
-                              <Text style={[styles.freeChipText, isDark ? styles.freeChipTextDark : null]}>
+                            <View style={[styles.freeChip, softAccentChip]}>
+                              <Text style={[styles.freeChipText, softAccentChipText]}>
                                 {t("economy.free", "Free")}
                               </Text>
                             </View>
@@ -944,7 +972,7 @@ export default function EconomyStoreScreen() {
 
                           {/* For bonus offers, hide the title and show only the description */}
                           {!!b.subtitle && (
-                            <Text style={[styles.offerSubtitle, { color: isDark ? "#ddd" : "#666" }]}>
+                            <Text style={[styles.offerSubtitle, { color: mutedText }]}>
                               {renderRewardSubtitle(b, text, t)}
                             </Text>
                           )}
@@ -953,7 +981,7 @@ export default function EconomyStoreScreen() {
 
                         <View style={styles.offerRight}>
                           <TouchableOpacity
-                            style={[styles.buyBtn, { opacity: ctaDisabled ? 0.55 : 1 }]}
+                            style={[styles.buyBtn, { backgroundColor: cta, opacity: ctaDisabled ? 0.55 : 1 }]}
                             disabled={ctaDisabled}
                             onPress={() => {
                               if (!ctaDisabled) {
@@ -966,14 +994,14 @@ export default function EconomyStoreScreen() {
                             }}
                             activeOpacity={0.8}
                           >
-                            <Text style={styles.buyBtnText}>{ctaLabel}</Text>
+                            <Text style={[styles.buyBtnText, { color: onCta }]}>{ctaLabel}</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
                     );
                   })}
 
-                <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53", marginTop: 8 }]}>
+                <Text style={[styles.sectionTitle, { color: sectionTitle, marginTop: 8 }]}>
                   {t("economy.cookie_plans", "Plans")}
                 </Text>
 
@@ -1004,7 +1032,7 @@ export default function EconomyStoreScreen() {
                         styles.offerCard,
                         {
                           backgroundColor: card,
-                          borderColor: isHighlighted ? "#E27D60" : border,
+                          borderColor: isHighlighted ? inlineAccentColor : border,
                           borderWidth: isHighlighted ? 2 : 1,
                         },
                       ]}
@@ -1017,30 +1045,30 @@ export default function EconomyStoreScreen() {
 
                             {showPromo ? (
                               <View style={styles.promoTitleRow}>
-                                <Text style={[styles.offerBaseCookies, { color: isDark ? "#bbb" : "#7a7a7a" }]}>
-                                  {baseCookies} {t("economy.cookies", "Eggs")}
+                                <Text style={[styles.offerBaseCookies, { color: softText }]}>
+                                  {formatEconomyUnits(t, baseCookies)}
                                 </Text>
-                                <Text style={[styles.promoArrow, { color: isDark ? "#bbb" : "#7a7a7a" }]}>→</Text>
+                                <Text style={[styles.promoArrow, { color: softText }]}>→</Text>
                                 <Text style={[styles.offerPromoCookies, { color: text }]}>
-                                  {totalCookies} {t("economy.cookies", "Eggs")}
+                                  {formatEconomyUnits(t, totalCookies)}
                                 </Text>
                               </View>
                             ) : (
                               <Text style={[styles.offerMainTitle, { color: text }]}>
-                                {Math.max(0, Math.floor(o.cookies))} {t("economy.cookies", "Eggs")}
+                                {formatEconomyUnits(t, Math.max(0, Math.floor(o.cookies)))}
                               </Text>
                             )}
                           </View>
 
                           {o.mostPurchased ? (
-                            <View style={styles.highlightChip}>
-                              <Text style={styles.highlightChipText}>{t("economy.most_purchased", "Most purchased")}</Text>
+                            <View style={[styles.highlightChip, softAccentChip]}>
+                              <Text style={[styles.highlightChipText, softAccentChipText]}>{t("economy.most_purchased", "Most purchased")}</Text>
                             </View>
                           ) : null}
                         </View>
 
                         {/* Second row: subtitle and price on the same line */}
-                        <Text style={[styles.offerPriceLine, { color: isDark ? "#ddd" : "#666" }]}>
+                        <Text style={[styles.offerPriceLine, { color: mutedText }]}>
                           {(() => {
                             const sku = String(o.productId || o.id || "").trim();
                             const nativePrice = sku && iapProducts[sku] ? (iapProducts[sku] as any)?.localizedPrice : null;
@@ -1055,11 +1083,11 @@ export default function EconomyStoreScreen() {
 
                       <View style={styles.offerRight}>
                         <TouchableOpacity
-                          style={[styles.buyBtn, { opacity: 1 }]}
+                          style={[styles.buyBtn, { backgroundColor: cta, opacity: 1 }]}
                           onPress={() => onBuy(o)}
                           activeOpacity={0.8}
                         >
-                          <Text style={styles.buyBtnText}>{t("economy.buy", "Buy")}</Text>
+                          <Text style={[styles.buyBtnText, { color: onCta }]}>{t("economy.buy", "Buy")}</Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -1067,7 +1095,7 @@ export default function EconomyStoreScreen() {
                 })}
 
                 {redeemedBonuses.length > 0 ? (
-                  <Text style={[styles.sectionTitle, { color: isDark ? "#f5f5f5" : "#293a53", marginTop: 8 }]}>
+                  <Text style={[styles.sectionTitle, { color: sectionTitle, marginTop: 8 }]}>
                     {t("economy.completed_rewards", "Completed rewards")}
                   </Text>
                 ) : null}
@@ -1080,19 +1108,19 @@ export default function EconomyStoreScreen() {
                       <View key={b.id} style={[styles.offerCard, { backgroundColor: card, borderColor: border }]}>
                         <View style={styles.offerLeft}>
                           <View style={styles.offerMainRow}>
-                            <MaterialIcons name="card-giftcard" size={22} color="#E27D60" style={styles.cookieImageIcon} />
+                            <MaterialIcons name="card-giftcard" size={22} color={inlineAccentColor} style={styles.cookieImageIcon} />
                             <Text style={[styles.offerMainTitle, { color: text }]}>
-                              +{b.cookies} {t("economy.cookies", "Eggs")}
+                              +{formatEconomyUnits(t, b.cookies)}
                             </Text>
-                            <View style={[styles.freeChip, isDark ? styles.freeChipDark : null]}>
-                              <Text style={[styles.freeChipText, isDark ? styles.freeChipTextDark : null]}>
+                            <View style={[styles.freeChip, softAccentChip]}>
+                              <Text style={[styles.freeChipText, softAccentChipText]}>
                                 {t("economy.free", "Free")}
                               </Text>
                             </View>
                           </View>
 
                           {!!b.subtitle && (
-                            <Text style={[styles.offerSubtitle, { color: isDark ? "#ddd" : "#666" }]}>
+                            <Text style={[styles.offerSubtitle, { color: mutedText }]}>
                               {renderRewardSubtitle(b, text, t)}
                             </Text>
                           )}
@@ -1101,12 +1129,12 @@ export default function EconomyStoreScreen() {
 
                         <View style={styles.offerRight}>
                           <TouchableOpacity
-                            style={[styles.buyBtn, { opacity: ctaDisabled ? 0.55 : 1 }]}
+                            style={[styles.buyBtn, { backgroundColor: cta, opacity: ctaDisabled ? 0.55 : 1 }]}
                             disabled={ctaDisabled}
                             onPress={() => {}}
                             activeOpacity={0.8}
                           >
-                            <Text style={styles.buyBtnText}>{ctaLabel}</Text>
+                            <Text style={[styles.buyBtnText, { color: onCta }]}>{ctaLabel}</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -1115,7 +1143,7 @@ export default function EconomyStoreScreen() {
               </>
             )}
 
-            <Text style={[styles.footnote, { color: isDark ? "#ddd" : "#666" }]}>
+            <Text style={[styles.footnote, { color: mutedText }]}>
               {isLoggedIn
                   ? t(
                     "economy.cookies_what_body_logged_in_v2",
@@ -1135,8 +1163,10 @@ export default function EconomyStoreScreen() {
         card={card}
         border={border}
         text={text}
-        subText={isDark ? "#ddd" : "#666"}
+        subText={mutedText}
         backdrop={isDark ? "rgba(0,0,0,0.56)" : "rgba(0,0,0,0.28)"}
+        positiveDeltaColor={positiveDeltaColor}
+        negativeDeltaColor={inlineAccentColor}
         title={t("economy.cookies_history_title", { defaultValue: "Egg activity" })}
         loadingText={t("economy.loading_history", { defaultValue: "Loading history..." })}
         emptyText={t("economy.history_empty", { defaultValue: "No Egg activity yet." })}
@@ -1168,7 +1198,6 @@ const styles = StyleSheet.create({
   activityLinkText: {
     fontSize: 13,
     fontWeight: "700",
-    color: "#E27D60",
   },
   emptyState: {
     borderWidth: 1,
@@ -1203,8 +1232,8 @@ const styles = StyleSheet.create({
   offerSubtitle: { fontSize: 14, marginTop: 6 },
   offerSubtitleStrong: { fontWeight: "900" },
   muted: { fontSize: 14 },
-  buyBtn: { backgroundColor: "#E27D60", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, marginLeft: 12 },
-  buyBtnText: { color: "#fff", fontWeight: "800" },
+  buyBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, marginLeft: 12 },
+  buyBtnText: { fontWeight: "800" },
   offerRight: { justifyContent: "center", alignItems: "flex-end", gap: 8 },
   offerLeft: { flex: 1, paddingRight: 12 },
   footnote: { fontSize: 12, marginTop: 10, opacity: 0.85 },
@@ -1221,16 +1250,13 @@ const styles = StyleSheet.create({
   freeChipText: {
     fontSize: 13,
     fontWeight: "900",
-    color: "#293a53",
   },
   freeChipDark: {
     backgroundColor: "#ffbd80aa",
     borderColor: "#ffbd80",
     borderWidth: 1,
   },
-  freeChipTextDark: {
-    color: "#293a53",
-  },
+  freeChipTextDark: {},
   highlightChip: {
     backgroundColor: "#ffbd80aa",
     paddingHorizontal: 10,
@@ -1238,7 +1264,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignSelf: "flex-start",
   },
-  highlightChipText: { fontSize: 13, fontWeight: "900", color: "#293a53" },
+  highlightChipText: { fontSize: 13, fontWeight: "900" },
 
   offerTopRow: {
     flexDirection: "row",

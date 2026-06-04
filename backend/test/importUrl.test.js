@@ -131,6 +131,145 @@ test("extractRecipeFromHtml extracts Chefkoch ingredients and steps", () => {
   ]);
 });
 
+test("extractRecipeFromHtml extracts Mundo de Receitas Bimby recipe pages", () => {
+  const html = loadFixture("bimby-sopa-camponesa.html");
+  const result = extractRecipeFromHtml({
+    url: "https://www.mundodereceitasbimby.com.pt/sopas-receitas/sopa-camponesa/tew7x2gx-6f492-685137-cfcd2-rj50u37x",
+    html,
+    requestInfo,
+  });
+
+  assert.equal(result.extractor, "thermomix_community");
+  assert.equal(result.stage, "domain");
+  assert.ok(result.recipe);
+  assert.equal(result.recipe.title, "Sopa camponesa");
+  assert.equal(result.recipe.cookingTime, 35);
+  assert.equal(result.recipe.servings, null);
+  assert.deepEqual(result.recipe.ingredients, [
+    "100 g alho porro , cortado às rodelas",
+    "50 g nabos , cortado aos pedaços",
+    "100 g courgettes , cortado aos pedaços",
+    "2 cenoura, s , cortada aos pedaços",
+    "100 g batata, s , cortada aos cubos",
+    "200 g couve lombardo , cortada aos pedaços",
+    "100 g tomate, s , cotado aos pedaços",
+    "50 g bacon",
+    "600 g água",
+    "q.b. sal",
+    "½ c. chá ervas frescas",
+  ]);
+  assert.deepEqual(result.recipe.steps, [
+    "Coloque no copo o alho, o nabo, a courgette, a cenoura e programe 6 seg/vel 4.",
+    "Adicione os restantes ingredientes e programe 25 min/100ºC/vel 2.",
+    "Programe 8 seg/vel 4. Desta forma não desfaz os legumes mas fica mais espessa.",
+  ]);
+  assert.equal(result.recipe.image, "https://www.mundodereceitasbimby.com.pt/sites/default/files/styles/recipe_main/public/sopa.jpg");
+});
+
+test("extractRecipeFromHtml falls back to clean Bimby metadata title when h1 only has actions", () => {
+  const html = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta property="og:title" content="Puré de batata de Equipa Bimby. Receita Bimby® na categoria Acompanhamentos." />
+      </head>
+      <body>
+        <h1>
+          <a href="/node/123/edit">Editar</a>
+        </h1>
+        <h3>Ingredientes</h3>
+        <ul>
+          <li>1000 g batatas p/ fritar, descascadas e cortadas aos pedaços</li>
+          <li>400 g leite</li>
+        </ul>
+        <h2>Etapa de preparação</h2>
+        <ol>
+          <li>Insira a borboleta. Coloque no copo a batata, o leite, o sal e programe 30 min/90°C/vel 1.</li>
+        </ol>
+      </body>
+    </html>
+  `;
+  const result = extractRecipeFromHtml({
+    url: "https://www.mundodereceitasbimby.com.pt/acompanhamentos-receitas/pure-de-batata/xc8p4u99-6f492-496725-cfcd2-by7xi63a",
+    html,
+    requestInfo,
+  });
+
+  assert.equal(result.extractor, "thermomix_community");
+  assert.ok(result.recipe);
+  assert.equal(result.recipe.title, "Puré de batata");
+});
+
+test("extractRecipeFromHtml extracts Thermomix community pages in German", () => {
+  const html = loadFixture("rezeptwelt-apfelkuchen.html");
+  const result = extractRecipeFromHtml({
+    url: "https://www.rezeptwelt.de/backen-suess-rezepte/apfelkuchen/example",
+    html,
+    requestInfo,
+  });
+
+  assert.equal(result.extractor, "thermomix_community");
+  assert.equal(result.stage, "domain");
+  assert.ok(result.recipe);
+  assert.equal(result.recipe.title, "Apfelkuchen");
+  assert.equal(result.recipe.cookingTime, 45);
+  assert.equal(result.recipe.servings, 10);
+  assert.deepEqual(result.recipe.ingredients, [
+    "250 g Mehl",
+    "120 g Zucker",
+    "2 Eier",
+    "3 Äpfel",
+  ]);
+  assert.deepEqual(result.recipe.steps, [
+    "Mehl, Zucker und Eier in den Mixtopf geben und verrühren.",
+    "Äpfel unterheben und den Teig in eine Form geben.",
+    "Backen, bis der Kuchen goldbraun ist.",
+  ]);
+});
+
+test("extractRecipeFromHtml extracts Thermomix community portion(s) servings in English", () => {
+  const html = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta property="og:title" content='"Magic Bean" chocolate cake by Sarah Wong. A Thermomix recipe.' />
+      </head>
+      <body>
+        <h1>"Magic Bean" chocolate cake</h1>
+        <div>
+          Preparation time 5min
+          Total time 35min
+          Portion
+          12 portion(s)
+          Level easy
+        </div>
+        <h3>Ingredients</h3>
+        <ul>
+          <li>420 g can kidney beans or butter beans, drained and rinsed</li>
+          <li>5 eggs</li>
+          <li>140 g rapadura or coconut sugar</li>
+        </ul>
+        <h2>Recipe's preparation</h2>
+        <ol>
+          <li>Puree the beans, water, 1 egg and vanilla until smooth.</li>
+          <li>Pour batter into greased ring tin pan and bake for 30 minutes.</li>
+        </ol>
+      </body>
+    </html>
+  `;
+  const result = extractRecipeFromHtml({
+    url: "https://www.recipecommunity.com.au/baking-sweet-recipes/magic-bean-chocolate-cake/ypc7sbzq-01eb7-187035-cfcd2-ynu6w8ud",
+    html,
+    requestInfo,
+  });
+
+  assert.equal(result.extractor, "thermomix_community");
+  assert.ok(result.recipe);
+  assert.equal(result.recipe.title, '"Magic Bean" chocolate cake');
+  assert.equal(result.recipe.cookingTime, 35);
+  assert.equal(result.recipe.servings, 12);
+});
+
 test("extractRecipeFromHtml does not treat generic article as recipe", () => {
   const html = loadFixture("non-recipe-article.html");
   const result = extractRecipeFromHtml({

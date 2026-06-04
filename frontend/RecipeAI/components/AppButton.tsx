@@ -1,5 +1,5 @@
 import React from "react";
-import { TouchableOpacity, Text, StyleSheet, ViewStyle } from "react-native";
+import { TouchableOpacity, Text, StyleSheet, View, ViewStyle } from "react-native";
 import { useThemeColors } from "../context/ThemeContext";
 
 interface AppButtonProps {
@@ -9,6 +9,7 @@ interface AppButtonProps {
   fullWidth?: boolean;
   style?: ViewStyle;
   disabled?: boolean;
+  leftIcon?: React.ReactNode;
 }
 
 export default function AppButton({
@@ -18,8 +19,9 @@ export default function AppButton({
   fullWidth = true,
   style,
   disabled = false,
+  leftIcon,
 }: AppButtonProps) {
-  const { primary, secondary, cta, text, bg } = useThemeColors();
+  const { primary, secondary, cta, onSecondary, onCta, danger } = useThemeColors();
 
   const backgroundColor =
     variant === "primary"
@@ -28,9 +30,9 @@ export default function AppButton({
       ? secondary
       : variant === "cta"
       ? cta
-      : "#D9534F"; // 🔴 danger (vermelho)
+      : danger;
 
-  const textColor = variant === "secondary" ? "#212121" : "#fff";
+  const textColor = variant === "secondary" ? onSecondary : onCta;
 
   return (
     <TouchableOpacity
@@ -44,7 +46,10 @@ export default function AppButton({
       activeOpacity={0.8}
       disabled={disabled}
     >
-      <Text style={[styles.label, { color: textColor }]}>{label}</Text>
+      <View style={styles.content}>
+        {leftIcon ? <View style={styles.iconWrap}>{leftIcon}</View> : null}
+        <Text style={[styles.label, { color: textColor }]}>{label}</Text>
+      </View>
     </TouchableOpacity>
   );
 }
@@ -56,6 +61,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginVertical: 6,
+  },
+  content: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  iconWrap: {
+    marginRight: 8,
   },
   label: {
     fontSize: 16,

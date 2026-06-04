@@ -21,6 +21,25 @@ import {
 import { loadMeasurementSystemPreference, MeasurementSystem } from "../../../lib/myDay";
 import { loadSavedRecipes, SavedRecipe } from "../../../lib/myDayRecipes";
 
+function hexToRgba(color: string, alpha: number) {
+  if (!color.startsWith("#")) return color;
+  const normalized = color.slice(1);
+  const expanded =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((char) => char + char)
+          .join("")
+      : normalized.slice(0, 6);
+
+  const r = Number.parseInt(expanded.slice(0, 2), 16);
+  const g = Number.parseInt(expanded.slice(2, 4), 16);
+  const b = Number.parseInt(expanded.slice(4, 6), 16);
+
+  if ([r, g, b].some((value) => Number.isNaN(value))) return color;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 type DaySummary = {
   dayKey: string;
   title: string;
@@ -245,7 +264,7 @@ function areReviewIngredientsEqual(current: ReviewIngredient[], base: ReviewIngr
 
 export default function MyDayHistoryScreen() {
   const { t, i18n } = useTranslation();
-  const { bg, text, subText, border, cta, card, modalBackdrop, primary, isDark } = useThemeColors();
+  const { bg, text, subText, border, cta, card, modalBackdrop, primary, secondary, isDark, headerBg, headerText } = useThemeColors();
   const router = useRouter();
   const params = useLocalSearchParams<{ day?: string }>();
   const todayKey = getDayKey(new Date());
@@ -282,6 +301,8 @@ export default function MyDayHistoryScreen() {
   const nutrientUnit = nutrientUnitForDisplay(healthMeasurement);
   const reviewUnitOptions = useMemo(() => getReviewUnitOptions(healthMeasurement), [healthMeasurement]);
   const interactiveIconColor = isDark ? "#fff" : primary;
+  const inlineAccentColor = isDark ? secondary : cta;
+  const softPanelBg = isDark ? hexToRgba(text, 0.05) : hexToRgba(primary, 0.08);
   const currentMonthStart = useMemo(() => {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
@@ -693,12 +714,12 @@ export default function MyDayHistoryScreen() {
         options={{
           headerShown: true,
           title: t("my_day.trends_history_title", { defaultValue: "History" }),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => (
             <TouchableOpacity activeOpacity={0.8} onPress={() => router.replace("/my-day")} style={styles.backButton}>
-              <MaterialIcons name="arrow-back" size={26} color="#fff" />
+              <MaterialIcons name="arrow-back" size={26} color={headerText} />
             </TouchableOpacity>
           ),
         }}
@@ -739,7 +760,7 @@ export default function MyDayHistoryScreen() {
           </View>
           <View style={[styles.separator, { backgroundColor: border }]} />
           <View style={styles.caloriesRow}>
-            <MaterialIcons name="local-fire-department" size={16} color={cta} />
+            <MaterialIcons name="local-fire-department" size={16} color={inlineAccentColor} />
             <Text style={[styles.caloriesText, { color: text }]}>{Math.round(selectedDay.calories)} kcal</Text>
           </View>
           <Text style={[styles.macroLine, { color: subText }]}>
@@ -780,11 +801,11 @@ export default function MyDayHistoryScreen() {
                 return (
                   <View key={meal.id} style={[styles.mealRow, { borderTopColor: border }]}>
                     <View style={styles.mealRowInner}>
-                      <View style={[styles.mealSourceSquare, { backgroundColor: `${primary}14`, borderColor: border }]}>
+                      <View style={[styles.mealSourceSquare, { backgroundColor: softPanelBg, borderColor: border }]}>
                         {sourceImage ? (
                           <Image source={{ uri: sourceImage }} style={styles.mealSourceImage} />
                         ) : (
-                          <MaterialIcons name={sourceIcon as any} size={25} color={cta} />
+                          <MaterialIcons name={sourceIcon as any} size={25} color={inlineAccentColor} />
                         )}
                       </View>
                       <View style={styles.mealCardContent}>
@@ -812,7 +833,7 @@ export default function MyDayHistoryScreen() {
                           ].map((macro) => (
                             <View key={`${meal.id}-${macro.key}`} style={styles.mealMacroSimple}>
                               {macro.icon ? (
-                                <MaterialIcons name={macro.icon} size={13} color={cta} style={styles.mealMacroIcon} />
+                                <MaterialIcons name={macro.icon} size={13} color={inlineAccentColor} style={styles.mealMacroIcon} />
                               ) : null}
                               <Text style={[styles.mealMacroLabel, { color: subText }]}>{macro.label}</Text>
                               <Text style={[styles.mealMacroValue, { color: text }]}>
@@ -832,16 +853,20 @@ export default function MyDayHistoryScreen() {
         </AppCard>
       </ScrollView>
       <View pointerEvents="box-none" style={styles.floatingActionsWrap}>
-        <TouchableOpacity
-          activeOpacity={0.9}
-          style={[styles.floatingAddMealButton, { backgroundColor: cta }]}
-          onPress={() => setAddMealFlowVisible(true)}
-        >
-          <MaterialIcons name="add" size={20} color="#fff" />
-          <Text style={styles.floatingActionText}>
-            {t("my_day.add_meal_cta", { defaultValue: "Add meal" })}
-          </Text>
-        </TouchableOpacity>
+        <View style={styles.floatingActions}>
+          <TouchableOpacity
+            activeOpacity={0.9}
+            style={[styles.floatingAddMealButton, { backgroundColor: cta }]}
+            onPress={() => setAddMealFlowVisible(true)}
+          >
+            <MaterialIcons name="restaurant-menu" size={18} color="#fff" />
+            <Text style={styles.floatingActionText} numberOfLines={1}>
+              {t("my_day.add_meal_floating_cta", {
+                defaultValue: t("my_day.add_meal_cta", { defaultValue: "Add meal" }),
+              })}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <MyDayMealEditorModal
@@ -910,7 +935,7 @@ export default function MyDayHistoryScreen() {
         })}
         nutritionLoading={mealEditNutritionMode === "auto" && mealEditAutoNutritionRefreshing}
         nutritionLoadingLabel={t("my_day.meal_nutrition_calculating", {
-          defaultValue: "Calculating nutrients. Please wait before saving.",
+          defaultValue: "Calculating nutrients. Please wait.",
         })}
         nutritionMode={mealEditNutritionMode}
         onChangeNutritionMode={handleMealEditNutritionModeChange}
@@ -1024,7 +1049,7 @@ export default function MyDayHistoryScreen() {
                     style={[
                       styles.calendarCell,
                       isSelected ? { backgroundColor: cta } : null,
-                      !isSelected && hasMeals ? { borderColor: cta } : { borderColor: "transparent" },
+                      !isSelected && hasMeals ? { borderColor: inlineAccentColor } : { borderColor: "transparent" },
                       isFuture ? { opacity: 0.3 } : null,
                     ]}
                     onPress={() => {
@@ -1174,6 +1199,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
+    rowGap: 4,
   },
   mealMacroSimple: {
     flexDirection: "row",
@@ -1397,17 +1423,26 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     right: 0,
-    bottom: 16,
-    paddingHorizontal: 14,
-    alignItems: "flex-end",
+    bottom: 24,
+    paddingHorizontal: 16,
+  },
+  floatingActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: 8,
   },
   floatingAddMealButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 5,
     borderRadius: 999,
-    paddingHorizontal: 18,
+    minWidth: 118,
+    maxWidth: 166,
+    minHeight: 48,
+    paddingHorizontal: 12,
     paddingVertical: 12,
+    justifyContent: "center",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.18,
@@ -1417,7 +1452,8 @@ const styles = StyleSheet.create({
   floatingActionText: {
     color: "#fff",
     fontWeight: "700",
-    fontSize: 15,
+    fontSize: 14,
+    flexShrink: 1,
   },
   calendarOverlay: {
     flex: 1,

@@ -32,6 +32,7 @@ import {
 import AppButton from "../../components/AppButton";
 import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
 import EggIcon from "../../components/EggIcon";
+import { formatEconomyUnits } from "../../lib/economy/format";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import i18n from "../../i18n";
 import { getAuth } from "firebase/auth";
@@ -57,6 +58,25 @@ interface Recipe {
 const AI_KITCHEN_SUGGESTIONS_KEY = "aiKitchenSuggestions";
 const AI_KITCHEN_SUGGESTION_HISTORY_KEY = "aiKitchenSuggestionHistory";
 const AI_KITCHEN_RECIPE_CACHE_KEY = "aiKitchenRecipeCache";
+
+function hexToRgba(color: string, alpha: number) {
+  if (!color.startsWith("#")) return color;
+  const normalized = color.slice(1);
+  const expanded =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((char) => char + char)
+          .join("")
+      : normalized.slice(0, 6);
+
+  const r = Number.parseInt(expanded.slice(0, 2), 16);
+  const g = Number.parseInt(expanded.slice(2, 4), 16);
+  const b = Number.parseInt(expanded.slice(4, 6), 16);
+
+  if ([r, g, b].some((value) => Number.isNaN(value))) return color;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 function validateRecipe(raw: any): Recipe {
   return {
@@ -105,7 +125,11 @@ export default function Index() {
   const allDietaryOptions = t("dietary", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
   const allAvoidOptions = t("avoid", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
   const router = useRouter();
-  const { bg, text, card, border, isDark } = useThemeColors();
+  const { bg, text, subText, card, border, primary, secondary, cta, isDark, headerBg, headerText } = useThemeColors();
+  const inlineAccentColor = isDark ? secondary : primary;
+  const progressTrackColor = isDark ? hexToRgba(text, 0.12) : "#e0e4ea";
+  const chipBg = isDark ? card : "#F6EBD3";
+  const inputBg = isDark ? card : "#fff";
   const auth = getAuth();
 
   // Step state
@@ -797,13 +821,13 @@ export default function Index() {
   const prevStep = () => setStep((s) => Math.max(1, s - 1));
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? bg : "#F5F5F5" }} edges={['left', 'right', 'bottom']}>
-      <StatusBar barStyle="light-content" backgroundColor="#293a53" />
+    <SafeAreaView style={{ flex: 1, backgroundColor: bg }} edges={['left', 'right', 'bottom']}>
+      <StatusBar barStyle="light-content" backgroundColor={headerBg} />
       <Stack.Screen
         options={{
           title: t("app_titles.ai_kitchen"),
-          headerStyle: { backgroundColor: "#293a53" },
-          headerTintColor: "#fff",
+          headerStyle: { backgroundColor: headerBg },
+          headerTintColor: headerText,
           headerTitleAlign: "center",
         }}
       />
@@ -815,7 +839,7 @@ export default function Index() {
             <View
               style={{
                 width: "92%",
-                backgroundColor: "#e0e4ea",
+                backgroundColor: progressTrackColor,
                 borderRadius: 100,
                 height: 12,
                 overflow: "hidden",
@@ -827,7 +851,7 @@ export default function Index() {
               <Animated.View
                 style={{
                   height: "100%",
-                  backgroundColor: "#E27D60",
+                  backgroundColor: cta,
                   borderRadius: 100,
                   width: `${(step / maxStep) * 100}%`,
                   position: "absolute",
@@ -860,8 +884,14 @@ export default function Index() {
         title={t("economy.insufficient_title", "Not enough Eggs")}
         body={
           insufficientModal.context === "full-recipe"
-            ? `You need 1 Egg to open the full recipe. Currently, you have ${insufficientModal.remaining} Eggs.`
-            : `You need 1 Egg to generate recipe suggestions. Currently, you have ${insufficientModal.remaining} Eggs.`
+            ? t("economy.insufficient_full_recipe_body_short", {
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need 1 egg to open the full recipe. You have {{remaining}}.",
+              })
+            : t("economy.insufficient_suggestions_body_short", {
+                remaining: formatEconomyUnits(t, insufficientModal.remaining),
+                defaultValue: "You need 1 egg to generate recipe suggestions. You have {{remaining}}.",
+              })
         }
         featuredOffer={featuredOffer}
         availableRewardsCount={availableRewardsCount}
@@ -893,7 +923,7 @@ export default function Index() {
             <Text style={{ fontSize: 20, color: text, marginBottom: 8 }}>
               {t("wizard.cooking_message")}
             </Text>
-            <ActivityIndicator size="large" color="#E27D60" />
+            <ActivityIndicator size="large" color={inlineAccentColor} />
           </View>
         ) : suggestions.length > 0 ? (
           <View style={{ flex: 1 }}>
@@ -902,7 +932,7 @@ export default function Index() {
               style={{
                 fontSize: 20,
                 fontWeight: "700",
-                color: isDark ? "#f5f5f5" : "#293a53",
+                color: text,
                 marginTop: 20,
                 marginBottom: 8,
               }}
@@ -912,7 +942,7 @@ export default function Index() {
             <Text
               style={{
                 fontSize: 15,
-                color: isDark ? "#ccc" : "#666",
+                color: subText,
                 marginBottom: 10,
               }}
             >
@@ -930,7 +960,7 @@ export default function Index() {
                 <Text
                   style={{
                     fontSize: 13,
-                    color: isDark ? "#bbb" : "#666",
+                    color: subText,
                   }}
                 >
                   {t("wizard.open_recipe_cookie_hint", {
@@ -971,12 +1001,12 @@ export default function Index() {
                 <TouchableOpacity
                   key={sugg.id || idx}
                   style={{
-                    backgroundColor: "#fff",
+                    backgroundColor: card,
                     borderRadius: 14,
                     padding: 16,
                     marginBottom: 14,
                     borderWidth: 1,
-                    borderColor: "#e0e0e0",
+                    borderColor: border,
                     shadowColor: "#000",
                     shadowOpacity: 0.05,
                     shadowRadius: 2,
@@ -984,7 +1014,7 @@ export default function Index() {
                   }}
                   onPress={() => fetchFullRecipe(sugg)}
                 >
-                  <Text style={{ fontSize: 18, fontWeight: "700", color: "#293a53" }}>
+                  <Text style={{ fontSize: 18, fontWeight: "700", color: text }}>
                     {sugg.title}
                   </Text>
                   <View
@@ -997,10 +1027,10 @@ export default function Index() {
                       marginTop: 6,
                     }}
                   >
-                    <Text style={{ color: "#666" }}>
+                    <Text style={{ color: subText }}>
                       ⏱ {sugg.cookingTime || sugg.time || "?"} min
                     </Text>
-                    <Text style={{ color: "#666" }}>{diffLabel}</Text>
+                    <Text style={{ color: subText }}>{diffLabel}</Text>
                     {typeof suggestionCalories === "number" &&
                     Number.isFinite(suggestionCalories) ? (
                       <View
@@ -1012,15 +1042,15 @@ export default function Index() {
                         <MaterialCommunityIcons
                           name="fire"
                           size={15}
-                          color="#E27D60"
+                          color={inlineAccentColor}
                           style={{ marginRight: 4 }}
                         />
-                        <Text style={{ color: "#666" }}>{`${Math.round(suggestionCalories)} kcal`}</Text>
+                        <Text style={{ color: subText }}>{`${Math.round(suggestionCalories)} kcal`}</Text>
                       </View>
                     ) : null}
                   </View>
                   {sugg.description && (
-                    <Text style={{ color: "#222", marginTop: 8 }}>
+                    <Text style={{ color: text, marginTop: 8 }}>
                       {sugg.description}
                     </Text>
                   )}
@@ -1084,7 +1114,7 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
@@ -1097,14 +1127,13 @@ export default function Index() {
                         style={[
                           styles.optionChip,
                           {
-                            backgroundColor: mealType === m.labelKey
-                              ? (isDark ? "#E27D60" : "#293a53")
-                              : "#E0E0E0"
+                            backgroundColor: mealType === m.labelKey ? cta : chipBg,
+                            borderColor: mealType === m.labelKey ? cta : border,
                           },
                         ]}
                         onPress={() => setMealType(m.labelKey)}
                       >
-                        <Text style={{ color: mealType === m.labelKey ? "#fff" : "#000", fontSize: 15 }}>
+                        <Text style={{ color: mealType === m.labelKey ? "#fff" : text, fontSize: 15 }}>
                           {m.icon} {t(m.labelKey)}
                         </Text>
                       </TouchableOpacity>
@@ -1124,16 +1153,16 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
                     {t("wizard.step1_note_question")}
                   </Animated.Text>
                   <TextInput
-                    style={[styles.input, { fontSize: 16 }]}
+                    style={[styles.input, { fontSize: 15, color: text, backgroundColor: inputBg, borderColor: border }]}
                     placeholder={t("wizard.step1_note_placeholder", "e.g. I want a burger today")}
-                    placeholderTextColor="#888"
+                    placeholderTextColor={subText}
                     value={note}
                     onChangeText={setNote}
                     multiline
@@ -1178,7 +1207,7 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
@@ -1188,7 +1217,7 @@ export default function Index() {
                     <TouchableOpacity
                       style={[
                         styles.stepperButton,
-                        { backgroundColor: isDark ? "#E27D60" : "#293a53" }
+                        { backgroundColor: cta }
                       ]}
                       onPress={() => setPeople(Math.max(1, people - 1))}
                     >
@@ -1197,7 +1226,7 @@ export default function Index() {
                     <Text
                       style={[
                         styles.stepperValue,
-                        { color: isDark ? "#f5f5f5" : "#293a53" }
+                        { color: text }
                       ]}
                     >
                       {people}
@@ -1205,7 +1234,7 @@ export default function Index() {
                     <TouchableOpacity
                       style={[
                         styles.stepperButton,
-                        { backgroundColor: isDark ? "#E27D60" : "#293a53" }
+                        { backgroundColor: cta }
                       ]}
                       onPress={() => setPeople(Math.min(999, people + 1))}
                     >
@@ -1228,7 +1257,7 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
@@ -1245,15 +1274,13 @@ export default function Index() {
                         style={[
                           styles.optionChip,
                           {
-                            backgroundColor:
-                              time === tOpt.key
-                                ? (isDark ? "#E27D60" : "#293a53")
-                                : "#E0E0E0"
+                            backgroundColor: time === tOpt.key ? cta : chipBg,
+                            borderColor: time === tOpt.key ? cta : border,
                           },
                         ]}
                         onPress={() => setTime(tOpt.key as any)}
                       >
-                        <Text style={{ color: time === tOpt.key ? "#fff" : "#000", fontSize: 15 }}>
+                        <Text style={{ color: time === tOpt.key ? "#fff" : text, fontSize: 15 }}>
                           {tOpt.label}
                         </Text>
                       </TouchableOpacity>
@@ -1299,7 +1326,7 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
@@ -1314,14 +1341,13 @@ export default function Index() {
                           style={[
                             styles.optionChip,
                             {
-                              backgroundColor: dietary.includes(key)
-                                ? (isDark ? "#E27D60" : "#293a53")
-                                : "#E0E0E0"
+                              backgroundColor: dietary.includes(key) ? cta : chipBg,
+                              borderColor: dietary.includes(key) ? cta : border,
                             },
                           ]}
                           onPress={() => toggleDietary(key)}
                         >
-                          <Text style={{ color: dietary.includes(key) ? "#fff" : "#000", fontSize: 15 }}>
+                          <Text style={{ color: dietary.includes(key) ? "#fff" : text, fontSize: 15 }}>
                             {option.icon} {option.label}
                           </Text>
                         </TouchableOpacity>
@@ -1343,7 +1369,7 @@ export default function Index() {
                           },
                         ],
                         fontSize: 18,
-                        color: isDark ? "#f5f5f5" : "#293a53",
+                        color: text,
                       },
                     ]}
                   >
@@ -1359,14 +1385,13 @@ export default function Index() {
                             style={[
                               styles.optionChip,
                               {
-                                backgroundColor: avoid.includes(key)
-                                  ? (isDark ? "#E27D60" : "#293a53")
-                                  : "#E0E0E0"
+                                backgroundColor: avoid.includes(key) ? cta : chipBg,
+                                borderColor: avoid.includes(key) ? cta : border,
                               },
                             ]}
                             onPress={() => toggleAvoid(key)}
                           >
-                            <Text style={{ color: avoid.includes(key) ? "#fff" : "#000", fontSize: 15 }}>
+                            <Text style={{ color: avoid.includes(key) ? "#fff" : text, fontSize: 15 }}>
                               {option.icon} {option.label}
                             </Text>
                           </TouchableOpacity>
@@ -1379,15 +1404,15 @@ export default function Index() {
                           style={{
                             marginBottom: 6,
                             fontSize: 15,
-                            color: isDark ? "#f5f5f5" : "#293a53",
+                            color: text,
                           }}
                         >
                           {t("profile.avoid_other_label")}
                         </Text>
                         <TextInput
-                          style={[styles.input, { fontSize: 16, marginTop: 0 }]}
+                          style={[styles.input, { fontSize: 15, marginTop: 0, color: text, backgroundColor: inputBg, borderColor: border }]}
                           placeholder={t("profile.avoid_other_placeholder")}
-                          placeholderTextColor="#888"
+                          placeholderTextColor={subText}
                           value={avoidOther}
                           onChangeText={(text) => setAvoidOther(sanitizeAvoidOther(text))}
                           multiline
@@ -1432,20 +1457,20 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "600",
     marginBottom: 8,
-    color: "#293a53",
+    color: "#8F5E43",
   },
   questionLarge: {
     fontSize: 26,
     fontWeight: "700",
     marginBottom: 10,
-    color: "#293a53",
+    color: "#8F5E43",
   },
   // Consistent, smaller top margin for all step/suggestion titles
   questionSmall: {
     fontSize: 18,
     fontWeight: "600",
     marginBottom: 8,
-    color: "#293a53",
+    color: "#8F5E43",
     marginTop: 6,
   },
   input: {
@@ -1453,7 +1478,7 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     borderRadius: 12,
     padding: 12,
-    fontSize: 16,
+    fontSize: 15,
     minHeight: 60,
     backgroundColor: "#fff",
     marginBottom: 16,
@@ -1465,7 +1490,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   stepperButton: {
-    backgroundColor: "#293a53",
+    backgroundColor: "#8F5E43",
     padding: 8,
     borderRadius: 8,
   },
@@ -1473,7 +1498,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     marginHorizontal: 16,
     fontWeight: "600",
-    color: "#293a53",
+    color: "#8F5E43",
   },
   optionsRow: {
     flexDirection: "row",
@@ -1482,6 +1507,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   optionChip: {
+    borderWidth: 1,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 20,
@@ -1569,7 +1595,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   buyBtn: {
-  backgroundColor: "#E27D60",
+  backgroundColor: "#8A4B16",
   paddingHorizontal: 18,
   paddingVertical: 12,
   borderRadius: 14,

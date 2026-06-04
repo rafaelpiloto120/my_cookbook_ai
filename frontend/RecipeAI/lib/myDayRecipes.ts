@@ -16,9 +16,12 @@ export type SavedRecipe = {
   image?: string | null;
   servings?: number | null;
   servingInfo?: RecipeServingInfo | null;
+  sourceUrl?: string | null;
+  sourceMetadata?: RecipeSourceMetadata | null;
   difficulty?: string | null;
   tags?: string[];
   ingredients?: string[];
+  notes?: string | null;
   isDeleted?: boolean;
   nutritionInfo?: RecipeNutritionInfo | null;
   nutrition?: RecipeNutritionEstimate | null;
@@ -31,6 +34,14 @@ export type RecipeServingInfo = {
   recipeType?: string | null;
   source: "imported" | "ai_inferred" | "manual";
   updatedAt?: string | null;
+};
+
+export type RecipeSourceMetadata = {
+  sourceUrl?: string | null;
+  source?: "url" | "instagram_reel" | string | null;
+  importedServings?: number | null;
+  importedNutritionInfo?: RecipeNutritionInfo | null;
+  importedAt?: string | null;
 };
 
 type ParsedRecipeIngredient = {
@@ -987,13 +998,61 @@ function parseRecipeIngredientLineWithStatus(line: string): ParsedRecipeIngredie
   };
 }
 
+function normalizePositiveNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function normalizeRecipeSourceMetadata(input: unknown): RecipeSourceMetadata | null {
+  if (!input || typeof input !== "object") return null;
+  const raw = input as Record<string, unknown>;
+  const importedServings = normalizePositiveNumber(raw.importedServings);
+  const importedNutritionInfo = normalizeRecipeNutritionInfo(raw.importedNutritionInfo);
+  const sourceUrl = typeof raw.sourceUrl === "string" && raw.sourceUrl.trim() ? raw.sourceUrl.trim() : null;
+  const source = typeof raw.source === "string" && raw.source.trim() ? raw.source.trim() : null;
+  const importedAt = typeof raw.importedAt === "string" && raw.importedAt.trim() ? raw.importedAt.trim() : null;
+
+  if (!importedServings && !importedNutritionInfo && !sourceUrl && !source) return null;
+
+  return {
+    sourceUrl,
+    source,
+    importedServings,
+    importedNutritionInfo,
+    importedAt,
+  };
+}
+
+export function getRecipeSourceMetadata(recipe: unknown): RecipeSourceMetadata | null {
+  if (!recipe || typeof recipe !== "object") return null;
+  const raw = recipe as Record<string, unknown>;
+  const explicit = normalizeRecipeSourceMetadata(raw.sourceMetadata);
+  if (explicit) return explicit;
+
+  const sourceUrl = typeof raw.sourceUrl === "string" && raw.sourceUrl.trim() ? raw.sourceUrl.trim() : null;
+  if (!sourceUrl) return null;
+
+  return {
+    sourceUrl,
+    source: /instagram\.com\/reel\//i.test(sourceUrl) ? "instagram_reel" : "url",
+    importedServings: normalizePositiveNumber(raw.servings),
+    importedNutritionInfo: normalizeRecipeNutritionInfo(raw.nutritionInfo ?? raw.nutrition),
+    importedAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt.trim() : null,
+  };
+}
+
+function getRecipeImportedServings(recipe: SavedRecipe): number | null {
+  return normalizePositiveNumber(getRecipeSourceMetadata(recipe)?.importedServings);
+}
+
 function getRecipeServingCount(recipe: SavedRecipe) {
-  if (typeof recipe.servingInfo?.servings === "number" && Number.isFinite(recipe.servingInfo.servings) && recipe.servingInfo.servings > 0) {
-    return recipe.servingInfo.servings;
-  }
-  return typeof recipe.servings === "number" && Number.isFinite(recipe.servings) && recipe.servings > 0
-    ? recipe.servings
-    : null;
+  const explicitServings = normalizePositiveNumber(recipe.servings);
+  if (explicitServings) return explicitServings;
+
+  const importedServings = getRecipeImportedServings(recipe);
+  if (importedServings) return importedServings;
+
+  return normalizePositiveNumber(recipe.servingInfo?.servings);
 }
 
 function getRecipeIngredientSourceLines(recipe: SavedRecipe) {
@@ -1344,6 +1403,11 @@ export async function loadSavedRecipes(): Promise<SavedRecipe[]> {
             : typeof recipe.imageUrl === "string" && recipe.imageUrl.trim()
               ? recipe.imageUrl.trim()
               : null,
+        sourceUrl:
+          typeof recipe.sourceUrl === "string" && recipe.sourceUrl.trim()
+            ? recipe.sourceUrl.trim()
+            : null,
+        sourceMetadata: getRecipeSourceMetadata(recipe),
         servings:
           typeof recipe.servings === "number" && Number.isFinite(recipe.servings)
             ? recipe.servings
@@ -1435,14 +1499,26 @@ export async function loadSavedRecipes(): Promise<SavedRecipe[]> {
 }
 
 export function estimateRecipeNutrition(recipe: SavedRecipe): RecipeNutritionEstimate {
-  if (recipe.nutritionInfo) {
+  const sourceMetadata = getRecipeSourceMetadata(recipe);
+  const savedNutritionInfo =
+    recipe.nutritionInfo ?? normalizeRecipeNutritionInfo(sourceMetadata?.importedNutritionInfo);
+  if (savedNutritionInfo) {
+    const servings = getRecipeServingCount(recipe) ?? 1;
     return {
-      caloriesPerServing: recipe.nutritionInfo.perServing.calories || 0,
-      proteinPerServing: recipe.nutritionInfo.perServing.protein || 0,
-      carbsPerServing: recipe.nutritionInfo.perServing.carbs || 0,
-      fatPerServing: recipe.nutritionInfo.perServing.fat || 0,
-      servings:
-        typeof recipe.servings === "number" && recipe.servings > 0 ? recipe.servings : 1,
+      caloriesPerServing: savedNutritionInfo.perServing.calories || 0,
+      proteinPerServing: savedNutritionInfo.perServing.protein || 0,
+      carbsPerServing: savedNutritionInfo.perServing.carbs || 0,
+      fatPerServing: savedNutritionInfo.perServing.fat || 0,
+      servings,
+      servingInfo:
+        recipe.servingInfo ??
+        (getRecipeImportedServings(recipe)
+          ? {
+              servings,
+              source: "imported" as const,
+              updatedAt: sourceMetadata?.importedAt ?? null,
+            }
+          : null),
     };
   }
 
@@ -1496,14 +1572,26 @@ export async function resolveRecipeNutritionEstimate(
 }> {
   const servings = getRecipeServingCount(recipe) ?? 1;
   const forceRepresentationRefresh = options?.forceRepresentationRefresh === true;
+  const sourceMetadata = getRecipeSourceMetadata(recipe);
+  const savedNutritionInfo =
+    recipe.nutritionInfo ?? normalizeRecipeNutritionInfo(sourceMetadata?.importedNutritionInfo);
   const savedNutrition =
-    recipe.nutritionInfo
+    savedNutritionInfo
       ? {
-          caloriesPerServing: recipe.nutritionInfo.perServing.calories || 0,
-          proteinPerServing: recipe.nutritionInfo.perServing.protein || 0,
-          carbsPerServing: recipe.nutritionInfo.perServing.carbs || 0,
-          fatPerServing: recipe.nutritionInfo.perServing.fat || 0,
+          caloriesPerServing: savedNutritionInfo.perServing.calories || 0,
+          proteinPerServing: savedNutritionInfo.perServing.protein || 0,
+          carbsPerServing: savedNutritionInfo.perServing.carbs || 0,
+          fatPerServing: savedNutritionInfo.perServing.fat || 0,
           servings,
+          servingInfo:
+            recipe.servingInfo ??
+            (getRecipeImportedServings(recipe)
+              ? {
+                  servings,
+                  source: "imported" as const,
+                  updatedAt: sourceMetadata?.importedAt ?? null,
+                }
+              : null),
         }
       : recipe.nutrition ?? null;
 

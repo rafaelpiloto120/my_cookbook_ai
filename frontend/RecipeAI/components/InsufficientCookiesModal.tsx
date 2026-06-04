@@ -3,6 +3,9 @@ import { Modal, Pressable, StyleSheet, Text, TouchableOpacity, View } from "reac
 
 import EggIcon from "./EggIcon";
 import type { EconomyCatalogOffer } from "../lib/economy/client";
+import { useThemeColors } from "../context/ThemeContext";
+import { useTranslation } from "react-i18next";
+import { formatEconomyUnits } from "../lib/economy/format";
 
 type Props = {
   visible: boolean;
@@ -29,7 +32,22 @@ export default function InsufficientCookiesModal({
   onBuyOffer,
   onOpenRewards,
 }: Props) {
+  const { t } = useTranslation();
   const hasRewards = availableRewardsCount > 0 && typeof onOpenRewards === "function";
+  const {
+    card,
+    border,
+    text,
+    mutedText,
+    sectionTitle,
+    surfaceAlt,
+    subtleBorder,
+    softAccentBg,
+    accentText,
+    cta,
+    onCta,
+    bg,
+  } = useThemeColors();
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -39,8 +57,8 @@ export default function InsufficientCookiesModal({
           style={[
             styles.modalCard,
             {
-              backgroundColor: isDark ? "#1f2430" : "#fff",
-              borderColor: isDark ? "#ffffff22" : "#00000012",
+              backgroundColor: card,
+              borderColor: border,
             },
           ]}
         >
@@ -49,11 +67,11 @@ export default function InsufficientCookiesModal({
             style={styles.modalCloseBtn}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Text style={[styles.modalCloseText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>✕</Text>
+            <Text style={[styles.modalCloseText, { color: sectionTitle }]}>✕</Text>
           </TouchableOpacity>
 
-          <Text style={[styles.modalTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>{title}</Text>
-          <Text style={[styles.modalBody, { color: isDark ? "#ddd" : "#444" }]}>{body}</Text>
+          <Text style={[styles.modalTitle, { color: sectionTitle }]}>{title}</Text>
+          <Text style={[styles.modalBody, { color: mutedText }]}>{body}</Text>
 
           {featuredOffer ? (
             <TouchableOpacity
@@ -61,8 +79,8 @@ export default function InsufficientCookiesModal({
               style={[
                 styles.offerCard,
                 {
-                  backgroundColor: isDark ? "#171b24" : "#fff",
-                  borderColor: isDark ? "#ffffff22" : "#00000012",
+                  backgroundColor: surfaceAlt,
+                  borderColor: subtleBorder,
                 },
               ]}
               onPress={onBuyOffer || onOpenStore}
@@ -70,11 +88,11 @@ export default function InsufficientCookiesModal({
               <View style={{ flex: 1 }}>
                 <View style={styles.offerTitleRow}>
                   <EggIcon size={24} />
-                  <Text style={[styles.offerTitle, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
-                    {featuredOffer.cookies} Eggs
+                  <Text style={[styles.offerTitle, { color: sectionTitle }]}>
+                    {formatEconomyUnits(t, featuredOffer.cookies)}
                   </Text>
                 </View>
-                <Text style={[styles.offerSubtitle, { color: isDark ? "#ddd" : "#666" }]}>
+                <Text style={[styles.offerSubtitle, { color: mutedText }]}>
                   {featuredOffer.subtitle
                     ? `${featuredOffer.subtitle} | ${featuredOffer.price.toFixed(2)} ${String(
                         featuredOffer.currency || "USD"
@@ -90,10 +108,10 @@ export default function InsufficientCookiesModal({
                         key={badge}
                         style={[
                           styles.badgeChip,
-                          { backgroundColor: isDark ? "#ffffff14" : "#0000000d" },
+                          { backgroundColor: softAccentBg },
                         ]}
                       >
-                        <Text style={[styles.badgeText, { color: isDark ? "#f5f5f5" : "#293a53" }]}>
+                        <Text style={[styles.badgeText, { color: accentText }]}>
                           {badge}
                         </Text>
                       </View>
@@ -102,29 +120,39 @@ export default function InsufficientCookiesModal({
                 ) : null}
               </View>
               <View style={styles.offerRight}>
-                <Text style={styles.offerCta}>Buy</Text>
+                <Text style={[styles.offerCta, { color: accentText }]}>Buy</Text>
               </View>
             </TouchableOpacity>
           ) : null}
 
           {hasRewards ? (
-            <Text style={[styles.rewardsText, styles.rewardsRow, { color: isDark ? "#ddd" : "#555" }]}>
+            <Text style={[styles.rewardsText, styles.rewardsRow, { color: mutedText }]}>
               {availableRewardsCount === 1
-                ? "You still have 1 way to earn free Eggs."
-                : `You still have ${availableRewardsCount} ways to earn free Eggs.`}
+                ? t("economy.rewards_remaining_one", {
+                    count: availableRewardsCount,
+                    defaultValue: "You still have {{count}} way to earn free rewards.",
+                  })
+                : t("economy.rewards_remaining_other", {
+                    count: availableRewardsCount,
+                    defaultValue: "You still have {{count}} ways to earn free rewards.",
+                  })}
               {" "}
-              <Text style={styles.rewardsLink} onPress={onOpenRewards}>
-                See rewards
+              <Text style={[styles.rewardsLink, { color: accentText }]} onPress={onOpenRewards}>
+                {t("economy.see_rewards", { defaultValue: "See rewards" })}
               </Text>
             </Text>
           ) : null}
 
           <View style={styles.actions}>
-            <TouchableOpacity activeOpacity={0.85} style={styles.secondaryButton} onPress={onClose}>
-              <Text style={styles.secondaryButtonText}>Not now</Text>
+            <TouchableOpacity activeOpacity={0.85} style={[styles.secondaryButton, { backgroundColor: bg, borderColor: border }]} onPress={onClose}>
+              <Text style={[styles.secondaryButtonText, { color: text }]}>
+                {t("common.not_now", { defaultValue: "Not now" })}
+              </Text>
             </TouchableOpacity>
-            <TouchableOpacity activeOpacity={0.85} style={styles.primaryButton} onPress={onOpenStore}>
-              <Text style={styles.primaryButtonText}>All plans</Text>
+            <TouchableOpacity activeOpacity={0.85} style={[styles.primaryButton, { backgroundColor: cta }]} onPress={onOpenStore}>
+              <Text style={[styles.primaryButtonText, { color: onCta }]}>
+                {t("economy.offers_button", { defaultValue: "All offers" })}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -199,7 +227,6 @@ const styles = StyleSheet.create({
     marginLeft: 14,
   },
   offerCta: {
-    color: "#E27D60",
     fontWeight: "800",
     fontSize: 14,
   },
@@ -226,7 +253,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   rewardsLink: {
-    color: "#E27D60",
     fontSize: 13,
     fontWeight: "800",
   },
@@ -238,23 +264,18 @@ const styles = StyleSheet.create({
   secondaryButton: {
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#d6d6d6",
     paddingHorizontal: 16,
     paddingVertical: 11,
-    backgroundColor: "#fff",
   },
   secondaryButtonText: {
-    color: "#293a53",
     fontWeight: "700",
   },
   primaryButton: {
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 11,
-    backgroundColor: "#E27D60",
   },
   primaryButtonText: {
-    color: "#fff",
     fontWeight: "800",
   },
 });

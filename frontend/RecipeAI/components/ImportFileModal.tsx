@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { MaterialIcons } from "@expo/vector-icons";
 import { useTranslation } from "react-i18next";
+import { useThemeColors } from "../context/ThemeContext";
 
 type Props = {
   visible: boolean;
@@ -38,6 +39,7 @@ export default function ImportFileModal({
   borderColor,
 }: Props) {
   const { t } = useTranslation();
+  const { accentText, cta, onCta, danger } = useThemeColors();
   const formats = [
     t("recipes.file_import_format_recipe_box", {
       defaultValue: "My Recipe Box (.rtk)",
@@ -82,28 +84,28 @@ export default function ImportFileModal({
           <View style={styles.formatList}>
             {formats.map((format) => (
               <View key={format} style={styles.formatRow}>
-                <Text style={styles.bullet}>•</Text>
+                <Text style={[styles.bullet, { color: accentText }]}>•</Text>
                 <Text style={[styles.formatText, { color: textColor }]}>{format}</Text>
               </View>
             ))}
           </View>
 
           <TouchableOpacity onPress={onHelpPress} disabled={loading}>
-            <Text style={[styles.helpLink, { color: "#E27D60" }]}>
+            <Text style={[styles.helpLink, { color: accentText }]}>
               {t("recipes.file_import_help_link", {
                 defaultValue: "How to export from supported apps",
               })}
             </Text>
           </TouchableOpacity>
 
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? <Text style={[styles.error, { color: danger }]}>{error}</Text> : null}
 
           <TouchableOpacity
-            style={[styles.button, loading && styles.buttonDisabled]}
+            style={[styles.button, { backgroundColor: cta }, loading && styles.buttonDisabled]}
             onPress={onImport}
             disabled={loading}
           >
-            <Text style={styles.buttonText}>
+            <Text style={[styles.buttonText, { color: onCta }]}>
               {loading
                 ? loadingText ||
                   t("recipes.importing", { defaultValue: "Importing..." })
@@ -159,7 +161,6 @@ const styles = StyleSheet.create({
   bullet: {
     marginRight: 8,
     fontSize: 16,
-    color: "#E27D60",
     lineHeight: 20,
   },
   formatText: {
@@ -173,12 +174,10 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   error: {
-    color: "#E27D60",
     fontSize: 13,
     marginBottom: 12,
   },
   button: {
-    backgroundColor: "#E27D60",
     borderRadius: 10,
     paddingVertical: 12,
     alignItems: "center",
@@ -187,7 +186,6 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   buttonText: {
-    color: "#fff",
     fontWeight: "700",
     fontSize: 15,
   },

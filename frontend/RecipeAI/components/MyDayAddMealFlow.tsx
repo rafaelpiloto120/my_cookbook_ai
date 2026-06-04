@@ -56,6 +56,8 @@ import {
 import { getRecipeCaloriesPerServing } from "../lib/recipes/nutrition";
 import { normalizeRecipeDifficulty } from "../lib/recipes/difficulty";
 import { useSyncEngine } from "../lib/sync/SyncEngine";
+import { formatEconomyUnits } from "../lib/economy/format";
+import { refreshLocalReminderSchedule } from "../lib/notifications/localNotifications";
 import { getDeviceId } from "../utils/deviceId";
 
 type Mode = "photo" | "text" | "recipe";
@@ -385,13 +387,14 @@ export default function MyDayAddMealFlow({
   const { t, i18n } = useTranslation();
   const router = useRouter();
   const syncEngine = useSyncEngine();
-  const { bg, text, subText, border, card, primary, secondary, cta, isDark, modalBackdrop } = useThemeColors();
+  const { bg, text, subText, border, card, primary, secondary, cta, isDark, modalBackdrop, accentText } = useThemeColors();
   const actionTone = isDark ? "#FFFFFF" : primary;
   const targetMealDate = targetDate ?? new Date();
 
   const [optionsVisible, setOptionsVisible] = useState(false);
   const [textLogVisible, setTextLogVisible] = useState(false);
   const [photoSourceVisible, setPhotoSourceVisible] = useState(false);
+  const [photoSourceWarning, setPhotoSourceWarning] = useState<string | null>(null);
   const [photoReviewLoading, setPhotoReviewLoading] = useState(false);
   const [recipeLogVisible, setRecipeLogVisible] = useState(false);
   const [mealInput, setMealInput] = useState("");
@@ -484,11 +487,20 @@ export default function MyDayAddMealFlow({
     setOptionsVisible(false);
     setTextLogVisible(false);
     setPhotoSourceVisible(false);
+    setPhotoSourceWarning(null);
     setPhotoReviewLoading(false);
     setRecipeLogVisible(false);
     setMealInput("");
     resetReview();
     onClose();
+  };
+
+  const returnToOptions = () => {
+    setTextLogVisible(false);
+    setPhotoSourceVisible(false);
+    setRecipeLogVisible(false);
+    setPhotoSourceWarning(null);
+    setOptionsVisible(true);
   };
 
   const beginReviewSave = () => {
@@ -627,7 +639,7 @@ export default function MyDayAddMealFlow({
         showConnectionRequiredAlert();
         return false;
       }
-      Alert.alert(t("common.error", "Error"), t("economy.try_again", "Couldn't verify your Egg balance. Please try again."));
+      Alert.alert(t("common.error", "Error"), t("economy.try_again", "Couldn't verify your balance. Please try again."));
       return false;
     }
   };
@@ -668,6 +680,7 @@ export default function MyDayAddMealFlow({
   }
 
   const openPhotoLogger = () => {
+    setPhotoSourceWarning(null);
     setOptionsVisible(false);
     setPhotoSourceVisible(true);
   };
@@ -712,9 +725,10 @@ export default function MyDayAddMealFlow({
     const persistedPhotoUri = await persistMealPhotoPreview(compressedPhotoUri);
     const analysis = await analyzeMealPhoto(persistedPhotoUri);
     if (!analysis?.isFood || !Array.isArray(analysis.ingredients) || analysis.ingredients.length === 0) {
-      Alert.alert(
-        t("my_day.photo_not_food_title", { defaultValue: "This doesn’t look like a meal" }),
-        t("my_day.photo_not_food_body", { defaultValue: "Try another photo with a clearer meal or plated food." })
+      setPhotoSourceWarning(
+        `${t("my_day.photo_not_food_title", { defaultValue: "This doesn’t look like a meal" })}. ${t("my_day.photo_not_food_body", {
+          defaultValue: "Try another photo with a clearer meal or plated food.",
+        })}`
       );
       setPhotoSourceVisible(true);
       return;
@@ -750,6 +764,7 @@ export default function MyDayAddMealFlow({
     setPhotoPickerInFlight(true);
     try {
       console.log("[MyDayAddMealFlow] photo source selected", { source });
+      setPhotoSourceWarning(null);
       setPhotoReviewLoading(false);
       resetReview();
       let cameraPermissionWasRequested = false;
@@ -970,6 +985,9 @@ export default function MyDayAddMealFlow({
 
   const finishSaved = async () => {
     await onSaved();
+    refreshLocalReminderSchedule().catch((err) => {
+      console.warn("[MyDayAddMealFlow] notification schedule refresh failed", err);
+    });
     closeAll();
   };
 
@@ -1200,7 +1218,18 @@ export default function MyDayAddMealFlow({
         <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={closeAll}>
           <View style={[styles.modalCard, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
             <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.describe_meal", { defaultValue: "Describe meal" })}</Text>
+              <View style={styles.sectionHeaderTitleGroup}>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={returnToOptions}
+                  style={styles.sectionBackButton}
+                  accessibilityRole="button"
+                  accessibilityLabel={t("common.back", { defaultValue: "Back" })}
+                >
+                  <MaterialIcons name="arrow-back" size={22} color={subText} />
+                </TouchableOpacity>
+                <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.describe_meal", { defaultValue: "Describe meal" })}</Text>
+              </View>
               <TouchableOpacity activeOpacity={0.8} onPress={closeAll}>
                 <MaterialIcons name="close" size={22} color={subText} />
               </TouchableOpacity>
@@ -1252,11 +1281,28 @@ export default function MyDayAddMealFlow({
         <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={closeAll}>
           <View style={[styles.photoSourceCard, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
             <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.log_photo", { defaultValue: "Log with photo" })}</Text>
+              <View style={styles.sectionHeaderTitleGroup}>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={returnToOptions}
+                  style={styles.sectionBackButton}
+                  accessibilityRole="button"
+                  accessibilityLabel={t("common.back", { defaultValue: "Back" })}
+                >
+                  <MaterialIcons name="arrow-back" size={22} color={subText} />
+                </TouchableOpacity>
+                <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.log_photo", { defaultValue: "Log with photo" })}</Text>
+              </View>
               <TouchableOpacity activeOpacity={0.8} onPress={closeAll}>
                 <MaterialIcons name="close" size={22} color={subText} />
               </TouchableOpacity>
             </View>
+            {photoSourceWarning ? (
+              <View style={[styles.photoSourceWarning, { backgroundColor: `${cta}14`, borderColor: `${cta}55` }]}>
+                <MaterialIcons name="warning-amber" size={18} color={cta} />
+                <Text style={[styles.photoSourceWarningText, { color: text }]}>{photoSourceWarning}</Text>
+              </View>
+            ) : null}
             <View style={styles.photoSourceActions}>
               <TouchableOpacity
                 activeOpacity={0.85}
@@ -1280,8 +1326,8 @@ export default function MyDayAddMealFlow({
             {shouldHidePremiumPricing(freePremiumActionsRemaining) ? null : (
               <Text style={[styles.modalCostHint, styles.photoSourceCostHint, { color: subText }]}>
                 {t("economy.log_photo_cost_hint", {
-                  defaultValue: "If we’re able to successfully add a meal, this uses 1 Egg. You currently have {{count}} Eggs.",
-                  count: cookieBalance ?? 0,
+                  defaultValue: "If we’re able to successfully add a meal, this uses 1 egg. You currently have {{balance}}.",
+                  balance: formatEconomyUnits(t, cookieBalance ?? 0),
                 })}
               </Text>
             )}
@@ -1348,7 +1394,18 @@ export default function MyDayAddMealFlow({
         <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={closeAll}>
           <View style={[styles.modalCard, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
             <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.from_recipe", { defaultValue: "From recipe" })}</Text>
+              <View style={styles.sectionHeaderTitleGroup}>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={returnToOptions}
+                  style={styles.sectionBackButton}
+                  accessibilityRole="button"
+                  accessibilityLabel={t("common.back", { defaultValue: "Back" })}
+                >
+                  <MaterialIcons name="arrow-back" size={22} color={subText} />
+                </TouchableOpacity>
+                <Text style={[styles.sectionTitle, { color: text }]}>{t("my_day.from_recipe", { defaultValue: "From recipe" })}</Text>
+              </View>
               <TouchableOpacity activeOpacity={0.8} onPress={closeAll}>
                 <MaterialIcons name="close" size={22} color={subText} />
               </TouchableOpacity>
@@ -1414,7 +1471,7 @@ export default function MyDayAddMealFlow({
                             {hasSavedNutrition ? (
                               <View style={styles.recipeMacroRow}>
                                 <View style={styles.recipeMacroSimple}>
-                                  <MaterialIcons name="local-fire-department" size={13} color={cta} style={styles.mealMacroIcon} />
+                                  <MaterialIcons name="local-fire-department" size={13} color={accentText} style={styles.mealMacroIcon} />
                                   <Text style={[styles.mealMacroSimpleLabel, { color: subText }]}>Kcal</Text>
                                   <Text style={[styles.mealMacroSimpleValue, { color: text }]}>
                                     {Math.round(estimate.caloriesPerServing)}
@@ -1528,7 +1585,7 @@ export default function MyDayAddMealFlow({
         })}
         nutritionLoading={nutritionMode === "auto" && autoNutritionRefreshing}
         nutritionLoadingLabel={t("my_day.meal_nutrition_calculating", {
-          defaultValue: "Calculating nutrients. Please wait before saving.",
+          defaultValue: "Calculating nutrients. Please wait.",
         })}
         nutritionMode={nutritionMode}
         onChangeNutritionMode={(mode) => {
@@ -1580,7 +1637,10 @@ export default function MyDayAddMealFlow({
         visible={insufficientModalVisible}
         isDark={isDark}
         title={t("economy.insufficient_title", "Not enough Eggs")}
-        body={`You need 1 Egg to log a meal. Currently, you have ${insufficientCookiesRemaining} Eggs.`}
+        body={t("economy.insufficient_meal_log_body_short", {
+          remaining: formatEconomyUnits(t, insufficientCookiesRemaining),
+          defaultValue: "You need 1 egg to log a meal. You have {{remaining}}.",
+        })}
         featuredOffer={featuredOffer}
         availableRewardsCount={availableRewardsCount}
         onClose={() => setInsufficientModalVisible(false)}
@@ -1619,10 +1679,25 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 8,
+    gap: 10,
+  },
+  sectionHeaderTitleGroup: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minWidth: 0,
+  },
+  sectionBackButton: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: "800",
+    flexShrink: 1,
   },
   modalHelp: {
     fontSize: 13,
@@ -1636,6 +1711,22 @@ const styles = StyleSheet.create({
   },
   photoSourceCostHint: {
     marginTop: 14,
+  },
+  photoSourceWarning: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  photoSourceWarningText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "700",
   },
   loadingHelperText: {
     marginTop: 10,

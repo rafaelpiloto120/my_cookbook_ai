@@ -6328,9 +6328,30 @@ function normalizeInstagramDraftResponse(draft, reel) {
       image: typeof reel?.displayUrl === "string" && reel.displayUrl.trim() ? reel.displayUrl.trim() : undefined,
       imageUrl:
         typeof reel?.displayUrl === "string" && reel.displayUrl.trim() ? reel.displayUrl.trim() : undefined,
-      notes:
-        typeof draft?.notes === "string" && draft.notes.trim() ? draft.notes.trim() : "",
+      notes: (() => {
+        const cleanNotes =
+          typeof draft?.notes === "string" && draft.notes.trim() ? draft.notes.trim() : "";
+        const cleanUrl =
+          typeof reel?.inputUrl === "string" && reel.inputUrl.trim()
+            ? reel.inputUrl.trim()
+            : typeof reel?.url === "string" && reel.url.trim()
+            ? reel.url.trim()
+            : "";
+        if (!cleanUrl) return cleanNotes;
+        if (!cleanNotes) return cleanUrl;
+        return cleanNotes.includes(cleanUrl) ? cleanNotes : `${cleanNotes}\n${cleanUrl}`;
+      })(),
       sourceUrl: reel?.inputUrl || reel?.url || "",
+      sourceMetadata: {
+        sourceUrl: reel?.inputUrl || reel?.url || "",
+        source: "instagram_reel",
+        importedServings:
+          typeof draft?.servings === "number" && Number.isFinite(draft.servings)
+            ? Math.max(0, Math.round(draft.servings))
+            : null,
+        importedNutritionInfo: validateNutritionInfo(draft?.nutritionInfo || draft?.nutrition),
+        importedAt: new Date().toISOString(),
+      },
       sourcePlatform: "instagram",
       sourceType: "instagram_reel",
       confidence:
@@ -7970,6 +7991,10 @@ app.post("/importRecipeFromUrl", async (req, res) => {
           .map((t) => t.charAt(0).toUpperCase() + t.slice(1))
       )).filter(t => t.length <= 50).slice(0, 5);
     }
+    const nutritionInfo = validateImportedNutritionInfo(scraped.nutritionInfo || scraped.nutrition);
+    const cleanSourceUrl =
+      typeof sourceUrl === "string" && sourceUrl.trim() ? sourceUrl.trim() : "";
+
     // Compose normalized object
     return {
       id: `${Date.now()}`,
@@ -7983,9 +8008,18 @@ app.post("/importRecipeFromUrl", async (req, res) => {
       ingredients,
       steps,
       tags,
-      nutritionInfo: validateImportedNutritionInfo(scraped.nutritionInfo || scraped.nutrition),
+      nutritionInfo,
       createdAt: new Date().toISOString(),
       image,
+      notes: cleanSourceUrl,
+      sourceUrl: cleanSourceUrl,
+      sourceMetadata: {
+        sourceUrl: cleanSourceUrl || null,
+        source: cleanSourceUrl && /instagram\.com\/reel\//i.test(cleanSourceUrl) ? "instagram_reel" : "url",
+        importedServings: typeof servings === "number" && isFinite(servings) ? servings : null,
+        importedNutritionInfo: nutritionInfo,
+        importedAt: new Date().toISOString(),
+      },
     };
   }
 
@@ -8235,6 +8269,7 @@ Rules:
     const requestInfo = {
       protocol: req.protocol,
       host: req.get("host"),
+      sourceUrl: url,
     };
 
     let extractedByService = null;

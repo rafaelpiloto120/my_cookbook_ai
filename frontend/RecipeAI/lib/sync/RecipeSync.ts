@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { RecipeDoc, LocalEntity } from "./types";
 import { resolveByUpdatedAt } from "./conflictStrategy";
 import { normalizeRecipeNutritionInfo } from "../recipes/nutrition";
+import { getRecipeSourceMetadata } from "../myDayRecipes";
 import { getApiBaseUrl } from "../config/api";
 import { auth } from "../../firebaseConfig";
 
@@ -96,12 +97,15 @@ export class RecipeSync {
         servings: typeof r.servings === "number" ? r.servings : null,
         cost: r.cost ?? null,
         nutritionInfo: normalizeRecipeNutritionInfo((r as any).nutritionInfo ?? (r as any).nutrition),
+        sourceUrl: typeof (r as any).sourceUrl === "string" ? (r as any).sourceUrl : null,
+        sourceMetadata: getRecipeSourceMetadata(r),
         ingredients: Array.isArray(r.ingredients) ? r.ingredients : [],
         steps: Array.isArray(r.steps)
           ? r.steps
           : Array.isArray(r.instructions)
           ? r.instructions
           : [],
+        notes: typeof r.notes === "string" ? r.notes : null,
         cookbookIds: Array.isArray(r.cookbookIds) ? r.cookbookIds : [],
         tags: Array.isArray(r.tags) ? r.tags : [],
         isDeleted: r.isDeleted ?? false,
@@ -394,8 +398,11 @@ export class RecipeSync {
         difficulty: (base as any).difficulty ?? "unknown",
         servings: typeof (base as any).servings === "number" ? (base as any).servings : null,
         cost: (base as any).cost ?? "unknown",
+        sourceUrl: typeof (base as any).sourceUrl === "string" ? (base as any).sourceUrl : null,
+        sourceMetadata: getRecipeSourceMetadata(base),
         ingredients: Array.isArray((base as any).ingredients) ? (base as any).ingredients : [],
         steps: Array.isArray((base as any).steps) ? (base as any).steps : [],
+        notes: typeof (base as any).notes === "string" ? (base as any).notes : null,
         cookbookIds: Array.isArray((base as any).cookbookIds) ? (base as any).cookbookIds : [],
         tags: Array.isArray((base as any).tags) ? (base as any).tags : [],
         isDeleted: (base as any).isDeleted ?? false,

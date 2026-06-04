@@ -71,6 +71,22 @@ function cleanIngredient(str) {
   return out;
 }
 
+function cleanRecipeTitle(str) {
+  let out = he.decode(String(str || "")).replace(/\s+/g, " ").trim();
+  out = out.replace(/\s+(?:editar|edit|editer|éditer|bearbeiten|modificar|editar receta|editar receita)$/i, "").trim();
+  out = out.replace(/\s+(?:de|por)\s+Equipa Bimby\b.*$/i, "").trim();
+  out = out.replace(/\s+Receita Bimby\b.*$/i, "").trim();
+  return out;
+}
+
+function pickCleanRecipeTitle(...candidates) {
+  for (const candidate of candidates) {
+    const cleaned = cleanRecipeTitle(candidate);
+    if (cleaned) return cleaned;
+  }
+  return "";
+}
+
 function parseDuration(str) {
   if (typeof str === "number" && Number.isFinite(str)) return str;
   if (typeof str !== "string") return null;
@@ -187,10 +203,14 @@ function extractVisibleNutrition($) {
   return Object.values(nutrition).some((value) => value !== null) ? nutrition : null;
 }
 
-function extractServings(str) {
+function extractServings(str, options = {}) {
   if (typeof str !== "string") return null;
+  const allowBareNumber = options.allowBareNumber !== false;
+  const servingUnit =
+    "(?:servings?|portion(?:s|\\(s\\))?|portion\\/en|portionen|people|persons?|personas?|personnes|porções?|porcao|doses?|dose\\/s|dose|comensales|comensais|raci[oó]n(?:es|\\/es)?)";
   let match =
-    str.match(/\b(\d{1,4})\s*(servings?|people|persons?|porções?|porcao|doses?|dose|comensales|comensais|raciones?)\b/i) ||
+    str.match(new RegExp(`\\b(\\d{1,4})\\s*${servingUnit}\\b`, "i")) ||
+    str.match(new RegExp(`\\b${servingUnit}\\s*(\\d{1,4})\\b`, "i")) ||
     str.match(/\b(serves?|makes?)\s+(\d{1,4})\b/i) ||
     str.match(/\bfor\s+(\d{1,4})\b/i) ||
     str.match(/\b(\d{1,4})\s*(comensales|comensais)\b/i);
@@ -198,6 +218,7 @@ function extractServings(str) {
     const numericCapture = match.slice(1).find((value) => /^\d{1,4}$/.test(String(value || "").trim()));
     return numericCapture ? parseInt(numericCapture, 10) : null;
   }
+  if (!allowBareNumber) return null;
   const justNumber = str.match(/(\d{1,4})/);
   return justNumber ? parseInt(justNumber[1], 10) : null;
 }
@@ -318,13 +339,19 @@ function normalizeImportedRecipe(scraped, requestInfo) {
       .slice(0, 5);
   }
 
+  const nutritionInfo = mergeNutritionSources(scraped.nutritionInfo, scraped.nutrition);
+  const cleanSourceUrl =
+    typeof requestInfo.sourceUrl === "string" && requestInfo.sourceUrl.trim()
+      ? requestInfo.sourceUrl.trim()
+      : null;
+
   return {
     id: `${Date.now()}`,
     title:
       typeof scraped.name === "string" && scraped.name.trim()
-        ? he.decode(scraped.name.trim())
+        ? cleanRecipeTitle(scraped.name)
         : typeof scraped.title === "string" && scraped.title.trim()
-          ? he.decode(scraped.title.trim())
+          ? cleanRecipeTitle(scraped.title)
           : "Untitled Recipe",
     cookingTime,
     difficulty,
@@ -335,7 +362,15 @@ function normalizeImportedRecipe(scraped, requestInfo) {
     tags,
     createdAt: new Date().toISOString(),
     image,
-    nutritionInfo: mergeNutritionSources(scraped.nutritionInfo, scraped.nutrition),
+    nutritionInfo,
+    sourceUrl: cleanSourceUrl,
+    sourceMetadata: {
+      sourceUrl: cleanSourceUrl,
+      source: cleanSourceUrl && /instagram\.com\/reel\//i.test(cleanSourceUrl) ? "instagram_reel" : "url",
+      importedServings: typeof servings === "number" && Number.isFinite(servings) ? servings : null,
+      importedNutritionInfo: nutritionInfo,
+      importedAt: new Date().toISOString(),
+    },
   };
 }
 
@@ -401,6 +436,98 @@ function collectSectionItemsByHeading($, headingRegex, stopHeadingRegex, mode = 
   }
 
   return items;
+}
+
+function absolutizeImageUrl(rawImage, baseUrl) {
+  let image = typeof rawImage === "string" ? rawImage.trim() : "";
+  if (!image) return null;
+  if (image.includes(",")) image = image.split(",")[0].split(/\s+/)[0];
+  try {
+    return new URL(image, baseUrl).href;
+  } catch {
+    return null;
+  }
+}
+
+function extractThermomixCommunityRecipe($, url) {
+  const title =
+    pickCleanRecipeTitle(
+      $("h1").first().clone().find("a, button, script, style").remove().end().text(),
+      $("meta[property='og:title']").attr("content"),
+      $("title").text().trim()
+    );
+
+  const ingredientHeading =
+    /^(ingredientes?|ingredients?|ingr[eé]dients?|zutaten|ingredienti)$/i;
+  const preparationHeading =
+    /^(etapa de prepara[cç][aã]o|prepara[cç][aã]o|preparaci[oó]n|preparation|préparation|recipe'?s preparation|la préparation de la recette|zubereitung|method|instructions?)$/i;
+  const sectionStopHeading =
+    /^(ingredientes?|ingredients?|ingr[eé]dients?|zutaten|ingredienti|etapa de prepara[cç][aã]o|prepara[cç][aã]o|preparaci[oó]n|preparation|préparation|recipe'?s preparation|la préparation de la recette|zubereitung|method|instructions?|acess[oó]rios|accessories|accesorios|accessoires|zubeh[oö]r|modelo|model|thermomix|bimby|dica|tip|consejo|astuce|tipp|coment[aá]rios|comments?|commentaires|kommentare|categorias?|categories?)\b/i;
+
+  let ingredients = [];
+  $("[itemprop='recipeIngredient'], [class*='ingredient' i] li, [class*='ingredients' i] li, [class*='ingrediente' i] li, [class*='zutaten' i] li").each(
+    (_, el) => {
+      const txt = $(el).text().trim();
+      if (txt) ingredients.push(cleanIngredient(txt));
+    }
+  );
+  ingredients = Array.from(new Set(ingredients.filter(Boolean)));
+
+  if (!ingredients.length) {
+    ingredients = collectSectionItemsByHeading($, ingredientHeading, sectionStopHeading, "ingredients")
+      .filter((item) => !/^adicionar (à|a) lista de compras$/i.test(item))
+      .filter((item) => !/^(add to shopping list|zur einkaufsliste|añadir a la lista|ajouter à la liste)/i.test(item));
+  }
+
+  let steps = [];
+  $("[itemprop='recipeInstructions'] li, [itemprop='recipeInstructions'] p, [class*='preparation' i] li, [class*='preparation' i] p, [class*='preparacao' i] li, [class*='preparacao' i] p, [class*='zubereitung' i] li, [class*='zubereitung' i] p").each(
+    (_, el) => {
+      const txt = $(el).text().replace(/\s+/g, " ").trim();
+      if (txt) steps.push(he.decode(txt));
+    }
+  );
+  steps = Array.from(new Set(steps.filter(Boolean)));
+
+  if (!steps.length) {
+    steps = collectSectionItemsByHeading($, preparationHeading, sectionStopHeading, "steps");
+  }
+  steps = steps
+    .map((step) => step.replace(/^\s*\d+[\).\s-]*/, "").replace(/\s+/g, " ").trim())
+    .filter((step) => !/^(inserir t[íi]tulo|insert title|titre|titel einfügen)$/i.test(step))
+    .filter(Boolean);
+
+  if (!(ingredients.length || steps.length)) return null;
+
+  const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+  const scraped = {
+    name: title,
+    ingredients,
+    instructions: steps,
+    image: absolutizeImageUrl(
+      $("meta[property='og:image']").attr("content") ||
+        $("img[itemprop='image']").attr("src") ||
+        $("img").first().attr("src"),
+      url
+    ),
+    keywords: "Thermomix, Bimby",
+  };
+
+  const servings = extractServings(bodyText, { allowBareNumber: false });
+  if (servings) scraped.yield = servings.toString();
+
+  const totalTimeMatch =
+    bodyText.match(/\b(?:todos?|total time|total|gesamtzeit|tiempo total|temps total)\s*((?:\d{1,2}\s*h\s*)?\d{1,3}\s*(?:min|mins|minuten|minutes)?)/i) ||
+    bodyText.match(/\b((?:\d{1,2}\s*h\s*)?\d{1,3}\s*(?:min|mins|minuten|minutes))\s*(?:todos?|total time|total|gesamtzeit|tiempo total|temps total)\b/i) ||
+    bodyText.match(/\b(\d{1,3})\s*(?:min|mins|minuten|minutes)\b/i);
+  if (totalTimeMatch) {
+    const mins = parseDuration(totalTimeMatch[1]);
+    if (mins) scraped.totalTime = mins;
+  }
+
+  const difficultyMatch = bodyText.match(/\b(?:nível|nivel|level|niveau|schwierigkeitsgrad)\s+(fácil|facil|easy|baja|baixo|moyen|mittel|einfach|moderate|hard|difícil|difficile)\b/i);
+  if (difficultyMatch) scraped.difficulty = he.decode(difficultyMatch[1]);
+
+  return scraped;
 }
 
 function extractContinenteRecipe($) {
@@ -913,8 +1040,28 @@ function extractGenericRecipe($) {
   return { name: genTitle, ingredients: genIngredients, instructions: genSteps };
 }
 
+function isThermomixCommunityUrl(url) {
+  return /(?:mundodereceitasbimby\.com\.pt|recetario\.es|espace-recettes\.fr|rezeptwelt\.de|recipecommunity\.co\.uk|recipecommunity\.com\.au|ricettario-bimby\.it)/i.test(
+    url
+  );
+}
+
 export function extractRecipeFromHtml({ url, html, requestInfo }) {
   const $ = cheerio.load(html);
+
+  if (isThermomixCommunityUrl(url)) {
+    const scraped = extractThermomixCommunityRecipe($, url);
+    if (scraped) {
+      if (!scraped.nutrition && !scraped.nutritionInfo) scraped.nutrition = extractVisibleNutrition($);
+      return {
+        recipe: normalizeImportedRecipe(scraped, requestInfo),
+        extractor: "thermomix_community",
+        stage: "domain",
+        looksRecipeLike: true,
+      };
+    }
+  }
+
   const ldRecipes = extractJsonLd(html);
   if (ldRecipes.length > 0) {
     const scraped = { ...ldRecipes[0] };
@@ -942,6 +1089,7 @@ export function extractRecipeFromHtml({ url, html, requestInfo }) {
     { match: /chefkoch\.de/i, id: "chefkoch", run: () => extractChefkochRecipe($) },
     { match: /tudogostoso\.com\.br/i, id: "tudogostoso", run: () => extractTudogostosoRecipe($) },
     { match: /punchfork\.com/i, id: "punchfork", run: () => extractPunchforkRecipe($) },
+    { match: /cookidoo\./i, id: "cookidoo", run: () => extractThermomixCommunityRecipe($, url) },
   ];
 
   for (const extractor of extractors) {
