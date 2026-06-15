@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "backfill:user-summaries": "node scripts/backfillUserSummaries.js",
+    "admin:set-claim": "node scripts/setAdminClaim.js",
+    "admin:print-token": "node scripts/printFirebaseIdToken.js"
   },
   "dependencies": {
     "cheerio": "^1.1.2",

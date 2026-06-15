@@ -343,50 +343,19 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const login = async (email: string, password: string) => {
     const current = auth.currentUser;
 
-    // If current user is anonymous, try to link credentials first
+    // Login must verify the password before any managed account-loading transition.
+    // Signup is the path that links anonymous data to a new email/password account.
     if (current && current.isAnonymous) {
-      console.log("[AuthContext] Linking anonymous user during login");
-      const credential = EmailAuthProvider.credential(email, password);
-
       try {
-        const result = await linkWithCredential(current, credential);
-        console.log("[AuthContext] linkWithCredential (login) success", {
-          uid: result.user.uid,
-          email: result.user.email,
-          isAnonymous: result.user.isAnonymous,
+        const signInResult = await signInWithEmailAndPassword(auth, email, password);
+        console.log("[AuthContext] signInWithEmailAndPassword (anonymous session login) success", {
+          uid: signInResult.user.uid,
+          email: signInResult.user.email,
+          isAnonymous: signInResult.user.isAnonymous,
         });
-        setUser(result.user);
-        return result.user;
-      } catch (error: any) {
-        if (
-          error?.code === "auth/credential-already-in-use" ||
-          error?.code === "auth/email-already-in-use"
-        ) {
-          // The email/password already belongs to an existing account.
-          // Fall back to a normal sign-in (data from the anonymous account will not be merged).
-          console.log(
-            "[AuthContext] credential/email already in use during login; signing in instead"
-          );
-          setLoading(true);
-          setLoadingMessage("Loading your account...");
-          managedAuthTransitionRef.current = true;
-          try {
-            await safeStopSyncEngine("anonymous-to-existing-account-login");
-            const signInResult = await signInWithEmailAndPassword(auth, email, password);
-            console.log("[AuthContext] signInWithEmailAndPassword (fallback) success", {
-              uid: signInResult.user.uid,
-              email: signInResult.user.email,
-              isAnonymous: signInResult.user.isAnonymous,
-            });
-            await finishManagedAuthTransition(signInResult.user, "Loading your account...");
-            return signInResult.user;
-          } catch (fallbackErr) {
-            await cancelManagedAuthTransition();
-            throw fallbackErr;
-          }
-        }
-
-        console.warn("[AuthContext] linkWithCredential (login) failed", error);
+        await finishManagedAuthTransition(signInResult.user, "Loading your account...");
+        return signInResult.user;
+      } catch (error) {
         throw error;
       }
     }

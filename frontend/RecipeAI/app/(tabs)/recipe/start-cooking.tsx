@@ -67,6 +67,10 @@ export default function StartCooking() {
   useEffect(() => {
     stepRef.current = currentStep;
   }, [currentStep]);
+  const stepsLengthRef = useRef(steps.length);
+  useEffect(() => {
+    stepsLengthRef.current = steps.length;
+  }, [steps.length]);
 
   // slide in from left/right
   const animateSlideIn = (fromRight: boolean) => {
@@ -83,9 +87,17 @@ export default function StartCooking() {
   const panXStart = useRef(0);
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_evt, gesture) =>
-        Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 6,
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_evt, gesture) => {
+        const horizontalDistance = Math.abs(gesture.dx);
+        const verticalDistance = Math.abs(gesture.dy);
+        return horizontalDistance > 12 && horizontalDistance > verticalDistance * 1.25;
+      },
+      onMoveShouldSetPanResponderCapture: (_evt, gesture) => {
+        const horizontalDistance = Math.abs(gesture.dx);
+        const verticalDistance = Math.abs(gesture.dy);
+        return horizontalDistance > 18 && horizontalDistance > verticalDistance * 1.25;
+      },
       onPanResponderGrant: () => {
         // @ts-ignore - private but works for read
         panXStart.current = panX._value || 0;
@@ -94,9 +106,18 @@ export default function StartCooking() {
         panX.setValue(panXStart.current + gesture.dx);
       },
       onPanResponderRelease: (_evt, gesture) => {
-        const { dx } = gesture;
+        const { dx, dy } = gesture;
+        if (Math.abs(dx) < Math.abs(dy) * 1.25) {
+          Animated.spring(panX, {
+            toValue: 0,
+            useNativeDriver: true,
+            bounciness: 0,
+          }).start();
+          return;
+        }
         const idx = stepRef.current; // <-- always up-to-date
-        if (dx < -SWIPE_DISTANCE && idx < steps.length - 1) {
+        const totalSteps = stepsLengthRef.current;
+        if (dx < -SWIPE_DISTANCE && idx < totalSteps - 1) {
           // swipe left → next
           setCurrentStep((s) => s + 1);
           animateSlideIn(true);
@@ -210,9 +231,8 @@ export default function StartCooking() {
       </Text>
 
       {/* Current Step (swipe + vertical scroll for long text) */}
-      <View style={styles.stepOuter}>
+      <View style={styles.stepOuter} {...panResponder.panHandlers}>
         <Animated.View
-          {...panResponder.panHandlers}
           style={[styles.stepInner, { transform: [{ translateX: panX }] }]}
         >
           <ScrollView

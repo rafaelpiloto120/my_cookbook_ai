@@ -21,7 +21,7 @@ export default function EconomyLayout() {
       <Stack.Screen
         name="store"
         options={{
-          title: t("economy.cookies", { defaultValue: "Eggs" }),
+          title: t("economy.manage_cookies_title", { defaultValue: "Manage Eggs" }),
         }}
       />
     </Stack>

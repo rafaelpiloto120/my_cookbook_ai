@@ -17,13 +17,17 @@ import {
   latestWeightLog,
   loadWeightLogs,
   MyDayWeightLog,
+  resolveWeightChartRangeWithMinimumPoints,
   updateWeightLog,
+  WeightChartRangeKey,
 } from "../../../lib/myDayWeight";
 import { useSyncEngine } from "../../../lib/sync/SyncEngine";
 import { refreshLocalReminderSchedule } from "../../../lib/notifications/localNotifications";
+import { auth } from "../../../firebaseConfig";
+import { getApiBaseUrl } from "../../../lib/config/api";
+import { recordEconomyEvent } from "../../../lib/economy/client";
 
 type MeasurementSystem = "US" | "Metric";
-
 function clampPercent(value: number) {
   if (!Number.isFinite(value) || value <= 0) return 0;
   if (value >= 1) return 1;
@@ -77,6 +81,7 @@ export default function MyDayWeightScreen() {
   const { width: viewportWidth } = useWindowDimensions();
   const router = useRouter();
   const syncEngine = useSyncEngine();
+  const API_BASE_URL = getApiBaseUrl();
   const handledNotificationActionRef = useRef<string | null>(null);
   const inlineAccentColor = isDark ? secondary : cta;
   const progressTrackColor = isDark ? hexToRgba(text, 0.12) : hexToRgba(primary, 0.12);
@@ -92,7 +97,7 @@ export default function MyDayWeightScreen() {
   const [historyVisibleCount, setHistoryVisibleCount] = useState(5);
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [goalType, setGoalType] = useState<"lose" | "maintain" | "gain">("maintain");
-  const [rangeKey, setRangeKey] = useState<"week" | "month" | "six_months" | "all">("week");
+  const [rangeKey, setRangeKey] = useState<WeightChartRangeKey>("week");
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -220,25 +225,12 @@ export default function MyDayWeightScreen() {
     ],
     [t]
   );
-  const filteredLogs = useMemo(() => {
-    if (allLogs.length === 0) return [];
-    if (rangeKey === "all") return allLogs;
-    const now = new Date();
-    const startDate = new Date(now);
-    if (rangeKey === "week") {
-      startDate.setDate(now.getDate() - 6);
-      startDate.setHours(0, 0, 0, 0);
-    } else if (rangeKey === "month") {
-      startDate.setMonth(now.getMonth() - 1);
-    } else if (rangeKey === "six_months") {
-      startDate.setMonth(now.getMonth() - 6);
-    }
-    startDate.setHours(0, 0, 0, 0);
-    const startDayKey = getWeightDayKey(startDate);
-    const todayKey = getWeightDayKey(now);
-    return allLogs.filter((log) => log.dayKey >= startDayKey && log.dayKey <= todayKey);
-  }, [allLogs, rangeKey]);
-  const chartLogs = filteredLogs;
+  const resolvedChartRange = useMemo(
+    () => resolveWeightChartRangeWithMinimumPoints(allLogs, rangeKey),
+    [allLogs, rangeKey]
+  );
+  const chartLogs = resolvedChartRange.logs;
+  const highlightedRangeKey = resolvedChartRange.rangeKey;
   const chartMin = chartLogs.length > 0 ? Math.min(...chartLogs.map((log) => log.value), Number.isFinite(goalWeightNumber) ? goalWeightNumber : Infinity) : 0;
   const chartMax = chartLogs.length > 0 ? Math.max(...chartLogs.map((log) => log.value), Number.isFinite(goalWeightNumber) ? goalWeightNumber : -Infinity) : 1;
   const chartRange = Math.max(chartMax - chartMin, 0.5);
@@ -342,6 +334,19 @@ export default function MyDayWeightScreen() {
           normalizedWeightKg:
             Number.isFinite(created.valueKg) ? Number(created.valueKg) : null,
         });
+      }
+      try {
+        if (API_BASE_URL) {
+          await recordEconomyEvent({
+            backendUrl: API_BASE_URL,
+            appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local",
+            auth,
+            eventKey: "weight_logged",
+            metadata: { dateKey: created.dayKey },
+          });
+        }
+      } catch (err) {
+        console.warn("[WeightDetails] weight mission progress failed", err);
       }
     }
     refreshLocalReminderSchedule().catch((err) => {
@@ -661,7 +666,7 @@ export default function MyDayWeightScreen() {
           </View>
           <View style={styles.rangeChipsRow}>
             {rangeOptions.map((option) => {
-              const selected = option.key === rangeKey;
+              const selected = option.key === highlightedRangeKey;
               return (
                 <TouchableOpacity
                   key={option.key}
@@ -669,13 +674,13 @@ export default function MyDayWeightScreen() {
                   style={[
                     styles.rangeChip,
                     {
-                      backgroundColor: selected ? cta : bg,
+                      backgroundColor: selected ? cta : "#FFFFFF",
                       borderColor: selected ? cta : border,
                     },
                   ]}
                   onPress={() => setRangeKey(option.key)}
                 >
-                  <Text style={[styles.rangeChipText, { color: selected ? "#fff" : text }]} numberOfLines={1}>
+                  <Text style={[styles.rangeChipText, { color: selected ? "#fff" : "#2B2118" }]} numberOfLines={1}>
                     {option.label}
                   </Text>
                 </TouchableOpacity>
@@ -1104,6 +1109,22 @@ export default function MyDayWeightScreen() {
                 <MaterialIcons name="chevron-right" size={22} color={canGoNextCalendarMonth ? primary : subText} />
               </TouchableOpacity>
             </View>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={styles.calendarTodayButton}
+              onPress={() => {
+                const todayKey = getWeightDayKey(new Date());
+                const today = new Date();
+                setSelectedDay(todayKey);
+                setCalendarMonth(new Date(today.getFullYear(), today.getMonth(), 1));
+                setCalendarVisible(false);
+              }}
+            >
+              <MaterialIcons name="today" size={14} color={inlineAccentColor} />
+              <Text style={[styles.calendarTodayText, { color: inlineAccentColor }]}>
+                {t("my_day.today_label", { defaultValue: "Today" })}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.calendarWeekRow}>
               {["S", "M", "T", "W", "T", "F", "S"].map((label, index) => (
                 <Text key={`${label}-${index}`} style={[styles.calendarWeekday, { color: subText }]}>
@@ -1683,5 +1704,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 10,
     marginBottom: 6,
+  },
+  calendarTodayButton: {
+    alignSelf: "flex-end",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  calendarTodayText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

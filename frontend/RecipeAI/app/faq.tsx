@@ -112,7 +112,7 @@ export default function FaqScreen() {
                 style={[
                   styles.categoryChip,
                   {
-                    backgroundColor: selected ? cta : card,
+                    backgroundColor: selected ? cta : "#FFFFFF",
                     borderColor: selected ? cta : border,
                   },
                 ]}
@@ -130,7 +130,7 @@ export default function FaqScreen() {
                     color={selected ? selectedText : subText}
                   />
                 )}
-                <Text style={[styles.categoryText, { color: selected ? selectedText : text }]}>
+                <Text style={[styles.categoryText, { color: selected ? selectedText : "#2B2118" }]}>
                   {label}
                 </Text>
               </Pressable>

@@ -1,15 +1,25 @@
-import React, { useEffect, useState, useRef } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard, StatusBar, findNodeHandle, UIManager } from "react-native";
+import React, { useCallback, useEffect, useState, useRef } from "react";
+import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert, Image, Modal, KeyboardAvoidingView, Platform, ScrollView, Keyboard, StatusBar, findNodeHandle, UIManager, Pressable } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Stack, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { syncIngredientCatalog } from "../../lib/ingredients/catalogSync";
-import { useThemeColors, useTheme } from "../../context/ThemeContext";
+import { useTheme } from "../../context/ThemeContext";
 import AppButton from "../../components/AppButton";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { saveUserPrefs } from "../../lib/prefs";
 import * as Localization from "expo-localization";
+import {
+  defaultMyDayProfile,
+  deriveSuggestedPlan,
+  MeasurementSystem,
+  MyDayGoalType,
+  parseHeightToCm,
+  parseWeightToKg,
+  saveMyDayProfile,
+} from "../../lib/myDay";
+import { addWeightLog } from "../../lib/myDayWeight";
 
 import { supportedLanguages, SupportedLanguage } from "../../i18n";
 import { MaterialIcons } from "@expo/vector-icons";
@@ -34,6 +44,12 @@ const SYNC_KEYS = {
 };
 
 const HEADER_BG = "#8F5E43";
+const ONBOARDING_SELECTED_BG = "#F2D6A3";
+const ONBOARDING_BACK_BG = "#FFFDF7";
+const ONBOARDING_BUTTON_TEXT = "#2B2118";
+const ONBOARDING_BACK_TEXT = "#8A4B16";
+const ONBOARDING_BACK_BORDER = "#EADDC2";
+const ONBOARDING_ACTION_BOTTOM_OFFSET = 44;
 // Android: ensure navigation header accounts for the system status bar height
 const ANDROID_STATUS_BAR_HEIGHT =
   Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0;
@@ -110,7 +126,7 @@ function resolveSupportedLanguageFromDevice(): SupportedLanguage {
   }
 }
 
-// steps: 1=Intro + Language, 2=Dietary/Avoid, 3=Theme/Measure
+// steps: 1=Intro + Language, 2=Dietary/Avoid, 3=Health & Goals, 4=Theme/Measure
 export default function Onboarding() {
   const insets = useSafeAreaInsets();
   const scrollRef = useRef<ScrollView | null>(null);
@@ -154,7 +170,6 @@ export default function Onboarding() {
   };
   const { t } = useTranslation();
   const router = useRouter();
-  const { bg, isDark } = useThemeColors();
   const { setThemeMode: applyThemeMode } = useTheme();
 
   useEffect(() => {
@@ -169,10 +184,21 @@ export default function Onboarding() {
     }
   }, []);
 
-  // steps: 1=Intro + Language, 2=Dietary/Avoid, 3=Theme/Measure
+  // steps: 1=Intro + Language, 2=Dietary/Avoid, 3=Health & Goals, 4=Theme/Measure
   const [step, setStep] = useState(1);
+  const progressStep = Math.max(1, step - 1);
+  const maxProgressStep = 3;
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitAction, setSubmitAction] = useState<"continue" | "account" | "signin" | null>(null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useFocusEffect(
+    useCallback(() => {
+      setIsSubmitting(false);
+      setSubmitAction(null);
+    }, [])
+  );
 
   // language
   const [language, setLanguage] = useState(i18n.language || "en");
@@ -258,6 +284,10 @@ export default function Onboarding() {
   const [dietary, setDietary] = useState<string[]>([]);
   const [avoid, setAvoid] = useState<string[]>([]);
   const [avoidOther, setAvoidOther] = useState("");
+  const [healthAge, setHealthAge] = useState("");
+  const [healthHeight, setHealthHeight] = useState("");
+  const [healthCurrentWeight, setHealthCurrentWeight] = useState("");
+  const [healthGoal, setHealthGoal] = useState<MyDayGoalType>("maintain");
 
   // measure & theme
   const [measure, setMeasure] = useState<Measure>("metric");
@@ -280,8 +310,96 @@ export default function Onboarding() {
     });
   };
 
-  const next = () => setStep((s) => Math.min(3, s + 1));
+  const sanitizePositiveDecimalInput = (value: string) => {
+    const normalized = value.replace(",", ".").replace(/[^0-9.]/g, "");
+    const [whole = "", ...rest] = normalized.split(".");
+    const decimals = rest.join("").slice(0, 2);
+    const trimmedWhole = whole.replace(/^0+(?=\d)/, "");
+    return normalized.includes(".") ? `${trimmedWhole || "0"}.${decimals}` : trimmedWhole;
+  };
+
+  const onboardingMeasurementSystem = (): MeasurementSystem => (measure === "imperial" ? "US" : "Metric");
+
+  const parseValidAge = (value: string) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 13 || parsed > 120) return null;
+    return Math.round(parsed);
+  };
+
+  const buildDefaultTargetWeight = (currentWeight: number) => {
+    if (healthGoal === "lose") return String(Number(Math.max(currentWeight - 1, 0.1).toFixed(2)));
+    if (healthGoal === "gain") return String(Number((currentWeight + 1).toFixed(2)));
+    return healthCurrentWeight;
+  };
+
+  const validateHealthStep = () => {
+    const age = parseValidAge(healthAge);
+    const height = Number(healthHeight.replace(",", "."));
+    const weight = Number(healthCurrentWeight.replace(",", "."));
+    if (!age || !Number.isFinite(height) || height <= 0 || !Number.isFinite(weight) || weight <= 0) {
+      Alert.alert(
+        tr("onboarding.health_title", "Health & Goals"),
+        tr("onboarding.health_required", "Please add a valid age, height, and current weight to continue.")
+      );
+      return false;
+    }
+    if (measure === "imperial" && height > 96) {
+      Alert.alert(
+        tr("onboarding.health_title", "Health & Goals"),
+        tr("profile.health_height_us_validation", "Height looks too high for inches. If you meant centimeters, switch to Metric or enter your height in inches.")
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const next = () => {
+    if (step === 3 && !validateHealthStep()) return;
+    setStep((s) => Math.min(4, s + 1));
+  };
   const back = () => setStep((s) => Math.max(1, s - 1));
+
+  const renderProgressBar = () => (
+    <View style={styles.onboardingProgressWrap}>
+      <View style={styles.onboardingProgressTrack}>
+        <View style={[styles.onboardingProgressFill, { width: `${(progressStep / maxProgressStep) * 100}%` }]} />
+      </View>
+    </View>
+  );
+
+  async function persistOnboardingHealthGoals() {
+    const age = parseValidAge(healthAge);
+    const height = Number(healthHeight.replace(",", "."));
+    const currentWeight = Number(healthCurrentWeight.replace(",", "."));
+    if (!age || !Number.isFinite(height) || height <= 0 || !Number.isFinite(currentWeight) || currentWeight <= 0) {
+      return;
+    }
+
+    const measurementSystem = onboardingMeasurementSystem();
+    const baseProfile = defaultMyDayProfile();
+    const healthProfile = {
+      ...baseProfile,
+      age: String(age),
+      height: healthHeight,
+      currentWeight: healthCurrentWeight,
+      targetWeight: buildDefaultTargetWeight(currentWeight),
+      goalType: healthGoal,
+      pace: "balanced" as const,
+      isCustomizedPlan: false,
+      heightCm: parseHeightToCm(healthHeight, measurementSystem),
+      currentWeightKg: parseWeightToKg(healthCurrentWeight, measurementSystem),
+      targetWeightKg: parseWeightToKg(buildDefaultTargetWeight(currentWeight), measurementSystem),
+      updatedAt: new Date().toISOString(),
+    };
+    const autoPlan = deriveSuggestedPlan(healthProfile, measurementSystem);
+    const nextProfile = {
+      ...healthProfile,
+      plan: autoPlan,
+    };
+
+    await saveMyDayProfile(nextProfile, measurementSystem);
+    await addWeightLog(currentWeight, new Date(), measurementSystem);
+  }
 
   async function persistOnboardingPrefs() {
     // Persist prefs centrally + notify listeners (Profile, AI Kitchen, etc.)
@@ -333,6 +451,8 @@ export default function Onboarding() {
       // best-effort: even if this fails, the stored preference is correct
     }
 
+    await persistOnboardingHealthGoals();
+
     // Mark onboarding done
     await AsyncStorage.setItem(KEYS.ONBOARDING_DONE, "true");
     // Also set legacy flag so onboarding doesn't show again elsewhere
@@ -343,6 +463,9 @@ export default function Onboarding() {
   }
 
   async function finalize() {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitAction("continue");
     try {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist
@@ -362,10 +485,15 @@ export default function Onboarding() {
       router.replace("/(tabs)");
     } catch (e) {
       Alert.alert(t("common.error", "Error"), t("onboarding.error_save", "Could not save your preferences."));
+      setIsSubmitting(false);
+      setSubmitAction(null);
     }
   }
 
   async function handleCreateAccount() {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitAction("account");
     try {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist yet
@@ -386,6 +514,9 @@ export default function Onboarding() {
   }
 
   async function handleSignInInstead() {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitAction("signin");
     try {
       await persistOnboardingPrefs();
       // Create localized default cookbooks if none exist yet
@@ -538,10 +669,7 @@ export default function Onboarding() {
                   {t("onboarding.title", "Welcome to Cook N'Eat AI")}
                 </Text>
                 <Text style={styles.sloganText}>
-                  {t("common.slogan", "Your smart kitchen companion")}
-                </Text>
-                <Text style={styles.descText}>
-                  {t("onboarding.intro_blurb", "Tell us a few quick things to personalize your experience.")}
+                  {t("common.slogan", "Cook healthier. Eat happier.")}
                 </Text>
                 <View style={styles.languageBlock}>
                   <Text style={[styles.h2, { color: "#fff", marginTop: 8, marginBottom: 16 }]}>
@@ -572,13 +700,16 @@ export default function Onboarding() {
                 <AppButton
                   label={t("onboarding.lets_go", "Let's go!")}
                   onPress={next}
-                  variant="cta"
+                  variant="secondary"
                   fullWidth
+                  style={styles.onboardingForwardButton}
+                  textColor={ONBOARDING_BACK_TEXT}
                 />
                 <TouchableOpacity
                   activeOpacity={0.82}
                   onPress={handleSignInInstead}
                   style={styles.signInPrompt}
+                  disabled={isSubmitting}
                 >
                   <Text style={styles.signInPromptText}>
                     {tr("onboarding.already_have_account_prompt", "Already have an account? Sign in")}
@@ -592,31 +723,31 @@ export default function Onboarding() {
                 transparent
                 onRequestClose={() => setModalLanguage(false)}
               >
-                <TouchableOpacity
-                  activeOpacity={1}
+                <Pressable
                   onPress={() => setModalLanguage(false)}
                   style={styles.modalOverlay}
                 >
-                  <View style={[styles.modalContent, { backgroundColor: "#fff" }]} onStartShouldSetResponder={() => true}>
-                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                      <Text style={[styles.h2, { color: "#111", marginBottom: 8 }]}>
+                  <View
+                    style={[styles.modalContent, { backgroundColor: "#fff" }]}
+                    onStartShouldSetResponder={() => true}
+                  >
+                    <View style={styles.modalHeaderRow}>
+                      <Text style={[styles.modalTitle, { color: "#111" }]}>
                         {tr("profile.select_language", "Select language")}
                       </Text>
-                      <TouchableOpacity onPress={() => setModalLanguage(false)}>
-                        <MaterialIcons name="close" size={24} color="#333" />
-                      </TouchableOpacity>
+                      <Pressable
+                        style={styles.modalCloseButton}
+                        onPress={() => setModalLanguage(false)}
+                        hitSlop={12}
+                      >
+                        <MaterialIcons name="close" size={26} color="#8A4B16" />
+                      </Pressable>
                     </View>
 
                     {languageOptions.map((option) => (
                       <TouchableOpacity
                         key={option.code}
-                        style={{
-                          flexDirection: "row",
-                          alignItems: "center",
-                          paddingVertical: 12,
-                          borderBottomWidth: StyleSheet.hairlineWidth,
-                          borderBottomColor: "#F6EBD3",
-                        }}
+                        style={styles.languageModalRow}
                         onPress={async () => {
                           const lng = option.code as SupportedLanguage;
                           setLanguage(lng);
@@ -643,7 +774,7 @@ export default function Onboarding() {
                       </TouchableOpacity>
                     ))}
                   </View>
-                </TouchableOpacity>
+                </Pressable>
               </Modal>
             </View>
           )}
@@ -658,12 +789,13 @@ export default function Onboarding() {
                 {
                   backgroundColor: HEADER_BG,
                   // Ensure we can scroll past the keyboard so the "Other" input isn't hidden.
-                  paddingBottom: keyboardVisible ? Math.max(220, keyboardHeight + 120) : 160,
+                  paddingBottom: keyboardVisible ? Math.max(220, keyboardHeight + 120) : 24,
                 },
               ]}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             >
+              {renderProgressBar()}
               <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
                 {tt(t, "profile.food_preferences_explainer", "These questions help us personalize your AI Kitchen experience.")}
               </Text>
@@ -677,24 +809,24 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       dietary.includes(k)
-                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                        : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => toggleDietary(k)}
                   >
-                    <Text style={{ color: dietary.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
+                    <Text style={{ color: dietary.includes(k) ? ONBOARDING_BUTTON_TEXT : "#000" }}>{opt.icon} {opt.label}</Text>
                   </TouchableOpacity>
                 ))}
                 <TouchableOpacity
                   style={[
                     styles.chip,
                     dietary.length === 0
-                      ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                      : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
+                      ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                      : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
                   ]}
                   onPress={() => setDietary([])}
                 >
-                  <Text style={{ color: dietary.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
+                  <Text style={{ color: dietary.length === 0 ? ONBOARDING_BUTTON_TEXT : "#000" }}>{tr("common.none", "None")}</Text>
                 </TouchableOpacity>
               </View>
 
@@ -708,24 +840,24 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       avoid.includes(k)
-                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                        : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => toggleAvoid(k)}
                   >
-                    <Text style={{ color: avoid.includes(k) ? "#fff" : "#000" }}>{opt.icon} {opt.label}</Text>
+                    <Text style={{ color: avoid.includes(k) ? ONBOARDING_BUTTON_TEXT : "#000" }}>{opt.icon} {opt.label}</Text>
                   </TouchableOpacity>
                 ))}
                 <TouchableOpacity
                   style={[
                     styles.chip,
                     avoid.length === 0
-                      ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                      : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
+                      ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                      : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
                   ]}
                   onPress={() => { setAvoid([]); setAvoidOther(""); }}
                 >
-                  <Text style={{ color: avoid.length === 0 ? "#fff" : "#000" }}>{tr("common.none", "None")}</Text>
+                  <Text style={{ color: avoid.length === 0 ? ONBOARDING_BUTTON_TEXT : "#000" }}>{tr("common.none", "None")}</Text>
                 </TouchableOpacity>
               </View>
 
@@ -757,14 +889,150 @@ export default function Onboarding() {
 
               <View style={{ height: 8 }} />
               <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
-                <AppButton label={tr("common.back", "Back")} onPress={back} variant="secondary" style={{ flex: 1, marginRight: 8 }} />
-                <AppButton label={tr("common.next", "Next")} onPress={next} variant="cta" style={{ flex: 1, marginLeft: 8 }} />
+                <AppButton label={tr("common.back", "Back")} onPress={back} variant="secondary" style={{ flex: 1, marginRight: 8 }} textColor={ONBOARDING_BUTTON_TEXT} />
+                <AppButton label={tr("common.next", "Next")} onPress={next} variant="secondary" style={[styles.onboardingForwardButton, { flex: 1, marginLeft: 8 }]} textColor={ONBOARDING_BACK_TEXT} />
               </View>
+              {!keyboardVisible && <View style={styles.onboardingFooterSpacer} />}
             </ScrollView>
           )}
 
           {step === 3 && (
+            <ScrollView
+              style={{ flex: 1, backgroundColor: HEADER_BG }}
+              contentInsetAdjustmentBehavior={Platform.OS === "ios" ? "automatic" : undefined}
+              contentContainerStyle={[
+                styles.content,
+                {
+                  backgroundColor: HEADER_BG,
+                  paddingBottom: keyboardVisible ? Math.max(220, keyboardHeight + 120) : 24,
+                },
+              ]}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+            >
+              {renderProgressBar()}
+              <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
+                {tr("onboarding.health_explainer", "Tell us a few basics so My Day can calculate your daily calories and macros.")}
+              </Text>
+
+              <Text style={[styles.h2, { color: "#fff", marginTop: 4, marginBottom: 12 }]}>
+                {tr("profile.measure_system_title", "Measurement system")}
+              </Text>
+              <View style={styles.rowWrap}>
+                {[
+                  { k: "metric", label: tr("onboarding.measurement_metric", "Metric (g, kg, ml)") },
+                  { k: "imperial", label: tr("onboarding.measurement_imperial", "Imperial (oz, lb, cup)") },
+                ].map(m => (
+                  <TouchableOpacity
+                    key={m.k}
+                    style={[
+                      styles.chip,
+                      measure === m.k
+                        ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                        : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
+                    ]}
+                    onPress={() => setMeasure(m.k as Measure)}
+                  >
+                    <Text style={{ color: measure === m.k ? ONBOARDING_BUTTON_TEXT : "#000" }}>{m.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={[styles.h2, { color: "#fff", marginTop: 24, marginBottom: 12 }]}>
+                {tr("onboarding.health_title", "Health & Goals")}
+              </Text>
+              <View style={styles.healthFieldsWrap}>
+                <View style={styles.healthField}>
+                  <Text style={styles.healthFieldLabel}>
+                    {tr("profile.health_age", "Age")}
+                  </Text>
+                  <TextInput
+                    value={healthAge}
+                    onChangeText={(value) => setHealthAge(value.replace(/[^0-9]/g, "").slice(0, 3))}
+                    keyboardType="number-pad"
+                    style={styles.healthInput}
+                    placeholder="30"
+                    placeholderTextColor="#8B7E70"
+                  />
+                </View>
+                <View style={styles.healthField}>
+                  <Text style={styles.healthFieldLabel}>
+                    {`${tr("profile.health_height", "Height")} (${measure === "imperial" ? "in" : "cm"})`}
+                  </Text>
+                  <TextInput
+                    value={healthHeight}
+                    onChangeText={(value) => setHealthHeight(sanitizePositiveDecimalInput(value))}
+                    keyboardType="decimal-pad"
+                    style={styles.healthInput}
+                    placeholder={measure === "imperial" ? "68" : "170"}
+                    placeholderTextColor="#8B7E70"
+                  />
+                </View>
+                <View style={styles.healthField}>
+                  <Text style={styles.healthFieldLabel}>
+                    {`${tr("profile.health_current_weight", "Current weight")} (${measure === "imperial" ? "lb" : "kg"})`}
+                  </Text>
+                  <TextInput
+                    value={healthCurrentWeight}
+                    onChangeText={(value) => setHealthCurrentWeight(sanitizePositiveDecimalInput(value))}
+                    keyboardType="decimal-pad"
+                    style={styles.healthInput}
+                    placeholder={measure === "imperial" ? "165" : "72"}
+                    placeholderTextColor="#8B7E70"
+                  />
+                </View>
+              </View>
+
+              <Text style={[styles.h2, { color: "#fff", marginTop: 24, marginBottom: 12 }]}>
+                {tr("profile.health_your_goal", "Your Goal")}
+              </Text>
+              <View style={styles.goalOptions}>
+                {[
+                  { key: "lose", label: tr("profile.health_goal_lose", "Lose weight") },
+                  { key: "maintain", label: tr("profile.health_goal_maintain", "Maintain weight") },
+                  { key: "gain", label: tr("profile.health_goal_gain", "Gain weight") },
+                ].map((option) => {
+                  const selected = healthGoal === option.key;
+                  return (
+                    <TouchableOpacity
+                      key={option.key}
+                      activeOpacity={0.85}
+                      style={[
+                        styles.goalOption,
+                        selected
+                          ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG }
+                          : { backgroundColor: "#FFFFFF", borderColor: "transparent" },
+                      ]}
+                      onPress={() => setHealthGoal(option.key as MyDayGoalType)}
+                    >
+                      <Text
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.78}
+                        style={[
+                          styles.goalOptionText,
+                          { color: selected ? ONBOARDING_BUTTON_TEXT : "#000", fontWeight: selected ? "700" : "500" },
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <View style={{ height: 8 }} />
+              <View style={[styles.footerRow, { marginTop: "auto", paddingTop: 16 }]}>
+                <AppButton label={tr("common.back", "Back")} onPress={back} variant="secondary" style={{ flex: 1, marginRight: 8 }} textColor={ONBOARDING_BUTTON_TEXT} />
+                <AppButton label={tr("common.next", "Next")} onPress={next} variant="secondary" style={[styles.onboardingForwardButton, { flex: 1, marginLeft: 8 }]} textColor={ONBOARDING_BACK_TEXT} />
+              </View>
+              {!keyboardVisible && <View style={styles.onboardingFooterSpacer} />}
+            </ScrollView>
+          )}
+
+          {step === 4 && (
             <View style={styles.contentStep}>
+              {renderProgressBar()}
               <Text style={[styles.p, { color: "#fff", fontSize: 18, marginBottom: 22 }]}>
                 {tt(
                   t,
@@ -786,36 +1054,12 @@ export default function Onboarding() {
                     style={[
                       styles.chip,
                       themeMode === m.k
-                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
+                        ? { backgroundColor: ONBOARDING_SELECTED_BG, borderColor: ONBOARDING_SELECTED_BG, borderWidth: 1 }
+                        : { backgroundColor: "#FFFFFF", borderColor: "transparent", borderWidth: 1 }
                     ]}
                     onPress={() => setThemeMode(m.k as ThemeMode)}
                   >
-                    <Text style={{ color: themeMode === m.k ? "#fff" : "#000" }}>{m.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Measurement */}
-              <Text style={[styles.h2, { color: "#fff", marginTop: 28, marginBottom: 12 }]}>
-                {tr("profile.measure_system_title", "Measurement system")}
-              </Text>
-              <View style={styles.rowWrap}>
-                {[
-                  { k: "metric", label: tr("onboarding.measurement_metric", "Metric") },
-                  { k: "imperial", label: tr("onboarding.measurement_imperial", "Imperial") },
-                ].map(m => (
-                  <TouchableOpacity
-                    key={m.k}
-                    style={[
-                      styles.chip,
-                      measure === m.k
-                        ? { backgroundColor: "#8A4B16", borderColor: "#8A4B16", borderWidth: 1 }
-                        : { backgroundColor: "#F6EBD3", borderColor: "transparent", borderWidth: 1 }
-                    ]}
-                    onPress={() => setMeasure(m.k as Measure)}
-                  >
-                    <Text style={{ color: measure === m.k ? "#fff" : "#000" }}>{m.label}</Text>
+                    <Text style={{ color: themeMode === m.k ? ONBOARDING_BUTTON_TEXT : "#000" }}>{m.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -832,10 +1076,17 @@ export default function Onboarding() {
                   )}
                 </Text>
                 <AppButton
-                  label={tr("onboarding.account_create", "Create account")}
+                  label={
+                    submitAction === "account"
+                      ? tr("onboarding.creating_defaults", "Setting things up...")
+                      : tr("onboarding.account_create", "Create account")
+                  }
                   onPress={handleCreateAccount}
-                  variant="cta"
+                  variant="secondary"
                   fullWidth
+                  style={styles.onboardingForwardButton}
+                  textColor={ONBOARDING_BACK_TEXT}
+                  disabled={isSubmitting}
                 />
               </View>
 
@@ -846,14 +1097,23 @@ export default function Onboarding() {
                   onPress={back}
                   variant="secondary"
                   style={{ flex: 1, marginRight: 8 }}
+                  textColor={ONBOARDING_BUTTON_TEXT}
+                  disabled={isSubmitting}
                 />
                 <AppButton
-                  label={tr("onboarding.skip_account", "Continue without account")}
+                  label={
+                    submitAction === "continue"
+                      ? tr("onboarding.creating_defaults", "Setting things up...")
+                      : tr("onboarding.skip_account", "Continue without account")
+                  }
                   onPress={finalize}
-                  variant="cta"
-                  style={{ flex: 1, marginLeft: 8 }}
+                  variant="secondary"
+                  style={[styles.onboardingForwardButton, { flex: 1, marginLeft: 8 }]}
+                  textColor={ONBOARDING_BACK_TEXT}
+                  disabled={isSubmitting}
                 />
               </View>
+              <View style={styles.onboardingFooterSpacer} />
             </View>
           )}
         </SafeAreaView>
@@ -864,8 +1124,8 @@ export default function Onboarding() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  content: { flex: 1, padding: 20, justifyContent: "flex-start" },
-  contentStep: { flex: 1, padding: 20 },
+  content: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 24, justifyContent: "flex-start" },
+  contentStep: { flex: 1, paddingHorizontal: 24, paddingTop: 24, paddingBottom: 24 },
   h1: { fontSize: 24, fontWeight: "800", marginBottom: 8 },
   h2: { fontSize: 18, fontWeight: "700", marginBottom: 6 },
   p: { fontSize: 15, lineHeight: 22 },
@@ -890,6 +1150,73 @@ const styles = StyleSheet.create({
   },
   footerRow: { flexDirection: "row", marginTop: 10 },
   footerCol: { marginTop: 10 },
+  onboardingForwardButton: {
+    backgroundColor: ONBOARDING_BACK_BG,
+    borderWidth: 1,
+    borderColor: ONBOARDING_BACK_BORDER,
+  },
+  onboardingProgressWrap: {
+    width: "100%",
+    alignItems: "center",
+    marginBottom: 22,
+  },
+  onboardingProgressTrack: {
+    width: "100%",
+    height: 12,
+    borderRadius: 100,
+    backgroundColor: "rgba(255,255,255,0.22)",
+    overflow: "hidden",
+  },
+  onboardingProgressFill: {
+    height: "100%",
+    borderRadius: 100,
+    backgroundColor: ONBOARDING_SELECTED_BG,
+  },
+  onboardingFooterSpacer: {
+    height: ONBOARDING_ACTION_BOTTOM_OFFSET,
+  },
+  healthFieldsWrap: {
+    gap: 12,
+  },
+  healthField: {
+    width: "100%",
+  },
+  healthFieldLabel: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "700",
+    marginBottom: 7,
+  },
+  healthInput: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: ONBOARDING_BACK_BORDER,
+    color: "#111111",
+    fontSize: 15,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  goalOptions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  goalOption: {
+    flex: 1,
+    borderRadius: 12,
+    borderWidth: 1,
+    minHeight: 42,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 6,
+    paddingVertical: 9,
+  },
+  goalOptionText: {
+    fontSize: 13,
+    textAlign: "center",
+    includeFontPadding: false,
+  },
   contentIntro: {
     flex: 1,
     paddingHorizontal: 24,
@@ -900,7 +1227,8 @@ const styles = StyleSheet.create({
   introHero: {
     flexGrow: 1,
     alignItems: "center",
-    justifyContent: "center",
+    justifyContent: "flex-start",
+    paddingTop: 36,
     paddingHorizontal: 12,
   },
   introBottom: {
@@ -925,6 +1253,7 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "600",
     marginTop: 6,
+    marginBottom: 84,
     textAlign: "center",
   },
   descText: {
@@ -932,7 +1261,7 @@ const styles = StyleSheet.create({
     opacity: 0.98,
     fontSize: 18,
     lineHeight: 24,
-    marginTop: 40,
+    marginTop: 0,
     textAlign: "center",
     maxWidth: 340,
     alignSelf: "center",
@@ -951,13 +1280,39 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.25)",
-    justifyContent: "flex-end",
+    backgroundColor: "rgba(0,0,0,0.28)",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 20,
   },
   modalContent: {
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    padding: 20,
-    maxHeight: "80%",
+    width: "100%",
+    borderRadius: 18,
+    padding: 16,
+    minHeight: 320,
+    maxHeight: "90%",
+  },
+  modalHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  modalTitle: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  modalCloseButton: {
+    marginLeft: 10,
+    marginTop: -6,
+  },
+  languageModalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 13,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#D8C7B8",
   },
 });

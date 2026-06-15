@@ -1,10 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { Auth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
+import { emitClaimableRewardsChanged } from "./claimableRewardsEvents";
 
 export type EconomySnapshot = {
   balance: number | null;
   freePremiumActionsRemaining: number | null;
+  showEconomy?: boolean | null;
 };
 
 export type EconomyLedgerEntry = {
@@ -44,11 +46,44 @@ export type EconomyCatalogBonus = {
   reason?: string;
   action?: string | null;
   badges?: string[];
+  progress?: number | null;
+  target?: number | null;
+};
+
+export type EconomyMissionReward = {
+  id: string;
+  rewardKey?: string;
+  title?: string;
+  description?: string;
+  cookies: number;
+  status?: "available" | "redeemed" | "locked" | "hidden";
+  reason?: string;
+  action?: string | null;
+  progress?: number;
+  target?: number;
+  progressType?: string;
+  cycleKey?: string | null;
+};
+
+export type EconomyMissions = {
+  unlocked?: boolean;
+  reason?: string;
+  freePremiumActionsRemaining?: number | null;
+  cycleKey?: string | null;
+  cycleStart?: number | null;
+  cycleEnd?: number | null;
+  dayOfCycle?: number | null;
+  actionsCompleted?: number;
+  actionsTarget?: number;
+  rewards?: EconomyMissionReward[];
 };
 
 export type EconomyCatalogBundle = {
   offers: EconomyCatalogOffer[];
   bonuses: EconomyCatalogBonus[];
+  missions?: EconomyMissions | null;
+  showEconomy?: boolean | null;
+  freePremiumActionsRemaining?: number | null;
 };
 
 export async function claimEconomyReward({
@@ -64,8 +99,16 @@ export async function claimEconomyReward({
     headers,
     body: JSON.stringify({ rewardKey }),
   });
-  if (!res.ok) return null;
-  return await res.json().catch(() => null);
+  const data = await res.json().catch(() => null);
+  if (!res.ok || data?.ok === false) {
+    const message =
+      typeof data?.error === "string" && data.error.trim()
+        ? data.error.trim()
+        : "failed_to_claim_reward";
+    throw new Error(message);
+  }
+  emitClaimableRewardsChanged();
+  return data;
 }
 
 type EconomyRequestParams = {
@@ -160,6 +203,7 @@ export async function fetchEconomySnapshot({
   return {
     balance: toNumberOrNull(data?.balance ?? data?.remaining ?? data?.cookies),
     freePremiumActionsRemaining: toNumberOrNull(data?.freePremiumActionsRemaining),
+    showEconomy: typeof data?.showEconomy === "boolean" ? data.showEconomy : null,
   };
 }
 
@@ -208,7 +252,39 @@ export async function fetchEconomyCatalogBundle({
     : Array.isArray(data?.bonuses)
       ? data.bonuses
       : [];
-  return { offers, bonuses };
+  const missions =
+    data?.catalog?.missions && typeof data.catalog.missions === "object"
+      ? data.catalog.missions
+      : data?.missions && typeof data.missions === "object"
+        ? data.missions
+        : null;
+  return {
+    offers,
+    bonuses,
+    missions,
+    showEconomy: typeof data?.showEconomy === "boolean" ? data.showEconomy : null,
+    freePremiumActionsRemaining: toNumberOrNull(data?.freePremiumActionsRemaining),
+  };
+}
+
+export async function recordEconomyEvent({
+  backendUrl,
+  appEnv = "local",
+  auth,
+  eventKey,
+  metadata,
+}: EconomyRequestParams & { eventKey: string; metadata?: Record<string, unknown> }) {
+  if (!backendUrl || !eventKey) return null;
+  const headers = await buildEconomyHeaders({ auth, appEnv });
+  const res = await fetch(`${backendUrl}/economy/events/record`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ eventKey, metadata: metadata || {} }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json().catch(() => null);
+  emitClaimableRewardsChanged();
+  return data;
 }
 
 export function shouldHidePremiumPricing(freePremiumActionsRemaining: number | null | undefined) {

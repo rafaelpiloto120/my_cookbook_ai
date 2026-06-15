@@ -30,15 +30,14 @@ import { auth } from "../firebaseConfig";
 import { getApiBaseUrl } from "../lib/config/api";
 import {
   fetchEconomyCatalogBundle,
+  recordEconomyEvent,
   shouldHidePremiumPricing,
   type EconomyCatalogOffer,
 } from "../lib/economy/client";
-import { claimRewardKeysSequentially, getMealRewardKeysForCount } from "../lib/economy/rewards";
 import { loadMeasurementSystemPreference, MeasurementSystem } from "../lib/myDay";
 import {
   addPhotoMeal,
   addTextMeal,
-  loadMyDayMeals,
   MyDayMealIngredient,
   removeMeal,
   resolveMealEstimate,
@@ -57,6 +56,7 @@ import { getRecipeCaloriesPerServing } from "../lib/recipes/nutrition";
 import { normalizeRecipeDifficulty } from "../lib/recipes/difficulty";
 import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { formatEconomyUnits } from "../lib/economy/format";
+import { maybeShowEggsUnlockedPrompt } from "../lib/economy/unlockPrompt";
 import { refreshLocalReminderSchedule } from "../lib/notifications/localNotifications";
 import { getDeviceId } from "../utils/deviceId";
 
@@ -632,6 +632,9 @@ export default function MyDayAddMealFlow({
       const data = await response.json().catch(() => null);
       const remaining = typeof data?.remaining === "number" ? data.remaining : typeof data?.balance === "number" ? data.balance : null;
       if (typeof remaining === "number") await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
+      if (mode === "commit") {
+        maybeShowEggsUnlockedPrompt(data, t as any, () => router.push("/economy/store" as any));
+      }
       return true;
     } catch (error) {
       console.warn("[MyDayAddMealFlow] requestPremiumAction failed", error);
@@ -644,17 +647,18 @@ export default function MyDayAddMealFlow({
     }
   };
 
-  const claimMealRewardsForCurrentCount = async () => {
+  const recordMealMissionProgress = async () => {
     try {
       if (!API_BASE_URL) return;
-      const meals = await loadMyDayMeals();
-      const rewardKeys = getMealRewardKeysForCount(Array.isArray(meals) ? meals.length : 0);
-      await claimRewardKeysSequentially(
-        { backendUrl: API_BASE_URL, appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local", auth },
-        rewardKeys
-      );
+      await recordEconomyEvent({
+        backendUrl: API_BASE_URL,
+        appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local",
+        auth,
+        eventKey: "meal_logged",
+        metadata: { dateKey: targetMealDate },
+      });
     } catch (err) {
-      console.warn("[MyDayAddMealFlow] meal reward claim failed", err);
+      console.warn("[MyDayAddMealFlow] meal mission progress failed", err);
     }
   };
 
@@ -1125,7 +1129,7 @@ export default function MyDayAddMealFlow({
         }
         await (syncEngine as any)?.markMyDayMealDirty?.(savedMeal);
       }
-      await claimMealRewardsForCurrentCount();
+      await recordMealMissionProgress();
       await finishSaved();
     } finally {
       endReviewSave();
@@ -1179,7 +1183,8 @@ export default function MyDayAddMealFlow({
                 <MaterialIcons name="close" size={22} color={subText} />
               </TouchableOpacity>
             </View>
-            {[
+            <View style={styles.optionsWrap}>
+              {[
               {
                 key: "log_photo",
                 icon: "photo-camera",
@@ -1198,8 +1203,16 @@ export default function MyDayAddMealFlow({
                 action: () => void openRecipeLogger(),
                 description: t("my_day.from_recipe_description", { defaultValue: "Log nutrition from one of your saved recipes." }),
               },
-            ].map((option) => (
-              <TouchableOpacity key={option.key} activeOpacity={0.85} style={[styles.optionRow, { borderColor: border, backgroundColor: bg }]} onPress={option.action}>
+            ].map((option, index, list) => (
+              <TouchableOpacity
+                key={option.key}
+                activeOpacity={0.85}
+                style={[
+                  styles.optionRow,
+                  { borderColor: index < list.length - 1 ? border : "transparent" },
+                ]}
+                onPress={option.action}
+              >
                 <View style={[styles.optionIconBox, { backgroundColor: `${actionTone}18` }]}>
                   <MaterialIcons name={option.icon as any} size={20} color={actionTone} />
                 </View>
@@ -1210,6 +1223,7 @@ export default function MyDayAddMealFlow({
                 <MaterialIcons name="chevron-right" size={22} color={subText} />
               </TouchableOpacity>
             ))}
+            </View>
           </View>
         </Pressable>
       </Modal>
@@ -1280,7 +1294,7 @@ export default function MyDayAddMealFlow({
       <Modal visible={visible && photoSourceVisible} transparent animationType="fade" onRequestClose={closeAll}>
         <Pressable style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]} onPress={closeAll}>
           <View style={[styles.photoSourceCard, { backgroundColor: card, borderColor: border }]} onStartShouldSetResponder={() => true}>
-            <View style={styles.sectionHeader}>
+            <View style={[styles.sectionHeader, styles.photoSourceHeader]}>
               <View style={styles.sectionHeaderTitleGroup}>
                 <TouchableOpacity
                   activeOpacity={0.8}
@@ -1307,20 +1321,36 @@ export default function MyDayAddMealFlow({
               <TouchableOpacity
                 activeOpacity={0.85}
                 disabled={photoPickerInFlight}
-                style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg, opacity: photoPickerInFlight ? 0.65 : 1 }]}
+                style={[styles.photoSourceButton, { borderColor: border, opacity: photoPickerInFlight ? 0.65 : 1 }]}
                 onPress={() => void pickMealPhotoFromSource("library")}
               >
-                <MaterialIcons name="photo-library" size={18} color={actionTone} />
-                <Text style={[styles.photoSourceButtonText, { color: text }]}>{t("my_day.choose_photo", { defaultValue: "Choose from library" })}</Text>
+                <View style={[styles.optionIconBox, { backgroundColor: `${actionTone}18` }]}>
+                  <MaterialIcons name="photo-library" size={20} color={actionTone} />
+                </View>
+                <View style={styles.optionCopy}>
+                  <Text style={[styles.optionLabel, { color: text }]}>{t("my_day.choose_photo", { defaultValue: "Choose from library" })}</Text>
+                  <Text style={[styles.optionDescription, { color: subText }]}>
+                    {t("my_day.choose_photo_description", { defaultValue: "Pick an existing meal photo from your device." })}
+                  </Text>
+                </View>
+                <MaterialIcons name="chevron-right" size={22} color={subText} />
               </TouchableOpacity>
               <TouchableOpacity
                 activeOpacity={0.85}
                 disabled={photoPickerInFlight}
-                style={[styles.photoSourceButton, { borderColor: border, backgroundColor: bg, opacity: photoPickerInFlight ? 0.65 : 1 }]}
+                style={[styles.photoSourceButton, { borderColor: "transparent", opacity: photoPickerInFlight ? 0.65 : 1 }]}
                 onPress={() => void pickMealPhotoFromSource("camera")}
               >
-                <MaterialIcons name="photo-camera" size={18} color={actionTone} />
-                <Text style={[styles.photoSourceButtonText, { color: text }]}>{t("my_day.take_photo", { defaultValue: "Take photo" })}</Text>
+                <View style={[styles.optionIconBox, { backgroundColor: `${actionTone}18` }]}>
+                  <MaterialIcons name="photo-camera" size={20} color={actionTone} />
+                </View>
+                <View style={styles.optionCopy}>
+                  <Text style={[styles.optionLabel, { color: text }]}>{t("my_day.take_photo", { defaultValue: "Take photo" })}</Text>
+                  <Text style={[styles.optionDescription, { color: subText }]}>
+                    {t("my_day.take_photo_description", { defaultValue: "Use the camera to log what you are about to eat." })}
+                  </Text>
+                </View>
+                <MaterialIcons name="chevron-right" size={22} color={subText} />
               </TouchableOpacity>
             </View>
             {shouldHidePremiumPricing(freePremiumActionsRemaining) ? null : (
@@ -1411,27 +1441,34 @@ export default function MyDayAddMealFlow({
               </TouchableOpacity>
             </View>
             {!recipeLibraryLoading && savedRecipes.length === 0 ? (
-              <View style={[styles.emptyState, { backgroundColor: `${secondary}15` }]}>
-                <Text style={[styles.emptyTitle, { color: text }]}>{t("my_day.no_recipes_title", { defaultValue: "No saved recipes yet" })}</Text>
+              <View style={styles.emptyState}>
+                <Text style={[styles.emptyTitle, { color: subText }]}>{t("my_day.no_recipes_title", { defaultValue: "No saved recipes yet" })}</Text>
                 <Text style={[styles.emptyBody, { color: subText }]}>
                   {t("my_day.no_recipes_body", { defaultValue: "Save recipes in My Recipes first, then you can log them into My Day." })}
                 </Text>
               </View>
             ) : (
               <>
-                <Text style={[styles.modalHelp, { color: subText }]}>
-                  {t("my_day.recipe_help", { defaultValue: "Choose a saved recipe to review quantities and nutrition before saving." })}
-                </Text>
-                <TextInput
-                  value={recipeSearchQuery}
-                  onChangeText={(value) => {
-                    setRecipeSearchQuery(value);
-                    setRecipeVisibleCount(RECIPE_PICKER_PAGE_SIZE);
-                  }}
-                  placeholder={t("my_day.search_recipes", { defaultValue: "Search recipes" })}
-                  placeholderTextColor={subText}
-                  style={[styles.recipeSearchInput, { color: text, borderColor: border, backgroundColor: bg }]}
-                />
+                {!recipeSelectionLoading && (
+                  <>
+                    <Text style={[styles.modalHelp, { color: subText }]}>
+                      {t("my_day.recipe_help", { defaultValue: "Choose a saved recipe to review quantities and nutrition before saving." })}
+                    </Text>
+                    <View style={styles.recipeSearchWrap}>
+                      <TextInput
+                        value={recipeSearchQuery}
+                        onChangeText={(value) => {
+                          setRecipeSearchQuery(value);
+                          setRecipeVisibleCount(RECIPE_PICKER_PAGE_SIZE);
+                        }}
+                        placeholder={t("my_day.search_recipes", { defaultValue: "Search recipes" })}
+                        placeholderTextColor={subText}
+                        style={[styles.recipeSearchInput, { color: text, borderColor: border, backgroundColor: bg }]}
+                      />
+                      <MaterialIcons name="search" size={20} color={subText} style={styles.recipeSearchIcon} />
+                    </View>
+                  </>
+                )}
                 {recipeLibraryLoading || recipeSelectionLoading ? (
                   <View style={styles.recipeListLoading}>
                     <ActivityIndicator size="small" color={cta} />
@@ -1442,7 +1479,7 @@ export default function MyDayAddMealFlow({
                     </Text>
                   </View>
                 ) : filteredSavedRecipes.length === 0 ? (
-                  <View style={[styles.emptyState, { backgroundColor: `${secondary}15` }]}>
+                  <View style={styles.emptyState}>
                     <Text style={[styles.emptyTitle, { color: text }]}>{t("my_day.no_recipe_matches_title", { defaultValue: "No matching recipes" })}</Text>
                     <Text style={[styles.emptyBody, { color: subText }]}>
                       {t("my_day.no_recipe_matches_body", { defaultValue: "Try another title or clear your search and filters." })}
@@ -1461,11 +1498,18 @@ export default function MyDayAddMealFlow({
                         setRecipeVisibleCount((prev) => Math.min(prev + RECIPE_PICKER_PAGE_SIZE, filteredSavedRecipes.length));
                       }
                     }}
-                    renderItem={({ item: recipe }) => {
+                    renderItem={({ item: recipe, index }) => {
                       const estimate = estimateRecipeNutrition(recipe);
                       const hasSavedNutrition = Boolean(recipe.nutritionInfo);
                       return (
-                        <TouchableOpacity activeOpacity={0.85} style={[styles.recipeRow, { borderColor: border }]} onPress={() => void handleSelectRecipe(recipe)}>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          style={[
+                            styles.recipeRow,
+                            { borderColor: index < visibleSavedRecipes.length - 1 ? border : "transparent" },
+                          ]}
+                          onPress={() => void handleSelectRecipe(recipe)}
+                        >
                           <View style={styles.recipeRowContent}>
                             <Text style={[styles.recipeTitle, { color: text }]} numberOfLines={2}>{recipe.title}</Text>
                             {hasSavedNutrition ? (
@@ -1711,6 +1755,8 @@ const styles = StyleSheet.create({
   },
   photoSourceCostHint: {
     marginTop: 14,
+    marginHorizontal: 20,
+    marginBottom: 18,
   },
   photoSourceWarning: {
     flexDirection: "row",
@@ -1720,6 +1766,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
+    marginHorizontal: 20,
     marginBottom: 12,
   },
   photoSourceWarningText: {
@@ -1772,31 +1819,36 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   optionSheet: {
-    width: "90%",
-    borderRadius: 18,
+    width: 320,
+    maxWidth: "90%",
+    borderRadius: 12,
     borderWidth: 1,
-    padding: 18,
+    overflow: "hidden",
   },
   optionSheetHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
     gap: 12,
-    marginBottom: 12,
+    padding: 20,
+    paddingBottom: 8,
   },
   optionSheetHelp: {
     marginBottom: 0,
     marginTop: 4,
   },
+  optionsWrap: {
+    paddingHorizontal: 12,
+    paddingBottom: 16,
+  },
   optionRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    borderWidth: 1,
-    borderRadius: 14,
-    marginTop: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    backgroundColor: "transparent",
   },
   optionIconBox: {
     width: 38,
@@ -1819,24 +1871,28 @@ const styles = StyleSheet.create({
   },
   photoSourceCard: {
     width: "88%",
-    borderRadius: 18,
+    maxWidth: 360,
+    borderRadius: 12,
     borderWidth: 1,
-    padding: 18,
+    overflow: "hidden",
+  },
+  photoSourceHeader: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 2,
   },
   photoSourceActions: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 16,
   },
   photoSourceButton: {
-    flex: 1,
-    borderWidth: 1,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 14,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
+    gap: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    backgroundColor: "transparent",
   },
   photoSourceButtonText: {
     fontSize: 13,
@@ -1890,13 +1946,23 @@ const styles = StyleSheet.create({
     borderRadius: 27,
     backgroundColor: "#FFFFFF",
   },
+  recipeSearchWrap: {
+    position: "relative",
+    marginBottom: 10,
+  },
   recipeSearchInput: {
     borderWidth: 1,
     borderRadius: 12,
-    paddingHorizontal: 12,
+    paddingLeft: 12,
+    paddingRight: 42,
     paddingVertical: 10,
     fontSize: 14,
-    marginBottom: 10,
+  },
+  recipeSearchIcon: {
+    position: "absolute",
+    right: 14,
+    top: "50%",
+    marginTop: -10,
   },
   recipeList: {
     maxHeight: 420,
@@ -1907,12 +1973,12 @@ const styles = StyleSheet.create({
     paddingVertical: 18,
   },
   recipeRow: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 4,
+    paddingVertical: 12,
     flexDirection: "row",
     alignItems: "center",
+    backgroundColor: "transparent",
   },
   recipeRowContent: {
     flex: 1,

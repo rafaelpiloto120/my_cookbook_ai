@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 
 import { useThemeColors } from "../context/ThemeContext";
 
+type MaterialIconName = keyof typeof MaterialIcons.glyphMap;
+
 type NewRecipeOptionsModalProps = {
   visible: boolean;
   onClose: () => void;
@@ -27,21 +29,21 @@ export default function NewRecipeOptionsModal({
   const options = [
     {
       key: "manual",
-      icon: "✍️",
+      icon: "edit-note" as MaterialIconName,
       title: t("recipes.manual_recipe"),
       subtitle: t("recipes.manual_recipe_sub"),
       onPress: onManualRecipe,
     },
     {
       key: "url",
-      icon: "🌐",
+      icon: "link" as MaterialIconName,
       title: t("recipes.import_from_url"),
       subtitle: t("recipes.import_desc"),
       onPress: onImportUrl,
     },
     {
       key: "file",
-      icon: "📁",
+      icon: "folder-open" as MaterialIconName,
       title: t("recipes.import_from_file"),
       subtitle: t("recipes.import_from_file_sub"),
       onPress: onImportFile,
@@ -72,7 +74,9 @@ export default function NewRecipeOptionsModal({
                 onPress={option.onPress}
                 activeOpacity={0.8}
               >
-                <Text style={styles.optionEmoji}>{option.icon}</Text>
+                <View style={[styles.optionIconBox, { backgroundColor: `${inlineAccentColor}18` }]}>
+                  <MaterialIcons name={option.icon} size={21} color={inlineAccentColor} />
+                </View>
                 <View style={styles.optionCopy}>
                   <Text style={[styles.optionTitle, { color: text }]}>{option.title}</Text>
                   <Text style={[styles.optionSubtitle, { color: subText }]}>{option.subtitle}</Text>
@@ -122,14 +126,18 @@ const styles = StyleSheet.create({
   optionRow: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 12,
     paddingVertical: 16,
     paddingHorizontal: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     backgroundColor: "transparent",
   },
-  optionEmoji: {
-    fontSize: 26,
-    marginRight: 14,
+  optionIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
   },
   optionCopy: {
     flex: 1,

@@ -16,6 +16,7 @@ import {
   isSuccessResponse,
   statusCodes,
 } from "@react-native-google-signin/google-signin";
+import { MaterialIcons } from "@expo/vector-icons";
 import Svg, { Path } from "react-native-svg";
 
 // ---- Input hardening helpers ----
@@ -110,6 +111,7 @@ export default function SignInScreen() {
 
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [pendingGoogleIdToken, setPendingGoogleIdToken] = useState<string | null>(null);
@@ -125,23 +127,44 @@ export default function SignInScreen() {
     });
   }, [webClientId]);
 
+  const showResetEmailSent = () => {
+    Alert.alert(t("auth.reset_email_sent_title"), t("auth.reset_email_sent_body"));
+  };
+
+  const sendPasswordResetSafely = async (rawEmail: string) => {
+    const emailClean = sanitizeOnSubmitEmail(rawEmail);
+    if (!isValidEmail(emailClean)) {
+      Alert.alert(t("auth.reset_enter_email_title"), t("auth.reset_enter_email_body"));
+      return false;
+    }
+
+    setResetLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, emailClean);
+      showResetEmailSent();
+      return true;
+    } catch (err: any) {
+      if (err?.code === "auth/user-not-found") {
+        showResetEmailSent();
+        return true;
+      }
+      Alert.alert(
+        t("auth.reset_error_title"),
+        t("common.error_generic", { defaultValue: "Something went wrong" })
+      );
+      return false;
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   const handleForgotPassword = async () => {
     if (!email || !email.trim()) {
       setResetEmail("");
       setShowResetModal(true);
       return;
     }
-    try {
-      const emailClean = sanitizeOnSubmitEmail(email);
-      if (!isValidEmail(emailClean)) {
-        Alert.alert(t("auth.reset_enter_email_title"), t("auth.reset_enter_email_body"));
-        return;
-      }
-      await sendPasswordResetEmail(auth, emailClean);
-      Alert.alert(t("auth.reset_email_sent_title"), t("auth.reset_email_sent_body"));
-    } catch (err: any) {
-      Alert.alert(t("auth.reset_error_title"), err?.message || t("common.error_generic", { defaultValue: "Something went wrong" }));
-    }
+    await sendPasswordResetSafely(email);
   };
 
   const handleAuth = async () => {
@@ -171,8 +194,6 @@ export default function SignInScreen() {
               defaultValue: "You can now sign in with Google or with your password.",
             })
           );
-        } else {
-          Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
         }
       }
       router.replace("/(tabs)/profile");
@@ -207,7 +228,6 @@ export default function SignInScreen() {
       selectedGoogleIdToken = idToken;
       await loginWithGoogle(idToken);
       setPendingGoogleIdToken(null);
-      Alert.alert(t("auth.login_success_title"), t("auth.login_success_body"));
       router.replace("/(tabs)/profile");
     } catch (err: any) {
       console.error("Google sign in error:", err?.code, err?.message || err);
@@ -273,9 +293,9 @@ export default function SignInScreen() {
             onChangeText={(v) => setEmail(sanitizeEmailInput(v))}
             editable={!loading && !googleLoading}
           />
-          <View style={styles.passwordContainer}>
+          <View style={[styles.passwordContainer, { borderColor: border, backgroundColor: card }]}>
             <TextInput
-              style={[styles.input, styles.passwordInput, { borderColor: border, color: text, backgroundColor: card }]}
+              style={[styles.passwordInput, { color: text }]}
               placeholder={t("auth.password_placeholder")}
               placeholderTextColor={subText}
               secureTextEntry={!showPassword}
@@ -292,26 +312,43 @@ export default function SignInScreen() {
               onPress={() => setShowPassword((prev) => !prev)}
               style={styles.passwordToggle}
               disabled={loading || googleLoading}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={showPassword ? t("auth.hide_password") : t("auth.show_password")}
             >
-              <Text style={{ color: subText, fontWeight: "600" }}>
-                {showPassword ? t("auth.hide_password") : t("auth.show_password")}
-              </Text>
+              <MaterialIcons
+                name={showPassword ? "visibility-off" : "visibility"}
+                size={22}
+                color={subText}
+              />
             </TouchableOpacity>
           </View>
           <View style={{ width: "100%", alignItems: "flex-end", marginBottom: 8 }}>
-            <TouchableOpacity onPress={handleForgotPassword} disabled={loading || googleLoading}>
+            <TouchableOpacity onPress={handleForgotPassword} disabled={loading || googleLoading || resetLoading}>
               <Text style={{ color: "#8A4B16", fontWeight: "600" }}>{t("auth.forgot_password_link")}</Text>
             </TouchableOpacity>
           </View>
           <Modal visible={showResetModal} transparent animationType="fade" onRequestClose={() => setShowResetModal(false)}>
-            <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "center", alignItems: "center", padding: 20 }}>
-              <View style={{ width: 320, backgroundColor: card, borderRadius: 12, padding: 16 }}>
-                <Text style={{ color: text, fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
-                  {t("auth.reset_enter_email_title")}
-                </Text>
-                <Text style={{ color: subText, marginBottom: 12 }}>{t("auth.reset_enter_email_body")}</Text>
+            <View style={styles.resetModalOverlay}>
+              <View style={[styles.resetModalCard, { backgroundColor: card, borderColor: border }]}>
+                <View style={styles.resetModalHeader}>
+                  <Text style={[styles.resetModalTitle, { color: text }]}>
+                    {t("auth.reset_enter_email_title")}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setShowResetModal(false)}
+                    style={styles.resetModalClose}
+                    disabled={loading || googleLoading}
+                    hitSlop={10}
+                    accessibilityRole="button"
+                    accessibilityLabel={t("common.close", { defaultValue: "Close" })}
+                  >
+                    <MaterialIcons name="close" size={24} color={subText} />
+                  </TouchableOpacity>
+                </View>
+                <Text style={[styles.resetModalBody, { color: subText }]}>{t("auth.reset_enter_email_body")}</Text>
                 <TextInput
-                  style={[styles.input, { borderColor: border, color: text, backgroundColor: card, marginBottom: 12 }]}
+                  style={[styles.input, styles.resetModalInput, { borderColor: border, color: text, backgroundColor: card }]}
                   placeholder={t("auth.email_placeholder")}
                   placeholderTextColor={subText}
                   autoCapitalize="none"
@@ -322,38 +359,31 @@ export default function SignInScreen() {
                   maxLength={254}
                   value={resetEmail}
                   onChangeText={(v) => setResetEmail(sanitizeEmailInput(v))}
-                  editable={!loading && !googleLoading}
+                  editable={!loading && !googleLoading && !resetLoading}
                 />
-                <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                <View style={styles.resetModalActions}>
                   <TouchableOpacity
                     onPress={() => setShowResetModal(false)}
-                    style={{ paddingVertical: 10, paddingHorizontal: 12, marginRight: 8 }}
-                    disabled={loading || googleLoading}
+                    style={[styles.resetModalButton, styles.resetModalCancelButton, { borderColor: border }]}
+                    disabled={loading || googleLoading || resetLoading}
                   >
-                    <Text style={{ color: text, fontWeight: "600" }}>{t("common.cancel")}</Text>
+                    <Text style={[styles.resetModalCancelText, { color: text }]}>{t("common.cancel")}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={async () => {
-                      const v = sanitizeOnSubmitEmail(resetEmail || "");
-                      if (!isValidEmail(v)) {
-                        Alert.alert(t("auth.reset_enter_email_title"), t("auth.reset_enter_email_body"));
-                        return;
-                      }
-                      try {
-                        await sendPasswordResetEmail(auth, v);
+                      const sent = await sendPasswordResetSafely(resetEmail || "");
+                      if (sent) {
                         setShowResetModal(false);
-                        Alert.alert(t("auth.reset_email_sent_title"), t("auth.reset_email_sent_body"));
-                      } catch (err: any) {
-                        Alert.alert(
-                          t("auth.reset_error_title"),
-                          err?.message || t("common.error_generic", { defaultValue: "Something went wrong" })
-                        );
                       }
                     }}
-                    style={{ paddingVertical: 10, paddingHorizontal: 12 }}
-                    disabled={loading || googleLoading}
+                    style={[styles.resetModalButton, styles.resetModalConfirmButton]}
+                    disabled={loading || googleLoading || resetLoading}
                   >
-                    <Text style={{ color: "#8A4B16", fontWeight: "700" }}>{t("common.confirm")}</Text>
+                    {resetLoading ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.resetModalConfirmText}>{t("common.confirm")}</Text>
+                    )}
                   </TouchableOpacity>
                 </View>
               </View>
@@ -416,18 +446,24 @@ const styles = StyleSheet.create({
   input: { width: "100%", borderWidth: 1, borderColor: "#ccc", borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 15 },
   passwordContainer: {
     width: "100%",
+    borderWidth: 1,
+    borderRadius: 10,
     flexDirection: "row",
     alignItems: "center",
     marginBottom: 12,
   },
   passwordInput: {
     flex: 1,
-    marginBottom: 0,
+    paddingVertical: 12,
+    paddingLeft: 12,
+    paddingRight: 8,
+    fontSize: 15,
   },
   passwordToggle: {
-    marginLeft: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    width: 46,
+    minHeight: 46,
+    alignItems: "center",
+    justifyContent: "center",
   },
   fallbackClose: {
     position: "absolute",
@@ -441,6 +477,77 @@ const styles = StyleSheet.create({
   fallbackCloseText: {
     fontSize: 18,
     fontWeight: "700",
+  },
+  resetModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  resetModalCard: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 18,
+  },
+  resetModalHeader: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  resetModalTitle: {
+    flex: 1,
+    paddingRight: 12,
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  resetModalClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  resetModalBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  resetModalInput: {
+    marginBottom: 16,
+  },
+  resetModalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  resetModalButton: {
+    minHeight: 44,
+    minWidth: 104,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+  },
+  resetModalCancelButton: {
+    borderWidth: 1,
+    backgroundColor: "transparent",
+  },
+  resetModalConfirmButton: {
+    backgroundColor: "#8A4B16",
+  },
+  resetModalCancelText: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  resetModalConfirmText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "800",
   },
   button: {
     width: "100%",

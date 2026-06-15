@@ -1,7 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
 
-import { getDayKey, loadMyDayMeals } from "../myDayMeals";
 import { getWeightDayKey, loadWeightLogs } from "../myDayWeight";
 
 export type WeightReminderFrequency = "daily" | "weekly";
@@ -52,6 +51,7 @@ type OptionalNotificationsModule = typeof import("expo-notifications");
 type NotificationResponseSubscription = { remove: () => void };
 
 let cachedNotifications: OptionalNotificationsModule | null | undefined;
+let refreshScheduleQueue: Promise<void> = Promise.resolve();
 
 function getNotifications(): OptionalNotificationsModule | null {
   if (cachedNotifications !== undefined) return cachedNotifications;
@@ -288,7 +288,6 @@ export async function configureLocalNotifications() {
 
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldShowAlert: true,
       shouldPlaySound: false,
       shouldSetBadge: false,
       shouldShowBanner: true,
@@ -320,11 +319,6 @@ export async function cancelAllLocalReminders() {
     )
   );
   await writeScheduledIds({ meal: [], weight: [] });
-}
-
-async function countMealsForDay(dayKey: string) {
-  const meals = await loadMyDayMeals();
-  return meals.filter((meal) => meal.dayKey === dayKey).length;
 }
 
 async function hasWeightForDay(dayKey: string) {
@@ -367,7 +361,7 @@ async function scheduleReminder({
   });
 }
 
-export async function refreshLocalReminderSchedule() {
+async function refreshLocalReminderScheduleNow() {
   const Notifications = getNotifications();
   if (!Notifications) return;
   await configureLocalNotifications();
@@ -390,12 +384,10 @@ export async function refreshLocalReminderSchedule() {
     const base = addDays(now, offset);
 
     if (prefs.mealReminderEnabled) {
-      const dayKey = getDayKey(base);
-      const mealCount = await countMealsForDay(dayKey);
       const enabledMealSlots = filterMealSlotsByMinimumInterval(prefs.mealReminderSlots);
-      for (const [index, mealSlot] of enabledMealSlots.entries()) {
+      for (const mealSlot of enabledMealSlots) {
         const target = withTime(base, mealSlot.time);
-        if (target.getTime() > earliestScheduleTime && mealCount <= index) {
+        if (target.getTime() > earliestScheduleTime) {
           const id = await scheduleReminder({
             date: target,
             title: copy.mealTitle,
@@ -424,6 +416,13 @@ export async function refreshLocalReminderSchedule() {
   }
 
   await writeScheduledIds(nextIds);
+}
+
+export async function refreshLocalReminderSchedule() {
+  refreshScheduleQueue = refreshScheduleQueue
+    .catch(() => undefined)
+    .then(() => refreshLocalReminderScheduleNow());
+  return refreshScheduleQueue;
 }
 
 export function addLocalNotificationResponseListener(

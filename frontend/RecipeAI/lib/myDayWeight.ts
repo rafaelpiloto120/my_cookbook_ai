@@ -11,6 +11,7 @@ export type MyDayWeightLog = {
   createdAt: string;
   dayKey: string;
 };
+export type WeightChartRangeKey = "week" | "month" | "six_months" | "all";
 
 export const MY_DAY_WEIGHT_KEY = "myDayWeightLogs";
 const MY_DAY_WEIGHT_SYNC_KEY = "sync_myday_weights";
@@ -205,4 +206,51 @@ export async function deleteWeightLog(id: string): Promise<void> {
 export function latestWeightLog(logs: MyDayWeightLog[]) {
   if (logs.length === 0) return null;
   return logs[logs.length - 1];
+}
+
+export function getWeightChartRangeStartDayKey(
+  rangeKey: Exclude<WeightChartRangeKey, "all">,
+  now = new Date()
+) {
+  const startDate = new Date(now);
+  if (rangeKey === "week") {
+    startDate.setDate(now.getDate() - 6);
+  } else if (rangeKey === "month") {
+    startDate.setMonth(now.getMonth() - 1);
+  } else if (rangeKey === "six_months") {
+    startDate.setMonth(now.getMonth() - 6);
+  }
+  startDate.setHours(0, 0, 0, 0);
+  return getWeightDayKey(startDate);
+}
+
+export function filterWeightLogsForChartRange(
+  allLogs: MyDayWeightLog[],
+  rangeKey: WeightChartRangeKey,
+  now = new Date()
+) {
+  if (rangeKey === "all") return allLogs;
+  const startDayKey = getWeightChartRangeStartDayKey(rangeKey, now);
+  const todayKey = getWeightDayKey(now);
+  return allLogs.filter((log) => log.dayKey >= startDayKey && log.dayKey <= todayKey);
+}
+
+export function resolveWeightChartRangeWithMinimumPoints(
+  allLogs: MyDayWeightLog[],
+  requestedRangeKey: WeightChartRangeKey,
+  minimumPoints = 2,
+  now = new Date()
+) {
+  const rangeOrder: WeightChartRangeKey[] = ["week", "month", "six_months", "all"];
+  const requestedIndex = rangeOrder.indexOf(requestedRangeKey);
+  const candidateRanges = rangeOrder.slice(Math.max(0, requestedIndex));
+
+  for (const rangeKey of candidateRanges) {
+    const logs = filterWeightLogsForChartRange(allLogs, rangeKey, now);
+    if (logs.length >= minimumPoints || rangeKey === "all") {
+      return { rangeKey, logs };
+    }
+  }
+
+  return { rangeKey: requestedRangeKey, logs: [] };
 }

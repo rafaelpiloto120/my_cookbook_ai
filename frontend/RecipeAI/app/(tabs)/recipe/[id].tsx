@@ -26,6 +26,7 @@ import { getApiBaseUrl } from "../../../lib/config/api";
 import {
   fetchEconomyCatalogBundle,
   fetchEconomySnapshot,
+  recordEconomyEvent,
   shouldHidePremiumPricing,
   writeCachedEconomySnapshot,
   type EconomyCatalogOffer,
@@ -34,6 +35,7 @@ import AppCard from "../../../components/AppCard";
 import InsufficientCookiesModal from "../../../components/InsufficientCookiesModal";
 import EggIcon from "../../../components/EggIcon";
 import { formatEconomyUnits } from "../../../lib/economy/format";
+import { maybeShowEggsUnlockedPrompt } from "../../../lib/economy/unlockPrompt";
 import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { syncEngine } from "../../../lib/sync/SyncEngine";
@@ -138,6 +140,7 @@ export default function RecipeDetail() {
   const [servings, setServings] = useState<number>(1);
   const [cookbookNames, setCookbookNames] = useState<string[]>([]);
   const [isSaved, setIsSaved] = useState(false);
+  const [isSavingRecipe, setIsSavingRecipe] = useState(false);
   const [isEstimatingNutrition, setIsEstimatingNutrition] = useState(false);
   const [recipeActionsVisible, setRecipeActionsVisible] = useState(false);
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
@@ -371,6 +374,9 @@ export default function RecipeDetail() {
                 : null;
           if (typeof remaining === "number") {
             await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
+          }
+          if (mode === "commit") {
+            maybeShowEggsUnlockedPrompt(data, t as any, () => router.push("/economy/store" as any));
           }
         } catch {
           // ignore
@@ -754,8 +760,9 @@ const scaleIngredient = (ingredient: string) => {
 };
 
 const saveRecipe = async () => {
-  if (!currentRecipe) return;
+  if (!currentRecipe || isSavingRecipe) return;
 
+  setIsSavingRecipe(true);
   try {
     const nowTs = Date.now();
 
@@ -819,6 +826,7 @@ const saveRecipe = async () => {
     // 1) Persist locally so UI stays consistent.
     const stored = await AsyncStorage.getItem("recipes");
     const arr: Recipe[] = stored ? JSON.parse(stored) : [];
+    const recipeAlreadySaved = arr.some((r) => r.id === withUpdatedAt.id && !r.isDeleted);
     const next = arr.some((r) => r.id === withUpdatedAt.id)
       ? arr.map((r) => (r.id === withUpdatedAt.id ? withUpdatedAt : r))
       : [...arr, withUpdatedAt];
@@ -917,11 +925,30 @@ const saveRecipe = async () => {
       }
     }
 
+    if (!recipeAlreadySaved) {
+      try {
+        const backendUrl = getApiBaseUrl();
+        if (backendUrl) {
+          await recordEconomyEvent({
+            backendUrl,
+            appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local",
+            auth,
+            eventKey: "recipe_added",
+            metadata: { recipeId: withUpdatedAt.id, source: from === "ai-kitchen" ? "ai-kitchen" : "recipe-detail" },
+          });
+        }
+      } catch (rewardErr) {
+        console.warn("[RecipeDetail] recipe reward/mission progress failed", rewardErr);
+      }
+    }
+
     Alert.alert(t("common.done"), t("recipes.save_success"));
     setIsSaved(true);
   } catch (error) {
     Alert.alert(t("common.error_generic"), t("recipes.save_error"));
     console.error("Failed to save recipe:", error);
+  } finally {
+    setIsSavingRecipe(false);
   }
 };
 
@@ -1500,11 +1527,18 @@ return (
           </TouchableOpacity>
           {!isSaved && (
             <TouchableOpacity
-              style={[styles.fab, { marginLeft: 12 }]}
+              style={[styles.fab, { marginLeft: 12, opacity: isSavingRecipe ? 0.7 : 1 }]}
               onPress={saveRecipe}
+              disabled={isSavingRecipe}
             >
-              <MaterialIcons name="save" size={22} color="#fff" />
-              <Text style={styles.fabText}>{t("recipes.save_recipe")}</Text>
+              {isSavingRecipe ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <MaterialIcons name="save" size={22} color="#fff" />
+              )}
+              <Text style={styles.fabText}>
+                {isSavingRecipe ? t("common.saving", { defaultValue: "Saving..." }) : t("recipes.save_recipe")}
+              </Text>
             </TouchableOpacity>
           )}
         </Animated.View>
@@ -1830,7 +1864,7 @@ const styles = StyleSheet.create({
   },
   actionMenuText: {
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "400",
   },
   modalHeader: {
     flexDirection: "row",

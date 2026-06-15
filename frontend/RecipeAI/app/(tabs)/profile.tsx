@@ -1,5 +1,5 @@
 // app/(tabs)/profile.tsx
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { useTranslation } from "react-i18next";
 import {
@@ -18,6 +18,7 @@ import {
   Platform,
   Alert,
   ToastAndroid,
+  ActivityIndicator,
 } from "react-native";
 import { Stack, useRouter, useFocusEffect, useLocalSearchParams } from "expo-router";
 import type { DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -27,14 +28,14 @@ import { MaterialIcons } from "@expo/vector-icons";
 import * as Application from "expo-application";
 import HealthGoalsEditorModal from "../../components/HealthGoalsEditorModal";
 import EggIcon from "../../components/EggIcon";
+import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 import { useThemeColors, useTheme } from "../../context/ThemeContext";
 import Constants from "expo-constants";
 import { getApiBaseUrl } from "../../lib/config/api";
 import {
-  claimEconomyReward,
   fetchEconomySnapshot,
   readCachedEconomySnapshot,
-  shouldHidePremiumPricing,
+  recordEconomyEvent,
   writeCachedEconomySnapshot,
 } from "../../lib/economy/client";
 import { formatEconomyUnits } from "../../lib/economy/format";
@@ -51,7 +52,7 @@ import {
   type MealReminderSlotId,
   type WeightReminderFrequency,
 } from "../../lib/notifications/localNotifications";
-import { getAuth, updateProfile, updatePassword } from "firebase/auth";
+import { getAuth, updateProfile } from "firebase/auth";
 import { ref as storageRef, uploadString, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { saveUserPrefs, prefsEvents, PREFS_UPDATED } from "../../lib/prefs";
@@ -118,6 +119,38 @@ const languageOptions = supportedLanguages.map(code => ({
   ...getLanguageLabelAndFlag(code as SupportedLanguage),
 }));
 
+function normalizePreferenceKeys(values: unknown, validKeys: string[], prefix: "dietary" | "avoid") {
+  const valid = new Set(validKeys);
+  const normalized: string[] = [];
+
+  if (!Array.isArray(values)) return normalized;
+
+  values.forEach((raw) => {
+    if (typeof raw !== "string") return;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+
+    const withoutPrefix = trimmed.startsWith(`${prefix}.`)
+      ? trimmed.slice(prefix.length + 1)
+      : trimmed;
+    const lower = withoutPrefix.toLowerCase();
+    if (lower === "none" || lower === `${prefix}.none`) return;
+
+    let candidate: string | null = null;
+    if (validKeys.length === 0 || valid.has(withoutPrefix)) {
+      candidate = withoutPrefix;
+    } else if (valid.has(trimmed)) {
+      candidate = trimmed;
+    }
+
+    if (candidate && !normalized.includes(candidate)) {
+      normalized.push(candidate);
+    }
+  });
+
+  return normalized;
+}
+
 // Measurement system type
 type MeasurementSystem = "US" | "Metric";
 type AutoPlanField =
@@ -169,6 +202,7 @@ export default function Profile() {
   const backendUrl = getApiBaseUrl();
   const [cookieBalance, setCookieBalance] = useState<number | null>(null);
   const [freePremiumActionsRemaining, setFreePremiumActionsRemaining] = useState<number | null>(null);
+  const [showEconomySection, setShowEconomySection] = useState(false);
   const [cookieLoading, setCookieLoading] = useState(false);
   const [cookieInfoVisible, setCookieInfoVisible] = useState(false);
   const [healthInfoVisible, setHealthInfoVisible] = useState(false);
@@ -197,6 +231,7 @@ export default function Profile() {
       if (cached) {
         setCookieBalance(cached.balance);
         setFreePremiumActionsRemaining(cached.freePremiumActionsRemaining);
+        setShowEconomySection((cached.freePremiumActionsRemaining ?? 1) <= 0);
       }
       return;
     }
@@ -212,6 +247,11 @@ export default function Profile() {
       if (snapshot) {
         setCookieBalance(snapshot.balance);
         setFreePremiumActionsRemaining(snapshot.freePremiumActionsRemaining);
+        setShowEconomySection(
+          typeof snapshot.showEconomy === "boolean"
+            ? snapshot.showEconomy
+            : (snapshot.freePremiumActionsRemaining ?? 1) <= 0
+        );
         await writeCachedEconomySnapshot(economyUid, snapshot);
       }
     } catch (e) {
@@ -220,6 +260,7 @@ export default function Profile() {
       if (cached) {
         setCookieBalance(cached.balance);
         setFreePremiumActionsRemaining(cached.freePremiumActionsRemaining);
+        setShowEconomySection((cached.freePremiumActionsRemaining ?? 1) <= 0);
       }
     } finally {
       setCookieLoading(false);
@@ -244,25 +285,46 @@ export default function Profile() {
   );
 
   // Dietary and avoid options from i18n (filter out "None" option immediately)
-  const rawDietaryOptions = t("dietary", { returnObjects: true }) as any;
-  const rawAvoidOptions = t("avoid", { returnObjects: true }) as any;
-
-  const allDietaryOptions: Record<string, { label: string; icon: string }> =
-    rawDietaryOptions && typeof rawDietaryOptions === "object" && !Array.isArray(rawDietaryOptions)
-      ? rawDietaryOptions
-      : {};
-
-  const allAvoidOptions: Record<string, { label: string; icon: string }> =
-    rawAvoidOptions && typeof rawAvoidOptions === "object" && !Array.isArray(rawAvoidOptions)
-      ? rawAvoidOptions
-      : {};
-
-  const dietaryOptions = Object.fromEntries(
-    Object.entries(allDietaryOptions).filter(([key]) => key !== "dietary.none" && key.toLowerCase() !== "none")
+  const allDietaryOptions = useMemo<Record<string, { label: string; icon: string }>>(
+    () => {
+      const rawDietaryOptions = t("dietary", { returnObjects: true }) as any;
+      return (
+        rawDietaryOptions && typeof rawDietaryOptions === "object" && !Array.isArray(rawDietaryOptions)
+          ? rawDietaryOptions
+          : {}
+      );
+    },
+    [t, i18n.language]
   );
-  const avoidOptions = Object.fromEntries(
-    Object.entries(allAvoidOptions).filter(([key]) => key !== "avoid.none" && key.toLowerCase() !== "none")
+
+  const allAvoidOptions = useMemo<Record<string, { label: string; icon: string }>>(
+    () => {
+      const rawAvoidOptions = t("avoid", { returnObjects: true }) as any;
+      return (
+        rawAvoidOptions && typeof rawAvoidOptions === "object" && !Array.isArray(rawAvoidOptions)
+          ? rawAvoidOptions
+          : {}
+      );
+    },
+    [t, i18n.language]
   );
+
+  const dietaryOptions = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(allDietaryOptions).filter(([key]) => key !== "dietary.none" && key.toLowerCase() !== "none")
+      ),
+    [allDietaryOptions]
+  );
+  const avoidOptions = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(allAvoidOptions).filter(([key]) => key !== "avoid.none" && key.toLowerCase() !== "none")
+      ),
+    [allAvoidOptions]
+  );
+  const dietaryOptionKeys = useMemo(() => Object.keys(dietaryOptions), [dietaryOptions]);
+  const avoidOptionKeys = useMemo(() => Object.keys(avoidOptions), [avoidOptions]);
 
   const [darkMode, setDarkMode] = useState(false);
   const [measurement, setMeasurement] = useState<MeasurementSystem>("Metric");
@@ -296,7 +358,6 @@ export default function Profile() {
   const [modalEditProfile, setModalEditProfile] = useState(false);
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editPhotoURL, setEditPhotoURL] = useState("");
-  const [editPassword, setEditPassword] = useState("");
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState("");
   const [localPhotoUri, setLocalPhotoUri] = useState<string | null>(null);
@@ -466,7 +527,6 @@ export default function Profile() {
     if (modalEditProfile && user) {
       setEditDisplayName(user.displayName || "");
       setEditPhotoURL(user.photoURL || "");
-      setEditPassword("");
       setEditError("");
     }
   }, [modalEditProfile, user]);
@@ -500,24 +560,14 @@ export default function Profile() {
     }
   }
 
-  // Optionally compress large images on the client before uploading
+  // Normalize avatars on the client before uploading; profile photos are displayed small.
   async function compressImageIfNeeded(uri: string): Promise<string> {
     try {
-      const info = await FileSystem.getInfoAsync(uri);
-      const size = info.exists && typeof info.size === "number" ? info.size : 0;
-      const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3 MB
-
-      // If we know the file is already under the limit, keep as-is
-      if (size > 0 && size <= MAX_IMAGE_BYTES) {
-        return uri;
-      }
-
-      // Resize to a reasonable max width and compress JPEG
       const result = await ImageManipulator.manipulateAsync(
         uri,
-        [{ resize: { width: 1600 } }],
+        [{ resize: { width: 768 } }],
         {
-          compress: 0.75,
+          compress: 0.78,
           format: ImageManipulator.SaveFormat.JPEG,
         }
       );
@@ -801,28 +851,6 @@ export default function Profile() {
           await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(profileLocal));
           setLocalPhotoUri(profileLocal.photoUriLocal);
         } catch { }
-
-        // Password update (optional)
-        if (editPassword && editPassword.length >= 6) {
-          try {
-            await updatePassword(auth.currentUser, editPassword);
-          } catch (e: any) {
-            if (e?.code === "auth/requires-recent-login") {
-              setEditError(t("auth.requires_recent_login") || "For security, please re-authenticate before changing your password.");
-            } else {
-              const rawMsg =
-                (e?.code ? `${e.code}: ` : "") +
-                (typeof e?.message === "string" ? e.message : "");
-              setEditError(
-                rawMsg?.replace("Firebase:", "").trim() ||
-                t("profile.edit_error") ||
-                "Failed to update profile."
-              );
-            }
-            setEditLoading(false);
-            return;
-          }
-        }
       }
     } catch (err: any) {
       const rawMsg =
@@ -917,17 +945,12 @@ export default function Profile() {
       let filteredDietary = parsedDietary;
       let filteredAvoid = parsedAvoid;
 
-      const dietaryKeys = Object.keys(dietaryOptions);
-      const avoidKeys = Object.keys(avoidOptions);
-
-      if (dietaryKeys.length > 0) {
-        const validDietaryKeys = new Set(dietaryKeys);
-        filteredDietary = parsedDietary.filter((d) => validDietaryKeys.has(d));
+      if (dietaryOptionKeys.length > 0) {
+        filteredDietary = normalizePreferenceKeys(parsedDietary, dietaryOptionKeys, "dietary");
       }
 
-      if (avoidKeys.length > 0) {
-        const validAvoidKeys = new Set(avoidKeys);
-        filteredAvoid = parsedAvoid.filter((a) => validAvoidKeys.has(a));
+      if (avoidOptionKeys.length > 0) {
+        filteredAvoid = normalizePreferenceKeys(parsedAvoid, avoidOptionKeys, "avoid");
       }
 
       // Persist cleaned arrays to AsyncStorage to clear legacy "none" / prefixed keys
@@ -1176,13 +1199,10 @@ export default function Profile() {
 
       if (dietaryFromPrefs !== undefined) {
         const raw = dietaryFromPrefs || [];
-
-        let filtered = raw;
-        const dietaryKeys = Object.keys(dietaryOptions);
-        if (dietaryKeys.length > 0) {
-          const validDietaryKeys = new Set(dietaryKeys);
-          filtered = raw.filter((d) => validDietaryKeys.has(d));
-        }
+        const filtered =
+          dietaryOptionKeys.length > 0
+            ? normalizePreferenceKeys(raw, dietaryOptionKeys, "dietary")
+            : raw;
 
         if (!arraysEqual(filtered, dietary)) {
           setDietary(filtered);
@@ -1202,13 +1222,10 @@ export default function Profile() {
 
       if (avoidFromPrefs !== undefined) {
         const raw = avoidFromPrefs || [];
-
-        let filtered = raw;
-        const avoidKeys = Object.keys(avoidOptions);
-        if (avoidKeys.length > 0) {
-          const validAvoidKeys = new Set(avoidKeys);
-          filtered = raw.filter((a) => validAvoidKeys.has(a));
-        }
+        const filtered =
+          avoidOptionKeys.length > 0
+            ? normalizePreferenceKeys(raw, avoidOptionKeys, "avoid")
+            : raw;
 
         if (!arraysEqual(filtered, avoid)) {
           setAvoid(filtered);
@@ -1253,12 +1270,12 @@ export default function Profile() {
     return () => {
       prefsEvents.off(PREFS_UPDATED, onPrefs as any);
     };
-  }, [language, dietaryOptions, avoidOptions, dietary, avoid, measurement, darkMode, avoidOther, isEditingAvoidOther]);
+  }, [language, dietaryOptionKeys, avoidOptionKeys, dietary, avoid, measurement, darkMode, avoidOther, isEditingAvoidOther]);
 
   // Toggle helpers: just add/remove, leave empty if none selected
   const toggleDietary = (optionKey: string) => {
     setDietary((prev) => {
-      let next = [...prev];
+      let next = normalizePreferenceKeys(prev, dietaryOptionKeys, "dietary");
       if (next.includes(optionKey)) {
         next = next.filter(d => d !== optionKey);
       } else {
@@ -1270,7 +1287,7 @@ export default function Profile() {
 
   const toggleAvoid = (optionKey: string) => {
     setAvoid((prev) => {
-      let next = [...prev];
+      let next = normalizePreferenceKeys(prev, avoidOptionKeys, "avoid");
       if (next.includes(optionKey)) {
         next = next.filter(a => a !== optionKey);
         if (optionKey === "other") {
@@ -1347,9 +1364,28 @@ export default function Profile() {
     if (!nextState.mealReminderEnabled && !nextState.weightReminderEnabled && !nextState.offersUpdatesEnabled) {
       nextPartial.notificationsEnabled = false;
     }
-    const saved = await saveLocalNotificationPreferences(nextPartial);
-    setNotificationPrefs(saved);
-    await refreshLocalReminderSchedule();
+    const optimisticNotificationsEnabled =
+      nextPartial.notificationsEnabled ??
+      (nextState.mealReminderEnabled ||
+        nextState.weightReminderEnabled ||
+        nextState.offersUpdatesEnabled);
+
+    const optimisticState: LocalNotificationPreferences = {
+      ...current,
+      ...nextPartial,
+      notificationsEnabled: optimisticNotificationsEnabled,
+    };
+
+    setNotificationPrefs(optimisticState);
+
+    try {
+      const saved = await saveLocalNotificationPreferences(nextPartial);
+      setNotificationPrefs(saved);
+      await refreshLocalReminderSchedule();
+    } catch (err) {
+      setNotificationPrefs(current);
+      throw err;
+    }
   };
 
   const setWeightReminderFrequency = (frequency: WeightReminderFrequency) => {
@@ -1815,28 +1851,15 @@ export default function Profile() {
       });
       try {
         if (backendUrl) {
-          const rewardRes = await claimEconomyReward({
+          await recordEconomyEvent({
             backendUrl,
             appEnv,
             auth,
-            rewardKey: "profile_health_goals_v1",
+            eventKey: "profile_health_goals_completed",
           });
-          if (typeof rewardRes?.cookies === "number") {
-            setCookieBalance(rewardRes.cookies);
-            if (typeof rewardRes?.freePremiumActionsRemaining === "number") {
-              setFreePremiumActionsRemaining(rewardRes.freePremiumActionsRemaining);
-            }
-            await writeCachedEconomySnapshot(economyUid, {
-              balance: rewardRes.cookies,
-              freePremiumActionsRemaining:
-                typeof rewardRes?.freePremiumActionsRemaining === "number"
-                  ? rewardRes.freePremiumActionsRemaining
-                  : freePremiumActionsRemaining,
-            });
-          }
         }
       } catch (rewardErr) {
-        console.warn("[Profile] health goals reward claim failed", rewardErr);
+        console.warn("[Profile] health goals reward progress failed", rewardErr);
       }
       console.log("[Profile][HealthGoals] saveHealthGoals:persisted");
       setMyDayProfile(nextProfile);
@@ -2026,77 +2049,72 @@ export default function Profile() {
           headerStyle: { backgroundColor: headerBg },
           headerTintColor: headerText,
           headerTitleAlign: "center",
+          headerRight: () => <EconomyHeaderAlertButton />,
         }}
       />
 
       <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
-          <View style={styles.sectionTitleRow}>
-            <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>
-              {t("profile.authentication")}
-            </Text>
-            {!!user && !isAnon ? (
-              <TouchableOpacity
-                style={styles.authHeaderAction}
-                activeOpacity={0.7}
-                onPress={logout}
-              >
-                <MaterialIcons name="logout" size={18} color={profileIconColor} />
-                <Text style={[styles.authHeaderActionText, { color: mutedText }]}>
-                  {t("profile.logout")}
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-
+        <View style={styles.authSection}>
           {(!user || isAnon) ? (
-            <View>
+            <View style={styles.authLeanBlock}>
               <TouchableOpacity
-                style={[styles.row, { borderBottomColor: "transparent" }]}
+                style={styles.authSignInRow}
                 activeOpacity={0.7}
                 onPress={() => router.push("/auth/signin")}
               >
-                <MaterialIcons name="person-outline" size={22} color={profileIconColor} />
-                <Text style={[styles.rowText, { color: text }]}>{t("profile.signin_signup")}</Text>
+                <View style={styles.authAvatarControlWrap}>
+                  <View
+                    style={[
+                      styles.authFallbackAvatar,
+                      {
+                        backgroundColor: subtleAvatarBg,
+                        borderColor: border,
+                        borderWidth: 1,
+                      },
+                    ]}
+                  >
+                    <MaterialIcons name="person-outline" size={30} color={profileIconColor} />
+                  </View>
+                </View>
+                <View style={styles.authSummaryCopy}>
+                  <Text numberOfLines={1} style={{ color: text, fontWeight: "600", fontSize: 18 }}>
+                    {t("profile.signin_signup")}
+                  </Text>
+                  <Text style={{ fontSize: 13, color: mutedText, marginTop: 4 }}>
+                    {t("profile.signin_explainer")}
+                  </Text>
+                </View>
               </TouchableOpacity>
-              <Text style={{ fontSize: 13, color: mutedText, marginTop: 6 }}>
-                {t("profile.signin_explainer")}
-              </Text>
             </View>
           ) : (
-            <View>
+            <View style={styles.authLeanBlock}>
               <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  paddingVertical: 16,
-                }}
+                style={styles.authSummaryRow}
               >
                 <View style={styles.authSummaryInfo}>
-                  {(auth.currentUser?.photoURL || localPhotoUri) ? (
-                    <View
-                      style={{
-                        width: 56,
-                        height: 56,
-                        borderRadius: 28,
-                        overflow: "hidden",
-                        backgroundColor: subtleSurface,
-                        justifyContent: "center",
-                        alignItems: "center",
-                      }}
+                  <View style={styles.authAvatarControlWrap}>
+                    {(auth.currentUser?.photoURL || localPhotoUri) ? (
+                      <View style={[styles.profilePhotoImageWrap, { backgroundColor: subtleSurface }]}>
+                        <Image
+                          source={{ uri: (auth.currentUser?.photoURL || localPhotoUri) as string }}
+                          style={styles.profilePhotoImage}
+                          resizeMode="cover"
+                        />
+                      </View>
+                    ) : (
+                      <View style={[styles.authFallbackAvatar, { backgroundColor: subtleAvatarBg }]}>
+                        <MaterialIcons name="person" size={30} color={profileIconColor} />
+                      </View>
+                    )}
+                    <TouchableOpacity
+                      style={[styles.authAvatarEditButton, { backgroundColor: bg, borderColor: border }]}
+                      activeOpacity={0.85}
+                      onPress={() => setModalEditProfile(true)}
+                      hitSlop={8}
                     >
-                      <Image
-                        source={{ uri: (auth.currentUser?.photoURL || localPhotoUri) as string }}
-                        style={{ width: 56, height: 56, borderRadius: 28 }}
-                        resizeMode="cover"
-                      />
-                    </View>
-                  ) : (
-                    <View style={[styles.authFallbackAvatar, { backgroundColor: subtleAvatarBg }]}>
-                      <MaterialIcons name="person" size={30} color={profileIconColor} />
-                    </View>
-                  )}
+                      <MaterialIcons name="edit" size={14} color={profileIconColor} />
+                    </TouchableOpacity>
+                  </View>
                   <View style={styles.authSummaryCopy}>
                     {getDisplayName(user) ? (
                       <>
@@ -2115,16 +2133,16 @@ export default function Profile() {
                   </View>
                 </View>
 
-                <View style={styles.authActionsColumn}>
-                  <TouchableOpacity
-                    style={styles.authIconButton}
-                    activeOpacity={0.85}
-                    onPress={() => setModalEditProfile(true)}
-                    hitSlop={8}
-                  >
-                    <MaterialIcons name="edit" size={20} color={profileIconColor} />
-                  </TouchableOpacity>
-                </View>
+                <TouchableOpacity
+                  style={styles.authHeaderAction}
+                  activeOpacity={0.7}
+                  onPress={logout}
+                >
+                  <MaterialIcons name="logout" size={18} color={profileIconColor} />
+                  <Text style={[styles.authHeaderActionText, { color: mutedText }]}>
+                    {t("profile.logout")}
+                  </Text>
+                </TouchableOpacity>
               </View>
             </View>
           )}
@@ -2141,7 +2159,7 @@ export default function Profile() {
             onPress={() => setModalEditProfile(false)}
           >
             <KeyboardAvoidingView
-              style={{ flex: 1, justifyContent: "flex-end" }}
+              style={styles.keyboardModalWrap}
               behavior="padding"
               keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 40}
               enabled
@@ -2151,7 +2169,7 @@ export default function Profile() {
                   styles.modalContent,
                   {
                     backgroundColor: card,
-                    maxHeight: "85%",
+                    maxHeight: "96%",
                   },
                 ]}
                 onStartShouldSetResponder={() => true}
@@ -2178,27 +2196,40 @@ export default function Profile() {
                     <Text style={{ color: danger, marginBottom: 10 }}>{editError}</Text>
                   ) : null}
                   <View style={styles.editProfilePhotoSection}>
-                    <Pressable
-                      style={[
-                        styles.editProfilePhotoAvatar,
-                        {
-                          backgroundColor: subtleSurface,
-                          borderColor: border,
-                        },
-                      ]}
-                      onPress={pickImage}
-                    >
+                    <View style={styles.editProfilePhotoWrap}>
+                      <Pressable
+                        style={[
+                          styles.editProfilePhotoAvatar,
+                          {
+                            backgroundColor: subtleSurface,
+                            borderColor: border,
+                          },
+                        ]}
+                        onPress={pickImage}
+                      >
+                        {editPhotoURL ? (
+                          <Image
+                            source={{ uri: editPhotoURL }}
+                            style={{ width: 60, height: 60, borderRadius: 30 }}
+                          />
+                        ) : (
+                          <View style={[styles.authFallbackAvatar, { backgroundColor: subtleAvatarBg }]}>
+                            <MaterialIcons name="person" size={30} color={profileIconColor} />
+                          </View>
+                        )}
+                      </Pressable>
                       {editPhotoURL ? (
-                        <Image
-                          source={{ uri: editPhotoURL }}
-                          style={{ width: 60, height: 60, borderRadius: 30 }}
-                        />
-                      ) : (
-                        <View style={[styles.authFallbackAvatar, { backgroundColor: subtleAvatarBg }]}>
-                          <MaterialIcons name="person" size={30} color={profileIconColor} />
-                        </View>
-                      )}
-                    </Pressable>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={removeImage}
+                          style={[styles.profilePhotoRemoveButton, { backgroundColor: card, borderColor: border }]}
+                          accessibilityRole="button"
+                          accessibilityLabel={t("profile.remove_photo", { defaultValue: "Remove Photo" })}
+                        >
+                          <MaterialIcons name="close" size={14} color={profileIconColor} />
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
                     <TouchableOpacity
                       onPress={pickImage}
                       style={[styles.editProfilePhotoAction, { borderColor: border, backgroundColor: bg }]}
@@ -2206,7 +2237,7 @@ export default function Profile() {
                     >
                       <MaterialIcons name="edit" size={16} color={profileIconColor} />
                       <Text style={[styles.editProfilePhotoActionText, { color: text }]}>
-                        {t("profile.edit_profile") || "Edit"}
+                        {t("profile.edit_photo", { defaultValue: "Edit photo" })}
                       </Text>
                     </TouchableOpacity>
                     {uploadProgress !== null && (
@@ -2249,33 +2280,20 @@ export default function Profile() {
                     </Pressable>
                   </View>
                   <View style={{ marginBottom: 18 }}>
-                    <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
-                      {t("profile.change_password") || "Change Password"}
-                    </Text>
-                    <TextInput
+                    <TouchableOpacity
                       style={{
-                        color: text,
-                        fontSize: 15,
-                        borderWidth: 1,
-                        borderColor: border,
-                        borderRadius: 8,
-                        backgroundColor: bg,
-                        paddingHorizontal: 10,
-                        paddingVertical: 7,
+                        alignSelf: "flex-start",
+                        paddingVertical: 4,
                       }}
-                      placeholder={t("profile.new_password_placeholder") || "New password"}
-                      value={editPassword}
-                      onChangeText={setEditPassword}
-                      placeholderTextColor={placeholder}
-                      secureTextEntry
-                      returnKeyType="done"
-                      onSubmitEditing={handleSaveProfile}
-                      onFocus={() => {
-                        setTimeout(() => {
-                          scrollRef.current?.scrollToEnd({ animated: true });
-                        }, 50);
+                      onPress={() => {
+                        setModalEditProfile(false);
+                        router.push("/auth/change-password" as any);
                       }}
-                    />
+                    >
+                      <Text style={{ color: "#8A4B16", fontWeight: "600", fontSize: 14 }}>
+                        {t("profile.change_password") || "Change Password"}
+                      </Text>
+                    </TouchableOpacity>
                   </View>
                 </ScrollView>
                 <View
@@ -2335,6 +2353,7 @@ export default function Profile() {
         </Modal>
 
         {/* Cookies / Economy */}
+        {showEconomySection ? (
         <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
           <View style={styles.cookieHeaderRow}>
             <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
@@ -2346,7 +2365,7 @@ export default function Profile() {
               activeOpacity={0.7}
               hitSlop={8}
             >
-              <MaterialIcons name="info-outline" size={20} color={profileIconColor} />
+              <MaterialIcons name="info-outline" size={20} color={mutedText} />
             </TouchableOpacity>
           </View>
 
@@ -2365,18 +2384,20 @@ export default function Profile() {
               <EggIcon size={24} />
             </View>
             <View style={styles.cookieSettingsCopy}>
-              <Text style={[styles.cookieSettingsTitle, { color: text }]}>
-                {cookieLoading
-                  ? t("economy.loading_balance", { defaultValue: "Checking balance..." })
-                  : formatEconomyUnits(t, cookieBalance ?? 0)}
-              </Text>
+              {cookieLoading ? (
+                <View style={styles.cookieLoadingRow}>
+                  <ActivityIndicator size="small" color={mutedText} />
+                  <Text style={[styles.cookieSettingsTitle, { color: text }]}>
+                    {t("economy.cookies", { defaultValue: "Eggs" })}
+                  </Text>
+                </View>
+              ) : (
+                <Text style={[styles.cookieSettingsTitle, { color: text }]}>
+                  {formatEconomyUnits(t, cookieBalance ?? 0)}
+                </Text>
+              )}
               <Text style={[styles.cookieSettingsSubtitle, { color: mutedText }]}>
-                {shouldHidePremiumPricing(freePremiumActionsRemaining)
-                  ? t("economy.free_premium_actions_remaining", {
-                      count: freePremiumActionsRemaining ?? 0,
-                      defaultValue: "{{count}} free premium actions remaining",
-                    })
-                  : t("economy.profile_cookie_manage_hint", { defaultValue: "Manage your balance and top up" })}
+                {t("economy.profile_cookie_manage_hint", { defaultValue: "Manage Eggs to access premium features" })}
               </Text>
             </View>
             <MaterialIcons name="chevron-right" size={22} color={profileIconColor} />
@@ -2388,15 +2409,18 @@ export default function Profile() {
               style={({ pressed }) => [styles.cookieBonusRow, { opacity: pressed ? 0.78 : 1 }]}
               hitSlop={8}
             >
-              <MaterialIcons name="card-giftcard" size={16} color={profileIconColor} />
+              <View style={styles.cookieBonusIcon}>
+                <MaterialIcons name="card-giftcard" size={16} color={profileIconColor} />
+              </View>
               <Text style={[styles.cookieBonusText, { color: accentText }]}>
                 {t("economy.bonus_create_account_line", {
-                  defaultValue: "Create an account and log in once to get +10 free Eggs.",
+                  defaultValue: "Create an account to get +10 free Eggs.",
                 })}
               </Text>
             </Pressable>
           ) : null}
         </View>
+        ) : null}
 
         {/* Cookies info modal */}
         <Modal
@@ -2437,10 +2461,10 @@ export default function Profile() {
                     : "economy.cookies_what_body_logged_out_v2";
 
                   const defaultLoggedIn =
-                    "Eggs are used for premium AI features after your free premium actions are used up. You can buy more at any time, and you can also earn free Eggs by completing key milestones in the app.";
+                    "Eggs are used for premium AI features. You can buy more at any time, and you can also earn free Eggs by completing key milestones in the app.";
 
                   const defaultLoggedOut =
-                    "Eggs are used for premium AI features after your free premium actions are used up. Create an account and sign in to unlock your account bonus, and you can also earn free Eggs by completing key milestones in the app.";
+                    "Eggs are used for premium AI features. Create an account and sign in to unlock your account bonus, and you can also earn free Eggs by completing key milestones in the app.";
 
                   return t(key, {
                     defaultValue: isLoggedIn ? defaultLoggedIn : defaultLoggedOut,
@@ -2553,7 +2577,7 @@ export default function Profile() {
               {t("profile.health_goals_title", { defaultValue: "Health & Goals" })}
             </Text>
             <TouchableOpacity onPress={() => setHealthInfoVisible(true)} style={{ padding: 4 }} activeOpacity={0.7}>
-              <MaterialIcons name="info-outline" size={20} color={profileIconColor} />
+              <MaterialIcons name="info-outline" size={20} color={mutedText} />
             </TouchableOpacity>
           </View>
           <TouchableOpacity
@@ -2609,7 +2633,7 @@ export default function Profile() {
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
             <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>{t("profile.food_preferences")}</Text>
             <TouchableOpacity onPress={() => setFoodPrefsInfoVisible(true)} style={{ padding: 4 }} activeOpacity={0.7}>
-              <MaterialIcons name="info-outline" size={20} color={profileIconColor} />
+              <MaterialIcons name="info-outline" size={20} color={mutedText} />
             </TouchableOpacity>
           </View>
           {/* Dietary Restrictions */}
@@ -2681,7 +2705,7 @@ export default function Profile() {
                         style={[
                           styles.chip,
                           {
-                            backgroundColor: isSelected ? cta : bg,
+                            backgroundColor: isSelected ? cta : "#FFFFFF",
                             borderColor: border,
                           },
                         ]}
@@ -2689,7 +2713,7 @@ export default function Profile() {
                       >
                         <View style={{ flexDirection: "row", alignItems: "center" }}>
                           <Text style={{ fontSize: 16, marginRight: 6 }}>{option.icon}</Text>
-                          <Text style={{ color: isSelected ? selectedText : text }}>
+                          <Text style={{ color: isSelected ? selectedText : "#2B2118" }}>
                             {option.label}
                           </Text>
                         </View>
@@ -2710,85 +2734,98 @@ export default function Profile() {
             style={[styles.modalOverlay, { backgroundColor: modalBackdrop }]}
             onPress={() => setModalAvoid(false)}
           >
-            <View
-              style={[styles.modalContent, { backgroundColor: card }]}
-              onStartShouldSetResponder={() => true}
+            <KeyboardAvoidingView
+              style={styles.keyboardModalWrap}
+              behavior={Platform.OS === "ios" ? "padding" : "height"}
+              keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 20}
             >
-              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 12 }]}>
-                  {t("profile.select_avoid")}
-                </Text>
-                <Pressable
-                  style={{ marginLeft: 10, marginTop: -6 }}
-                  onPress={() => setModalAvoid(false)}
-                  hitSlop={12}
-                >
-                  <MaterialIcons name="close" size={26} color={profileIconColor} />
-                </Pressable>
-              </View>
-
-              {/* Chips */}
-              <View style={styles.chipGroup}>
-                {Object.entries(avoidOptions)
-                  .filter(([key]) => key !== "avoid.none")
-                  .map(([key, option]) => {
-                    const isSelected = avoid.includes(key);
-                    return (
-                      <Pressable
-                        key={key}
-                        style={[
-                          styles.chip,
-                          {
-                            backgroundColor: isSelected ? cta : bg,
-                            borderColor: border,
-                          },
-                        ]}
-                        onPress={() => toggleAvoid(key)}
-                      >
-                        <View style={{ flexDirection: "row", alignItems: "center" }}>
-                          <Text style={{ fontSize: 16, marginRight: 6 }}>{option.icon}</Text>
-                          <Text style={{ color: isSelected ? selectedText : text }}>
-                            {option.label}
-                          </Text>
-                        </View>
-                      </Pressable>
-                    );
-                  })}
-              </View>
-
-              {/* Other input area */}
-              {avoid.includes("other") && (
-                <View style={{ marginBottom: 16, marginTop: 6 }}>
-                  <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
-                    {t("profile.avoid_other_label") || "Other ingredients to avoid:"}
+              <View
+                style={[styles.modalContent, { backgroundColor: card, maxHeight: "96%" }]}
+                onStartShouldSetResponder={() => true}
+              >
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 12 }]}>
+                    {t("profile.select_avoid")}
                   </Text>
-                  <View style={{
-                    borderWidth: 1,
-                    borderColor: border,
-                    borderRadius: 8,
-                    backgroundColor: bg,
-                    paddingHorizontal: 10,
-                    paddingVertical: 7,
-                  }}>
-                    <TextInput
-                      style={{
-                        color: text,
-                        fontSize: 15,
-                        minHeight: 32,
-                      }}
-                      placeholder={t("profile.avoid_other_placeholder") || "Type ingredients to avoid"}
-                      value={avoidOther}
-                      onChangeText={setAvoidOther}
-                      placeholderTextColor={placeholder}
-                      multiline
-                      autoFocus
-                      onFocus={() => setIsEditingAvoidOther(true)}
-                      onBlur={() => setIsEditingAvoidOther(false)}
-                    />
-                  </View>
+                  <Pressable
+                    style={{ marginLeft: 10, marginTop: -6 }}
+                    onPress={() => setModalAvoid(false)}
+                    hitSlop={12}
+                  >
+                    <MaterialIcons name="close" size={26} color={profileIconColor} />
+                  </Pressable>
                 </View>
-              )}
-            </View>
+
+                <ScrollView
+                  keyboardShouldPersistTaps="always"
+                  automaticallyAdjustKeyboardInsets
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={{ paddingBottom: 6 }}
+                >
+                  {/* Chips */}
+                  <View style={styles.chipGroup}>
+                    {Object.entries(avoidOptions)
+                      .filter(([key]) => key !== "avoid.none")
+                      .map(([key, option]) => {
+                        const isSelected = avoid.includes(key);
+                        return (
+                          <Pressable
+                            key={key}
+                            style={[
+                              styles.chip,
+                              {
+                                backgroundColor: isSelected ? cta : "#FFFFFF",
+                                borderColor: border,
+                              },
+                            ]}
+                            onPress={() => toggleAvoid(key)}
+                          >
+                            <View style={{ flexDirection: "row", alignItems: "center" }}>
+                              <Text style={{ fontSize: 16, marginRight: 6 }}>{option.icon}</Text>
+                              <Text style={{ color: isSelected ? selectedText : "#2B2118" }}>
+                                {option.label}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                  </View>
+
+                  {/* Other input area */}
+                  {avoid.includes("other") && (
+                    <View style={{ marginBottom: 16, marginTop: 6 }}>
+                      <Text style={{ color: text, fontWeight: "bold", fontSize: 13, marginBottom: 4 }}>
+                        {t("profile.avoid_other_label") || "Other ingredients to avoid:"}
+                      </Text>
+                      <View style={{
+                        borderWidth: 1,
+                        borderColor: border,
+                        borderRadius: 8,
+                        backgroundColor: bg,
+                        paddingHorizontal: 10,
+                        paddingVertical: 7,
+                      }}>
+                        <TextInput
+                          style={{
+                            color: text,
+                            fontSize: 15,
+                            minHeight: 32,
+                          }}
+                          placeholder={t("profile.avoid_other_placeholder") || "Type ingredients to avoid"}
+                          value={avoidOther}
+                          onChangeText={setAvoidOther}
+                          placeholderTextColor={placeholder}
+                          multiline
+                          autoFocus
+                          onFocus={() => setIsEditingAvoidOther(true)}
+                          onBlur={() => setIsEditingAvoidOther(false)}
+                        />
+                      </View>
+                    </View>
+                  )}
+                </ScrollView>
+              </View>
+            </KeyboardAvoidingView>
           </Pressable>
         </Modal>
 
@@ -2819,84 +2856,13 @@ export default function Profile() {
           }}
         />
 
-        {/* General / Other */}
-        <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
-          <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.general")}</Text>
-          <TouchableOpacity
-            style={[styles.row, { borderBottomColor: border }]}
-            activeOpacity={1}
-          >
-            <MaterialIcons name="dark-mode" size={22} color={profileIconColor} />
-            <Text style={[styles.rowText, { color: text }]}>{t("profile.dark_mode")}</Text>
-            <View style={{ marginLeft: "auto", marginBottom: -6 }}>
-              <Switch
-                value={darkMode}
-                onValueChange={(next) => {
-                  // Keep local UI state in sync
-                  setDarkMode(next);
-
-                  // Keep ThemeContext in sync without relying on effects (avoids loops)
-                  const wantTheme = next ? "dark" : "light";
-                  setThemeMode(wantTheme);
-                }}
-              />
-            </View>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.row, { borderBottomColor: border }]}
-            activeOpacity={1}
-          >
-            <MaterialIcons name="straighten" size={22} color={profileIconColor} />
-            <Text style={[styles.rowText, { color: text }]}>
-              {t("profile.measurement_system")}
-            </Text>
-            <View style={[styles.measurementToggleGroup, { marginLeft: "auto" }]}>
-              <Pressable
-                style={[
-                  styles.toggleBtn,
-                  {
-                    backgroundColor: measurement === "US" ? cta : card,
-                    borderColor: border,
-                  },
-                ]}
-                onPress={() => setMeasurement("US")}
-              >
-                <Text style={{ color: measurement === "US" ? selectedText : text, fontWeight: "600" }}>US</Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.toggleBtn,
-                  {
-                    backgroundColor: measurement === "Metric" ? cta : card,
-                    borderColor: border,
-                  },
-                ]}
-                onPress={() => setMeasurement("Metric")}
-              >
-                <Text style={{ color: measurement === "Metric" ? selectedText : text, fontWeight: "600" }}>Metric</Text>
-              </Pressable>
-            </View>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.row, { borderBottomColor: "transparent" }]}
-            activeOpacity={0.7}
-            onPress={() => setModalLanguage(true)}
-          >
-            <MaterialIcons name="language" size={22} color={profileIconColor} />
-            <Text style={[styles.rowText, { color: text }]}>{t("profile.language")}</Text>
-            <Text style={{ fontSize: 15, marginLeft: "auto", color: text }}>
-              {currentLanguageObj.flag} {currentLanguageObj.label}
-            </Text>
-          </TouchableOpacity>
-        </View>
-
         <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
             <Text style={[styles.sectionTitle, { color: sectionTitleColor, marginBottom: 0 }]}>
               {t("profile.notifications", { defaultValue: "Notifications" })}
             </Text>
             <TouchableOpacity onPress={() => setNotificationsInfoVisible(true)} style={{ padding: 4 }} activeOpacity={0.7}>
-              <MaterialIcons name="info-outline" size={20} color={profileIconColor} />
+              <MaterialIcons name="info-outline" size={20} color={mutedText} />
             </TouchableOpacity>
           </View>
           <View style={[styles.notificationBlock, { borderBottomColor: border }]}>
@@ -2916,7 +2882,7 @@ export default function Profile() {
                 </View>
                 <Text style={[styles.notificationBlockDescription, { color: mutedText }]}>
                   {t("profile.notifications_meals_desc", {
-                    defaultValue: "Add up to 5 daily meal reminders. We skip the next reminder when your logged meals already cover it.",
+                    defaultValue: "Add up to 5 daily meal reminders. Each enabled reminder is sent every day.",
                   })}
                 </Text>
                 {localNotifications.mealReminderEnabled ? (
@@ -2984,13 +2950,13 @@ export default function Profile() {
                             style={[
                               styles.notificationChip,
                               {
-                                backgroundColor: selected ? cta : card,
+                                backgroundColor: selected ? cta : "#FFFFFF",
                                 borderColor: selected ? cta : border,
                               },
                             ]}
                             onPress={() => setWeightReminderFrequency(frequency)}
                           >
-                            <Text style={[styles.notificationChipText, { color: selected ? selectedText : text }]}>
+                            <Text style={[styles.notificationChipText, { color: selected ? selectedText : "#2B2118" }]}>
                               {frequency === "daily"
                                 ? t("profile.notifications_daily", { defaultValue: "Daily" })
                                 : t("profile.notifications_weekly", { defaultValue: "Weekly" })}
@@ -3035,6 +3001,78 @@ export default function Profile() {
                   })}
                 </Text>
               </View>
+        </View>
+
+
+        {/* General / Other */}
+        <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
+          <Text style={[styles.sectionTitle, { color: sectionTitleColor }]}>{t("profile.general")}</Text>
+          <TouchableOpacity
+            style={[styles.row, { borderBottomColor: border }]}
+            activeOpacity={1}
+          >
+            <MaterialIcons name="dark-mode" size={22} color={profileIconColor} />
+            <Text style={[styles.rowText, { color: text }]}>{t("profile.dark_mode")}</Text>
+            <View style={{ marginLeft: "auto", marginBottom: -6 }}>
+              <Switch
+                value={darkMode}
+                onValueChange={(next) => {
+                  // Keep local UI state in sync
+                  setDarkMode(next);
+
+                  // Keep ThemeContext in sync without relying on effects (avoids loops)
+                  const wantTheme = next ? "dark" : "light";
+                  setThemeMode(wantTheme);
+                }}
+              />
+            </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.row, { borderBottomColor: border }]}
+            activeOpacity={1}
+          >
+            <MaterialIcons name="straighten" size={22} color={profileIconColor} />
+            <Text style={[styles.rowText, { color: text }]}>
+              {t("profile.measurement_system")}
+            </Text>
+            <View style={[styles.measurementToggleGroup, { marginLeft: "auto" }]}>
+              <Pressable
+                style={[
+                  styles.toggleBtn,
+                  {
+                    backgroundColor: measurement === "US" ? cta : "#FFFFFF",
+                    borderColor: border,
+                  },
+                ]}
+                onPress={() => setMeasurement("US")}
+              >
+                <Text style={{ color: measurement === "US" ? selectedText : "#2B2118", fontWeight: "600" }}>US</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.toggleBtn,
+                  {
+                    backgroundColor: measurement === "Metric" ? cta : "#FFFFFF",
+                    borderColor: border,
+                  },
+                ]}
+                onPress={() => setMeasurement("Metric")}
+              >
+                <Text style={{ color: measurement === "Metric" ? selectedText : "#2B2118", fontWeight: "600" }}>Metric</Text>
+              </Pressable>
+            </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.row, { borderBottomColor: "transparent" }]}
+            activeOpacity={0.7}
+            onPress={() => setModalLanguage(true)}
+          >
+            <MaterialIcons name="language" size={22} color={profileIconColor} />
+            <Text style={[styles.rowText, { color: text }]}>{t("profile.language")}</Text>
+            <Text style={{ fontSize: 15, marginLeft: "auto", color: text }}>
+              {currentLanguageObj.flag} {currentLanguageObj.label}
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <View style={[styles.sectionCard, { backgroundColor: card, borderColor: border }]}>
@@ -3319,7 +3357,7 @@ export default function Profile() {
             }}
           >
             <KeyboardAvoidingView
-              style={{ flex: 1, justifyContent: "flex-end" }}
+              style={styles.keyboardModalWrap}
               behavior={Platform.OS === "ios" ? "padding" : "height"}
               keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 20}
             >
@@ -3327,7 +3365,7 @@ export default function Profile() {
                 behavior={Platform.OS === "ios" ? "padding" : "height"}
                 style={[
                   styles.modalContent,
-                  { backgroundColor: card, maxHeight: "80%" },
+                  { backgroundColor: card, maxHeight: "96%" },
                 ]}
                 onStartShouldSetResponder={() => true}
               >
@@ -3507,6 +3545,27 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  authSection: {
+    marginBottom: 18,
+    paddingHorizontal: 2,
+  },
+  authLeanBlock: {
+    marginTop: 2,
+  },
+  authSignInRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingTop: 10,
+    paddingBottom: 8,
+    minHeight: 46,
+  },
+  authSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingTop: 10,
+    paddingBottom: 8,
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
@@ -3670,10 +3729,52 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  authAvatarControlWrap: {
+    width: 54,
+    height: 54,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  authAvatarEditButton: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  profilePhotoImageWrap: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    overflow: "hidden",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  profilePhotoImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  },
+  profilePhotoRemoveButton: {
+    position: "absolute",
+    top: -2,
+    right: 0,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   authFallbackAvatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -3701,6 +3802,13 @@ const styles = StyleSheet.create({
   editProfilePhotoSection: {
     marginBottom: 18,
     alignItems: "center",
+  },
+  editProfilePhotoWrap: {
+    width: 68,
+    height: 68,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
   },
   editProfilePhotoAvatar: {
     width: 60,
@@ -3734,13 +3842,20 @@ const styles = StyleSheet.create({
   // Modal and chip styles
   modalOverlay: {
     flex: 1,
-    justifyContent: "flex-end",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 20,
   },
   modalContent: {
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
+    width: "100%",
+    borderRadius: 18,
     padding: 16,
     minHeight: 320,
+    maxHeight: "90%",
+  },
+  keyboardModalWrap: {
+    width: "100%",
+    justifyContent: "center",
   },
   modalHeaderRow: {
     flexDirection: "row",
@@ -3937,6 +4052,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
   },
+  cookieLoadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   cookieSettingsSubtitle: {
     marginTop: 2,
     fontSize: 13,
@@ -3948,8 +4068,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
   },
+  cookieBonusIcon: {
+    width: 34,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   cookieBonusText: {
-    marginLeft: 7,
+    marginLeft: 12,
     flex: 1,
     fontSize: 13,
     fontWeight: "800",

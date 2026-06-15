@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
-import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, Image, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
@@ -327,15 +327,6 @@ export default function MyDayHistoryScreen() {
       count: 0,
       meals: [],
     };
-  const selectedDayMacroLine = useMemo(
-    () =>
-      [
-        `${t("my_day.protein", { defaultValue: "Protein" })} ${nutrientValueForDisplay(selectedDay.protein, healthMeasurement)}${nutrientUnit}`,
-        `${t("my_day.carbs", { defaultValue: "Carbs" })} ${nutrientValueForDisplay(selectedDay.carbs, healthMeasurement)}${nutrientUnit}`,
-        `${t("my_day.fat", { defaultValue: "Fat" })} ${nutrientValueForDisplay(selectedDay.fat, healthMeasurement)}${nutrientUnit}`,
-      ].join(" · "),
-    [healthMeasurement, nutrientUnit, selectedDay.carbs, selectedDay.fat, selectedDay.protein, t]
-  );
   const mealDayKeys = useMemo(() => new Set(days.map((day) => day.dayKey)), [days]);
   const calendarMonthLabel = useMemo(
     () => capitalizeFirst(new Intl.DateTimeFormat(locale, { month: "long", year: "numeric" }).format(calendarMonth), locale),
@@ -348,7 +339,8 @@ export default function MyDayHistoryScreen() {
       ...Array.from({ length: monthStartWeekday }, () => null),
       ...Array.from({ length: daysInMonth }, (_, index) => index + 1),
     ];
-    return [...cells, ...Array.from({ length: Math.max(0, 42 - cells.length) }, () => null)];
+    const targetCellCount = cells.length > 35 ? 42 : 35;
+    return [...cells, ...Array.from({ length: Math.max(0, targetCellCount - cells.length) }, () => null)];
   }, [calendarMonth]);
 
   useFocusEffect(
@@ -697,23 +689,43 @@ export default function MyDayHistoryScreen() {
     }
   };
 
-  const goToDay = (dayKey: string) => {
+  const goToDay = useCallback((dayKey: string) => {
     if (dayKey > todayKey) return;
     setSelectedDayKey(dayKey);
     const nextDate = parseDayKey(dayKey);
     setCalendarMonth(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
     router.setParams({ day: dayKey });
-  };
+  }, [router, todayKey]);
 
   const canGoForward = selectedDayKey < todayKey;
   const canOpenNextCalendarMonth = calendarMonth < currentMonthStart;
+  const daySwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) => {
+          const horizontalMove = Math.abs(gestureState.dx);
+          const verticalMove = Math.abs(gestureState.dy);
+          return horizontalMove > 35 && horizontalMove > verticalMove * 1.25;
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          if (gestureState.dx > 60) {
+            goToDay(addDaysToKey(selectedDayKey, -1));
+            return;
+          }
+          if (gestureState.dx < -60 && canGoForward) {
+            goToDay(addDaysToKey(selectedDayKey, 1));
+          }
+        },
+      }),
+    [canGoForward, goToDay, selectedDayKey]
+  );
 
   return (
     <View style={[styles.screen, { backgroundColor: bg }]}>
       <Stack.Screen
         options={{
           headerShown: true,
-          title: t("my_day.trends_history_title", { defaultValue: "History" }),
+          title: t("my_day.meals_history_title", { defaultValue: "Meals history" }),
           headerStyle: { backgroundColor: headerBg },
           headerTintColor: headerText,
           headerTitleAlign: "center",
@@ -724,8 +736,12 @@ export default function MyDayHistoryScreen() {
           ),
         }}
       />
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <AppCard>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        {...daySwipeResponder.panHandlers}
+      >
+        <View style={styles.dateSection}>
           <View style={styles.dayPickerRow}>
             <TouchableOpacity
               activeOpacity={0.85}
@@ -736,10 +752,11 @@ export default function MyDayHistoryScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               activeOpacity={0.85}
-              style={styles.dayPickerCopy}
+              style={styles.dayDateButton}
               onPress={() => setCalendarVisible(true)}
             >
               <Text style={[styles.dayTitle, { color: text }]}>{selectedDay.title}</Text>
+              <MaterialIcons name="keyboard-arrow-down" size={22} color={inlineAccentColor} />
             </TouchableOpacity>
             <TouchableOpacity
               activeOpacity={0.85}
@@ -750,7 +767,7 @@ export default function MyDayHistoryScreen() {
               <MaterialIcons name="chevron-right" size={22} color={text} />
             </TouchableOpacity>
           </View>
-        </AppCard>
+        </View>
 
         <AppCard>
           <View style={styles.headerRow}>
@@ -759,13 +776,30 @@ export default function MyDayHistoryScreen() {
             </Text>
           </View>
           <View style={[styles.separator, { backgroundColor: border }]} />
-          <View style={styles.caloriesRow}>
-            <MaterialIcons name="local-fire-department" size={16} color={inlineAccentColor} />
-            <Text style={[styles.caloriesText, { color: text }]}>{Math.round(selectedDay.calories)} kcal</Text>
+          <View style={styles.summaryNutritionRow}>
+            <View style={styles.caloriesRow}>
+              <MaterialIcons name="local-fire-department" size={22} color={inlineAccentColor} />
+              <Text style={[styles.caloriesText, { color: text }]}>
+                {selectedDay.count > 0 ? `${Math.round(selectedDay.calories)} kcal` : "-"}
+              </Text>
+            </View>
+            <View style={styles.summaryMacroRow}>
+              {[
+                { key: "protein", label: t("my_day.protein", { defaultValue: "Protein" }), value: selectedDay.count > 0 ? `${nutrientValueForDisplay(selectedDay.protein, healthMeasurement)}${nutrientUnit}` : "-" },
+                { key: "carbs", label: t("my_day.carbs", { defaultValue: "Carbs" }), value: selectedDay.count > 0 ? `${nutrientValueForDisplay(selectedDay.carbs, healthMeasurement)}${nutrientUnit}` : "-" },
+                { key: "fat", label: t("my_day.fat", { defaultValue: "Fat" }), value: selectedDay.count > 0 ? `${nutrientValueForDisplay(selectedDay.fat, healthMeasurement)}${nutrientUnit}` : "-" },
+              ].map((macro) => (
+                <View key={macro.key} style={styles.summaryMacroItem}>
+                  <Text numberOfLines={1} style={[styles.summaryMacroLabel, { color: subText }]}>
+                    {macro.label}
+                  </Text>
+                  <Text numberOfLines={1} style={[styles.summaryMacroValue, { color: text }]}>
+                    {macro.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
           </View>
-          <Text style={[styles.macroLine, { color: subText }]}>
-            {selectedDayMacroLine}
-          </Text>
         </AppCard>
 
         <AppCard>
@@ -776,7 +810,7 @@ export default function MyDayHistoryScreen() {
           </View>
           {selectedDay.meals.length === 0 ? (
             <View style={styles.emptyDayState}>
-              <Text style={[styles.emptyTitle, { color: text }]}>
+              <Text style={[styles.emptyTitle, { color: subText }]}>
                 {t("my_day.history_day_empty_title", { defaultValue: "No meals logged for this day" })}
               </Text>
               <Text style={[styles.emptyBody, { color: subText }]}>
@@ -1026,6 +1060,19 @@ export default function MyDayHistoryScreen() {
                 <MaterialIcons name="chevron-right" size={22} color={canOpenNextCalendarMonth ? text : subText} />
               </TouchableOpacity>
             </View>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={styles.calendarTodayButton}
+              onPress={() => {
+                goToDay(todayKey);
+                setCalendarVisible(false);
+              }}
+            >
+              <MaterialIcons name="today" size={14} color={inlineAccentColor} />
+              <Text style={[styles.calendarTodayText, { color: inlineAccentColor }]}>
+                {t("my_day.today_label", { defaultValue: "Today" })}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.calendarWeekRow}>
               {["S", "M", "T", "W", "T", "F", "S"].map((label, index) => (
                 <Text key={`${label}-${index}`} style={[styles.calendarWeekday, { color: subText }]}>
@@ -1090,21 +1137,29 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
+  dateSection: {
+    marginBottom: 16,
+  },
   dayNavButton: {
     width: 38,
     height: 38,
     borderRadius: 19,
-    borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
   },
-  dayPickerCopy: {
-    flex: 1,
+  dayDateButton: {
+    flexShrink: 1,
+    minWidth: 0,
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
   dayTitle: {
-    fontSize: 17,
-    fontWeight: "700",
+    fontSize: 21,
+    fontWeight: "800",
     textAlign: "center",
   },
   dayMeta: {
@@ -1115,7 +1170,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    marginTop: 4,
+    marginTop: 0,
   },
   dayQuickActions: {
     flexDirection: "row",
@@ -1127,29 +1182,69 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
   },
+  calendarTodayButton: {
+    alignSelf: "flex-end",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  calendarTodayText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
   separator: {
     height: StyleSheet.hairlineWidth,
     marginVertical: 10,
+  },
+  summaryNutritionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
   },
   caloriesRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    marginBottom: 4,
+    flexShrink: 0,
   },
   caloriesText: {
     fontSize: 24,
     fontWeight: "800",
   },
-  macroLine: {
-    fontSize: 14,
-    lineHeight: 20,
+  summaryMacroRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8,
+    width: 156,
+    maxWidth: "58%",
+    minWidth: 0,
+  },
+  summaryMacroItem: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: "flex-end",
+  },
+  summaryMacroLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: 2,
+  },
+  summaryMacroValue: {
+    fontSize: 15,
+    fontWeight: "500",
   },
   mealsWrap: {
     marginTop: 12,
   },
   emptyDayState: {
     paddingTop: 12,
+    paddingLeft: 12,
   },
   mealRow: {
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -1572,12 +1667,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   emptyTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
-    marginBottom: 8,
+    marginBottom: 6,
   },
   emptyBody: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 12,
+    lineHeight: 17,
   },
 });

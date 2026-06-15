@@ -11,6 +11,7 @@ import { useSyncEngine } from "../../lib/sync/SyncEngine";
 import { useFocusEffect } from "@react-navigation/native";
 import { getApiBaseUrl } from "../../lib/config/api";
 import { loadLastMainTab, mainTabFromPathname, saveLastMainTab } from "../../lib/navigation/lastMainTab";
+import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 
 export default function TabLayout() {
   const { isDark, bg, text, tabBarBg, tabBarActive, tabBarInactive } = useThemeColors();
@@ -145,6 +146,7 @@ export default function TabLayout() {
           headerStyle: { backgroundColor: bg },
           headerTintColor: text,
           headerTitleStyle: { fontWeight: "600" },
+          headerRight: () => <EconomyHeaderAlertButton />,
           tabBarStyle: { backgroundColor: tabBarBg },
           tabBarActiveTintColor: tabBarActive,
           tabBarInactiveTintColor: tabBarInactive,
@@ -252,6 +254,13 @@ export default function TabLayout() {
         />
         <Tabs.Screen
           name="my-day/weight"
+          options={{
+            href: null,
+            headerShown: false,
+          }}
+        />
+        <Tabs.Screen
+          name="economy/store"
           options={{
             href: null,
             headerShown: false,

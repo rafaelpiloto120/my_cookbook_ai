@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cook N'Eat Admin</title>
+    <link rel="stylesheet" href="/admin-assets/styles.css?v=20260615-hidden-fix" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">C</div>
+          <div>
+            <div class="brand-name">Cook N'Eat</div>
+            <div class="brand-subtitle">Admin</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Admin sections">
+          <button class="nav-button active" data-view="dashboard">Dashboard</button>
+          <button class="nav-button" data-view="capabilities">Capabilities</button>
+          <button class="nav-button" data-view="users">Users</button>
+          <button class="nav-button" data-view="activity">Activity</button>
+          <button class="nav-button" data-view="audit">Audit logs</button>
+        </nav>
+        <div class="session-panel">
+          <div id="sessionEmail" class="session-email">Signed out</div>
+          <button id="signOutButton" class="secondary-button" type="button" hidden>Sign out</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section id="loginView" class="login-view">
+          <form id="loginForm" class="login-form">
+            <h1>Admin sign in</h1>
+            <label>
+              Email
+              <input id="emailInput" type="email" autocomplete="email" required />
+            </label>
+            <label>
+              Password
+              <input id="passwordInput" type="password" autocomplete="current-password" required />
+            </label>
+            <button class="primary-button" type="submit">Sign in</button>
+            <div id="loginError" class="error-text" role="alert"></div>
+            <pre id="loginDebug" class="login-debug" aria-live="polite"></pre>
+          </form>
+        </section>
+
+        <section id="adminView" class="admin-view" hidden>
+          <header class="topbar">
+            <div>
+              <h1 id="viewTitle">Dashboard</h1>
+              <div id="viewSubtitle" class="subtitle"></div>
+            </div>
+            <button id="refreshButton" class="secondary-button" type="button">Refresh</button>
+          </header>
+
+          <section id="dashboardView" class="view-section"></section>
+          <section id="capabilitiesView" class="view-section" hidden></section>
+          <section id="usersView" class="view-section" hidden></section>
+          <section id="userDetailView" class="view-section" hidden></section>
+          <section id="activityView" class="view-section" hidden></section>
+          <section id="auditView" class="view-section" hidden></section>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/admin-assets/app.js?v=20260615-capabilities"></script>
+  </body>
+</html>

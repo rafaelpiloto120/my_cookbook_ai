@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 // --- Input sanitizer ---
 function sanitizeInput(text: string, multiline = false): string {
   // Remove leading/trailing whitespace, normalize line endings, remove control chars except \n for multiline
@@ -40,6 +40,7 @@ import AppCard from "../components/AppCard";
 import InsufficientCookiesModal from "../components/InsufficientCookiesModal";
 import EggIcon from "../components/EggIcon";
 import { formatEconomyUnits } from "../lib/economy/format";
+import { maybeShowEggsUnlockedPrompt } from "../lib/economy/unlockPrompt";
 import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
@@ -47,17 +48,13 @@ import { getDeviceId } from "../utils/deviceId";
 import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { getApiBaseUrl } from "../lib/config/api";
 import {
-  claimEconomyReward,
   fetchEconomyCatalogBundle,
   fetchEconomySnapshot,
+  recordEconomyEvent,
   shouldHidePremiumPricing,
   writeCachedEconomySnapshot,
   type EconomyCatalogOffer,
 } from "../lib/economy/client";
-import {
-  claimRewardKeysSequentially,
-  getRecipeRewardKeysForCount,
-} from "../lib/economy/rewards";
 import {
   RecipeNutritionInfo,
   normalizeRecipeNutritionInfo,
@@ -72,6 +69,10 @@ import {
 } from "../lib/myDayRecipes";
 
 const defaultImage = require("../assets/default_recipe.png");
+const RECIPE_TAG_MAX_LENGTH = 32;
+const TAGS_INITIAL_VISIBLE = 12;
+const TAGS_VISIBLE_INCREMENT = 12;
+const TAG_INPUT_MAX_LENGTH = 180;
 
 interface Recipe {
   id: string;
@@ -290,6 +291,8 @@ export default function AddRecipe() {
   const [tags, setTags] = useState<string[]>([]);
   const [newTag, setNewTag] = useState("");
   const [allTags, setAllTags] = useState<string[]>([]);
+  const [tagSearch, setTagSearch] = useState("");
+  const [visibleTagCount, setVisibleTagCount] = useState(TAGS_INITIAL_VISIBLE);
   const [image, setImage] = useState<string | undefined>(undefined); // 🔹 imagem escolhida
   const [nutritionCalories, setNutritionCalories] = useState("");
   const [nutritionProtein, setNutritionProtein] = useState("");
@@ -678,8 +681,17 @@ export default function AddRecipe() {
         if (storedRecipes) {
           const recipes: Recipe[] = JSON.parse(storedRecipes);
           const uniqueTagsSet = new Set<string>();
-          recipes.forEach((r) => (r.tags || []).forEach((t) => uniqueTagsSet.add(t)));
-          setAllTags(Array.from(uniqueTagsSet));
+          recipes.forEach((r) =>
+            (r.tags || [])
+              .map((tag) => String(tag || "").trim())
+              .filter(Boolean)
+              .forEach((tag) => uniqueTagsSet.add(tag))
+          );
+          setAllTags(
+            Array.from(uniqueTagsSet).sort((a, b) =>
+              a.localeCompare(b, undefined, { sensitivity: "base" })
+            )
+          );
         }
       } catch (err) {
         console.error("Error loading tags:", err);
@@ -764,12 +776,43 @@ export default function AddRecipe() {
     );
   };
 
+  const orderedTagOptions = useMemo(() => {
+    return [...allTags].sort((a, b) => {
+      const aSelected = tags.includes(a);
+      const bSelected = tags.includes(b);
+      if (aSelected !== bSelected) return aSelected ? -1 : 1;
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    });
+  }, [allTags, tags]);
+
+  const filteredTagOptions = useMemo(() => {
+    const search = tagSearch.trim().toLowerCase();
+    if (!search) return orderedTagOptions;
+    return orderedTagOptions.filter((tag) => tag.toLowerCase().includes(search));
+  }, [orderedTagOptions, tagSearch]);
+
+  const visibleTagOptions =
+    tagSearch.trim().length > 0
+      ? filteredTagOptions
+      : filteredTagOptions.slice(0, visibleTagCount);
+
   // Add new tag(s) (comma-separated, trims, filters, avoids duplicates)
   const addTag = () => {
     // Split by comma, trim, filter out empty
     const rawTags = newTag.split(",").map(t => t.trim()).filter(Boolean);
     if (rawTags.length === 0) {
       setNewTag("");
+      return;
+    }
+    const tooLongTag = rawTags.find((tag) => tag.length > RECIPE_TAG_MAX_LENGTH);
+    if (tooLongTag) {
+      Alert.alert(
+        t("recipes.tags"),
+        t("recipes.tag_limit_message", {
+          count: RECIPE_TAG_MAX_LENGTH,
+          defaultValue: "Tags can have up to {{count}} characters.",
+        })
+      );
       return;
     }
     // Only add tags not already present
@@ -779,7 +822,11 @@ export default function AddRecipe() {
       // Add to allTags any missing tags
       const allUniqueTagsToAdd = newUniqueTags.filter(t => !allTags.includes(t));
       if (allUniqueTagsToAdd.length > 0) {
-        setAllTags(prev => [...prev, ...allUniqueTagsToAdd]);
+        setAllTags(prev =>
+          [...prev, ...allUniqueTagsToAdd].sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: "base" })
+          )
+        );
       }
     }
     setNewTag("");
@@ -890,6 +937,9 @@ export default function AddRecipe() {
 
           if (typeof remaining === "number") {
             await AsyncStorage.setItem("economy_cookie_balance", String(remaining));
+          }
+          if (mode === "commit") {
+            maybeShowEggsUnlockedPrompt(data, t as any, () => router.push("/economy/store" as any));
           }
         } catch {
           // ignore
@@ -1274,38 +1324,18 @@ export default function AddRecipe() {
 
       try {
         if (backendUrl) {
-          const storedRecipes = await AsyncStorage.getItem("recipes");
-          const parsedRecipes = storedRecipes ? JSON.parse(storedRecipes) : [];
-          const activeRecipeCount = Array.isArray(parsedRecipes)
-            ? parsedRecipes.filter((item: any) => !item?.isDeleted).length
-            : 0;
-          const rewardRes =
-            (await claimRewardKeysSequentially(
-              {
-                backendUrl,
-                appEnv,
-                auth,
-              },
-              getRecipeRewardKeysForCount(activeRecipeCount)
-            )) ||
-            (await claimEconomyReward({
+          if (!editingRecipe) {
+            await recordEconomyEvent({
               backendUrl,
               appEnv,
               auth,
-              rewardKey: "first_recipe_saved_v1",
-            }));
-          if (typeof rewardRes?.cookies === "number") {
-            await writeCachedEconomySnapshot(auth.currentUser?.uid, {
-              balance: rewardRes.cookies,
-              freePremiumActionsRemaining:
-                typeof rewardRes?.freePremiumActionsRemaining === "number"
-                  ? rewardRes.freePremiumActionsRemaining
-                  : freePremiumActionsRemaining,
+              eventKey: "recipe_added",
+              metadata: { recipeId: newRecipe.id, source: "manual" },
             });
           }
         }
       } catch (rewardErr) {
-        console.warn("[AddRecipe] reward claim failed", rewardErr);
+        console.warn("[AddRecipe] reward progress failed", rewardErr);
       }
 
       router.back();
@@ -1861,19 +1891,49 @@ export default function AddRecipe() {
           {/* Tags Section */}
           <Text style={[styles.label, { color: text }]}>{t("recipes.tags")}</Text>
           <AppCard>
+            {allTags.length > 0 && (
+              <View style={[styles.tagSearchWrap, { borderColor: border, backgroundColor: "#FFFFFF" }]}>
+                <MaterialIcons name="search" size={18} color={subText} />
+                <TextInput
+                  style={[styles.tagSearchInput, { color: "#2B2118" }]}
+                  placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
+                  placeholderTextColor={subText}
+                  value={tagSearch}
+                  onChangeText={(value) => {
+                    setTagSearch(sanitizeInput(value));
+                    setVisibleTagCount(TAGS_INITIAL_VISIBLE);
+                  }}
+                />
+              </View>
+            )}
             <View style={{ flexDirection: "row", flexWrap: "wrap", marginBottom: 10 }}>
-              {allTags.map((tag) => (
+              {visibleTagOptions.map((tag) => (
                 <TagChip
                   key={tag}
                   label={tag}
                   selected={tags.includes(tag)}
                   onPress={() => toggleTag(tag)}
-                  card={card}
+                  card="#FFFFFF"
                   border={border}
-                  textColor={text}
+                  textColor="#2B2118"
                 />
               ))}
             </View>
+            {filteredTagOptions.length === 0 && allTags.length > 0 ? (
+              <Text style={[styles.tagEmptyText, { color: subText }]}>
+                {t("recipes.no_tag_matches", { defaultValue: "No matching tags" })}
+              </Text>
+            ) : null}
+            {tagSearch.trim().length === 0 && filteredTagOptions.length > visibleTagCount ? (
+              <TouchableOpacity
+                style={styles.tagMoreButton}
+                onPress={() => setVisibleTagCount((prev) => prev + TAGS_VISIBLE_INCREMENT)}
+              >
+                <Text style={[styles.tagMoreText, { color: cta }]}>
+                  {t("recipes.show_more_tags", { defaultValue: "Show more tags" })}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
             <View style={styles.inputButtonRow}>
               <TextInput
                 style={[
@@ -1889,6 +1949,7 @@ export default function AddRecipe() {
                 placeholderTextColor={subText}
                 value={newTag}
                 onChangeText={(text) => setNewTag(sanitizeInput(text))}
+                maxLength={TAG_INPUT_MAX_LENGTH}
                 onSubmitEditing={addTag}
                 returnKeyType="done"
               />
@@ -1975,7 +2036,7 @@ const TagChip: React.FC<{
   card: string;
   border: string;
   textColor: string;
-}> = React.memo(({ label, selected, onPress, card, border, textColor }) => {
+}> = React.memo(function TagChipComponent({ label, selected, onPress, card, border, textColor }) {
   const { cta } = useThemeColors();
   return (
     <TouchableOpacity
@@ -1989,7 +2050,13 @@ const TagChip: React.FC<{
         },
       ]}
     >
-      <Text style={{ color: selected ? "#fff" : textColor }}>{label}</Text>
+      <Text
+        numberOfLines={1}
+        ellipsizeMode="tail"
+        style={{ color: selected ? "#fff" : textColor, maxWidth: 180 }}
+      >
+        {label}
+      </Text>
     </TouchableOpacity>
   );
 });
@@ -2120,6 +2187,35 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginRight: 8,
     marginBottom: 8,
+  },
+  tagSearchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    minHeight: 42,
+    marginBottom: 12,
+    gap: 8,
+  },
+  tagSearchInput: {
+    flex: 1,
+    minHeight: 40,
+    fontSize: 14,
+    paddingVertical: 0,
+  },
+  tagEmptyText: {
+    fontSize: 13,
+    marginBottom: 10,
+  },
+  tagMoreButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  tagMoreText: {
+    fontSize: 14,
+    fontWeight: "600",
   },
   inputButtonRow: {
     flexDirection: "row",

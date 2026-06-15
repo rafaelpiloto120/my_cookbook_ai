@@ -43,19 +43,17 @@ import { normalizeRecipeDifficulty } from "../../lib/recipes/difficulty";
 import { formatImportedRecipeNote } from "../../lib/recipes/importNotes";
 import { getApiBaseUrl as getResolvedApiBaseUrl } from "../../lib/config/api";
 import {
-  claimEconomyReward,
   fetchEconomyCatalogBundle,
   fetchEconomySnapshot,
+  recordEconomyEvent,
   shouldHidePremiumPricing,
   writeCachedEconomySnapshot,
   type EconomyCatalogOffer,
 } from "../../lib/economy/client";
 import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
+import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 import { formatEconomyUnits } from "../../lib/economy/format";
-import {
-  claimRewardKeysSequentially,
-  getRecipeRewardKeysForCount,
-} from "../../lib/economy/rewards";
+import { maybeShowEggsUnlockedPrompt } from "../../lib/economy/unlockPrompt";
 
 const defaultImage = require("../../assets/default_recipe.png");
 
@@ -235,7 +233,8 @@ export default function History() {
   const router = useRouter();
   const { bg, text, subText, card, border, cta, isDark, headerBg, headerText } = useThemeColors();
   const inlineAccentColor = isDark ? "#F2D6A3" : cta;
-  const chipBg = isDark ? card : "#F6EBD3";
+  const chipBg = "#FFFFFF";
+  const chipText = "#2B2118";
   const { t } = useTranslation();
   const auth = useAuth();
   // Prefer the singleton engine (always available). AuthContext may expose one too.
@@ -368,20 +367,16 @@ export default function History() {
 
       try {
         if (backendUrl && result.count > 0) {
-          const activeRecipeCount = Array.isArray(nextRecipes)
-            ? nextRecipes.filter((item: any) => !item?.isDeleted).length
-            : 0;
-          await claimRewardKeysSequentially(
-            {
-              backendUrl,
-              appEnv,
-              auth: firebaseAuth,
-            },
-            getRecipeRewardKeysForCount(activeRecipeCount)
-          );
+          await recordEconomyEvent({
+            backendUrl,
+            appEnv,
+            auth: firebaseAuth,
+            eventKey: "recipe_added",
+            metadata: { source: "file_import", count: result.count },
+          });
         }
       } catch (rewardErr) {
-        console.warn("[History] file import reward claim failed", rewardErr);
+        console.warn("[History] file import reward progress failed", rewardErr);
       }
 
       Alert.alert(
@@ -805,15 +800,16 @@ export default function History() {
 
     try {
       if (backendUrl) {
-        await claimEconomyReward({
+        await recordEconomyEvent({
           backendUrl,
           appEnv,
           auth: firebaseAuth,
-          rewardKey: "first_cookbook_created_v1",
+          eventKey: "cookbook_created",
+          metadata: { cookbookId: newBook.id },
         });
       }
     } catch (rewardErr) {
-      console.warn("[History] cookbook reward claim failed", rewardErr);
+      console.warn("[History] cookbook reward progress failed", rewardErr);
     }
 
     setNewCookbookName("");
@@ -843,6 +839,14 @@ export default function History() {
     } catch (error) {
       Alert.alert(t("common.error_generic"), t("recipes.share_error"));
     }
+  };
+
+  const startCookingRecipe = (recipe: Recipe) => {
+    setRecipeActionTarget(null);
+    router.push({
+      pathname: "/recipe/start-cooking",
+      params: { recipe: JSON.stringify(recipe) },
+    } as any);
   };
 
   // --- Delete cookbook
@@ -1013,6 +1017,8 @@ export default function History() {
   const selectedCookbookSortLabel =
     sortOptions.find((option) => option.value === cookbookSortBy)?.label ??
     t("recipes.sort_alphabetical_asc", { defaultValue: "Alphabetical (A-Z)" });
+  const activeRecipeFilterCount =
+    selectedDifficulties.length + selectedCalories.length + selectedTags.length;
 
   const calorieFilterOptions: { value: CalorieFilterOption; label: string }[] = [
     {
@@ -1062,6 +1068,7 @@ export default function History() {
           headerStyle: { backgroundColor: headerBg },
           headerTintColor: headerText,
           headerTitleAlign: "center",
+          headerRight: () => <EconomyHeaderAlertButton />,
         }}
       />
 
@@ -1121,8 +1128,17 @@ export default function History() {
               value={search}
               onChangeText={setSearch}
             />
-            <TouchableOpacity onPress={() => setFilterVisible(true)}>
+            <TouchableOpacity
+              onPress={() => setFilterVisible(true)}
+              style={styles.filterIconButton}
+              accessibilityLabel={t("recipes.filters", { defaultValue: "Filters" })}
+            >
               <MaterialIcons name="filter-list" size={24} color={inlineAccentColor} />
+              {activeRecipeFilterCount > 0 ? (
+                <View style={[styles.filterCountBadge, { backgroundColor: cta }]}>
+                  <Text style={styles.filterCountText}>{activeRecipeFilterCount}</Text>
+                </View>
+              ) : null}
             </TouchableOpacity>
           </View>
 
@@ -1131,12 +1147,13 @@ export default function History() {
             accessibilityLabel={t("recipes.sort_by", { defaultValue: "Sort by" })}
             style={styles.sortSummaryButton}
           >
-            <Text style={[styles.resultMetaText, { color: text }]}>
-              {t("recipes.sort_by_label", {
-                defaultValue: "Sort by: {{value}}",
-                value: selectedSortLabel,
-              })}
+            <Text style={[styles.resultMetaText, styles.sortSummaryLabel, { color: cta }]}>
+              {t("recipes.sort_by", { defaultValue: "Sort by" })}:
             </Text>
+            <Text style={[styles.resultMetaText, { color: text }]} numberOfLines={1}>
+              {selectedSortLabel}
+            </Text>
+            <MaterialIcons name="keyboard-arrow-down" size={18} color={cta} />
           </TouchableOpacity>
 
           <FlatList
@@ -1228,12 +1245,13 @@ export default function History() {
             accessibilityLabel={t("recipes.sort_by", { defaultValue: "Sort by" })}
             style={[styles.sortSummaryButton, styles.cookbookSortSummaryButton]}
           >
-            <Text style={[styles.resultMetaText, { color: text }]}>
-              {t("recipes.sort_by_label", {
-                defaultValue: "Sort by: {{value}}",
-                value: selectedCookbookSortLabel,
-              })}
+            <Text style={[styles.resultMetaText, styles.sortSummaryLabel, { color: cta }]}>
+              {t("recipes.sort_by", { defaultValue: "Sort by" })}:
             </Text>
+            <Text style={[styles.resultMetaText, { color: text }]} numberOfLines={1}>
+              {selectedCookbookSortLabel}
+            </Text>
+            <MaterialIcons name="keyboard-arrow-down" size={18} color={cta} />
           </TouchableOpacity>
           <FlatList
             data={visibleCookbooks}
@@ -1353,10 +1371,6 @@ export default function History() {
         <TouchableOpacity
           style={styles.modalOverlay}
           activeOpacity={1}
-          onPressOut={() => {
-            setImportUrlVisible(false);
-            setImportError(null);
-          }}
         >
           <View style={[styles.modalContent, { backgroundColor: card }]}>
             <View style={styles.modalHeader}>
@@ -1583,6 +1597,9 @@ export default function History() {
                     return;
                   }
                   const data = await res.json();
+                  if (isInstagram) {
+                    maybeShowEggsUnlockedPrompt(data, t as any, () => router.push("/economy/store" as any));
+                  }
                   const sourceUrl = data.recipe?.sourceUrl || trimmedUrl;
                   const recipe = {
                     ...data.recipe,
@@ -1615,15 +1632,15 @@ export default function History() {
                     await AsyncStorage.setItem(draftKey, JSON.stringify(recipe));
                     try {
                       if (backendUrl) {
-                        await claimEconomyReward({
+                        await recordEconomyEvent({
                           backendUrl,
                           appEnv,
                           auth: firebaseAuth,
-                          rewardKey: "first_instagram_reel_import_v1",
+                          eventKey: "instagram_reel_imported",
                         });
                       }
                     } catch (rewardErr) {
-                      console.warn("[History] Instagram Reel reward claim failed", rewardErr);
+                      console.warn("[History] Instagram Reel reward progress failed", rewardErr);
                     }
                     setImportUrl("");
                     setImportUrlVisible(false);
@@ -1674,20 +1691,16 @@ export default function History() {
 
                   try {
                     if (backendUrl) {
-                      const activeRecipeCount = Array.isArray(parsed)
-                        ? parsed.filter((item: any) => !item?.isDeleted).length
-                        : 0;
-                      await claimRewardKeysSequentially(
-                        {
-                          backendUrl,
-                          appEnv,
-                          auth: firebaseAuth,
-                        },
-                        getRecipeRewardKeysForCount(activeRecipeCount)
-                      );
+                      await recordEconomyEvent({
+                        backendUrl,
+                        appEnv,
+                        auth: firebaseAuth,
+                        eventKey: "recipe_added",
+                        metadata: { recipeId: recipe.id, source: isInstagram ? "instagram_reel" : "url_import" },
+                      });
                     }
                   } catch (rewardErr) {
-                    console.warn("[History] imported recipe reward claim failed", rewardErr);
+                    console.warn("[History] imported recipe reward progress failed", rewardErr);
                   }
 
                   setImportUrl("");
@@ -1818,7 +1831,7 @@ export default function History() {
                     >
                       <Text
                         style={{
-                          color: selectedDifficulties.includes(d) ? "#fff" : text,
+                          color: selectedDifficulties.includes(d) ? "#fff" : chipText,
                         }}
                       >
                         {t(`difficulty.${d.toLowerCase()}`)}
@@ -1847,7 +1860,7 @@ export default function History() {
                     >
                       <Text
                         style={{
-                          color: selectedCalories.includes(option.value) ? "#fff" : text,
+                          color: selectedCalories.includes(option.value) ? "#fff" : chipText,
                         }}
                       >
                         {option.label}
@@ -1859,16 +1872,19 @@ export default function History() {
                 {allTags.length > 0 && (
                   <>
                     <Text style={[styles.modalSubtitle, { color: text }]}>{t("recipes.tags")}</Text>
-                    <TextInput
-                      style={[styles.filterSearchInput, { borderColor: border, color: text, backgroundColor: bg }]}
-                      placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
-                      placeholderTextColor={subText}
-                      value={filterTagSearch}
-                      onChangeText={(value) => {
-                        setFilterTagSearch(value);
-                        setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
-                      }}
-                    />
+                    <View style={[styles.filterSearchWrap, { borderColor: border, backgroundColor: "#FFFFFF" }]}>
+                      <MaterialIcons name="search" size={18} color={subText} />
+                      <TextInput
+                        style={[styles.filterSearchInput, { color: "#2B2118" }]}
+                        placeholder={t("recipes.search_tags", { defaultValue: "Search tags" })}
+                        placeholderTextColor={subText}
+                        value={filterTagSearch}
+                        onChangeText={(value) => {
+                          setFilterTagSearch(value);
+                          setVisibleFilterTagCount(FILTER_TAGS_INITIAL_VISIBLE);
+                        }}
+                      />
+                    </View>
                     <View style={styles.filterRow}>
                       {visibleTagOptions.map((tag) => (
                         <TouchableOpacity
@@ -1884,7 +1900,7 @@ export default function History() {
                         >
                           <Text
                             style={{
-                              color: selectedTags.includes(tag) ? "#fff" : text,
+                              color: selectedTags.includes(tag) ? "#fff" : chipText,
                             }}
                           >
                             {tag}
@@ -1969,10 +1985,7 @@ export default function History() {
                 return (
                   <TouchableOpacity
                     key={option.value}
-                    style={[
-                      styles.sortOptionRow,
-                      isSelected ? styles.sortOptionRowSelected : null,
-                    ]}
+                    style={styles.sortOptionRow}
                     onPress={() => {
                       if (activeTab === "all") {
                         setSortBy(option.value);
@@ -2102,6 +2115,15 @@ export default function History() {
                 <MaterialIcons name="close" size={24} color={text} />
               </TouchableOpacity>
             </View>
+            <TouchableOpacity
+              style={styles.actionMenuRow}
+              onPress={() => recipeActionTarget && startCookingRecipe(recipeActionTarget)}
+            >
+              <MaterialIcons name="restaurant-menu" size={22} color={inlineAccentColor} />
+              <Text style={[styles.actionMenuText, { color: text }]}>
+                {t("recipes.start_cooking", { defaultValue: "Start Cooking" })}
+              </Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.actionMenuRow}
               onPress={() => recipeActionTarget && editRecipe(recipeActionTarget)}
@@ -2279,7 +2301,7 @@ const styles = StyleSheet.create({
   },
   actionMenuText: {
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "400",
   },
   fabWrap: {
     position: "absolute",
@@ -2363,13 +2385,20 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     marginBottom: 8,
   },
-  filterSearchInput: {
+  filterSearchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
     borderWidth: 1,
     borderRadius: 10,
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
+    minHeight: 42,
     marginBottom: 10,
+  },
+  filterSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    paddingVertical: 0,
   },
   filterEmptyText: {
     fontSize: 13,
@@ -2386,14 +2415,44 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
   },
+  filterIconButton: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  filterCountBadge: {
+    position: "absolute",
+    top: 2,
+    right: 1,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  filterCountText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+    lineHeight: 12,
+  },
   resultMetaText: {
     fontSize: 13,
     fontWeight: "600",
   },
   sortSummaryButton: {
     alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
     marginBottom: 10,
     marginHorizontal: 14,
+  },
+  sortSummaryLabel: {
+    color: "#8A4B16",
   },
   cookbookSortSummaryButton: {
     marginTop: 10,
@@ -2414,12 +2473,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#EAEAEA",
   },
-  sortOptionRowSelected: {
-    backgroundColor: "#FFFDF7",
-  },
   sortOptionText: {
     fontSize: 16,
-    color: "#8F5E43",
+    color: "#2B2118",
   },
   sortOptionTextSelected: {
     fontWeight: "700",

@@ -423,10 +423,10 @@ export default function HealthGoalsEditorModal({
                               <TouchableOpacity
                                 key={option.label}
                                 activeOpacity={0.85}
-                                style={[styles.chip, { backgroundColor: selected ? cta : "transparent", borderColor: border }]}
+                                style={[styles.chip, { backgroundColor: selected ? cta : "#FFFFFF", borderColor: border }]}
                                 onPress={() => onUpdateField("gender", option.key as MyDayGender)}
                               >
-                                    <Text style={{ color: selected ? "#fff" : text, fontWeight: "600", fontSize: 14 }}>
+                                    <Text style={{ color: selected ? "#fff" : "#2B2118", fontWeight: "600", fontSize: 14 }}>
                                       {option.label}
                                     </Text>
                               </TouchableOpacity>
@@ -465,7 +465,7 @@ export default function HealthGoalsEditorModal({
                               <TouchableOpacity
                                 key={option.key}
                                 activeOpacity={0.85}
-                                style={[styles.goalCard, { backgroundColor: selected ? cta : "transparent", borderColor: selected ? cta : border }]}
+                                style={[styles.goalCard, { backgroundColor: selected ? cta : "#FFFFFF", borderColor: selected ? cta : border }]}
                                 onPress={() => handleGoalSelection(option.key as MyDayGoalType)}
                               >
                                 <View style={styles.goalCardMain}>
@@ -478,9 +478,9 @@ export default function HealthGoalsEditorModal({
                                           : "horizontal-rule"
                                     }
                                     size={20}
-                                    color={selected ? "#fff" : text}
+                                    color={selected ? "#fff" : "#2B2118"}
                                   />
-                                  <Text style={{ color: selected ? "#fff" : text, fontWeight: "700", fontSize: 15 }}>
+                                  <Text style={{ color: selected ? "#fff" : "#2B2118", fontWeight: "700", fontSize: 15 }}>
                                     {option.label}
                                   </Text>
                                 </View>
@@ -532,10 +532,10 @@ export default function HealthGoalsEditorModal({
                                 <TouchableOpacity
                                   key={option.key}
                                   activeOpacity={0.85}
-                                  style={[styles.chip, { backgroundColor: selected ? cta : "transparent", borderColor: border }]}
+                                  style={[styles.chip, { backgroundColor: selected ? cta : "#FFFFFF", borderColor: border }]}
                                   onPress={() => onUpdateField("pace", option.key as MyDayPace)}
                                 >
-                                      <Text style={{ color: selected ? "#fff" : text, fontWeight: "600", fontSize: 14 }}>
+                                      <Text style={{ color: selected ? "#fff" : "#2B2118", fontWeight: "600", fontSize: 14 }}>
                                         {option.label}
                                       </Text>
                                 </TouchableOpacity>
@@ -571,21 +571,21 @@ export default function HealthGoalsEditorModal({
                         <View style={styles.modeWrap}>
                           <TouchableOpacity
                             activeOpacity={0.85}
-                            style={[styles.modeButton, { backgroundColor: planMode === "auto" ? cta : "transparent", borderColor: border }]}
+                            style={[styles.modeButton, { backgroundColor: planMode === "auto" ? cta : "#FFFFFF", borderColor: border }]}
                             onPress={() => onPlanModeChange("auto")}
                           >
-                            <MaterialIcons name="auto-awesome" size={14} color={planMode === "auto" ? "#fff" : text} />
-                            <Text style={[styles.modeButtonText, { color: planMode === "auto" ? "#fff" : text }]}>
+                            <MaterialIcons name="auto-awesome" size={14} color={planMode === "auto" ? "#fff" : "#2B2118"} />
+                            <Text style={[styles.modeButtonText, { color: planMode === "auto" ? "#fff" : "#2B2118" }]}>
                               {t("profile.health_plan_auto", { defaultValue: "Automatic" })}
                             </Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             activeOpacity={0.85}
-                            style={[styles.modeButton, { backgroundColor: planMode === "manual" ? cta : "transparent", borderColor: border }]}
+                            style={[styles.modeButton, { backgroundColor: planMode === "manual" ? cta : "#FFFFFF", borderColor: border }]}
                             onPress={() => onPlanModeChange("manual")}
                           >
-                            <MaterialIcons name="edit-note" size={15} color={planMode === "manual" ? "#fff" : text} />
-                            <Text style={[styles.modeButtonText, { color: planMode === "manual" ? "#fff" : text }]}>
+                            <MaterialIcons name="edit-note" size={15} color={planMode === "manual" ? "#fff" : "#2B2118"} />
+                            <Text style={[styles.modeButtonText, { color: planMode === "manual" ? "#fff" : "#2B2118" }]}>
                               {t("profile.health_plan_manual", { defaultValue: "Manual" })}
                             </Text>
                           </TouchableOpacity>
@@ -741,7 +741,8 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     justifyContent: "center",
-    padding: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   keyboardWrap: {
     justifyContent: "center",
@@ -750,8 +751,8 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     borderWidth: 1,
     padding: 18,
-    height: 632,
-    maxHeight: "90%",
+    height: 700,
+    maxHeight: "96%",
     overflow: "hidden",
   },
   headerRow: {

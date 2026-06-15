@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTranslation } from "react-i18next";
 import {
@@ -16,6 +16,7 @@ import {
   Easing,
   Modal,
   Pressable,
+  PanResponder,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, Stack, useFocusEffect } from "expo-router";
@@ -25,6 +26,7 @@ import { getApiBaseUrl } from "../../lib/config/api";
 import {
   fetchEconomyCatalogBundle,
   fetchEconomySnapshot,
+  recordEconomyEvent,
   shouldHidePremiumPricing,
   writeCachedEconomySnapshot,
   type EconomyCatalogOffer,
@@ -32,7 +34,9 @@ import {
 import AppButton from "../../components/AppButton";
 import InsufficientCookiesModal from "../../components/InsufficientCookiesModal";
 import EggIcon from "../../components/EggIcon";
+import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 import { formatEconomyUnits } from "../../lib/economy/format";
+import { maybeShowEggsUnlockedPrompt } from "../../lib/economy/unlockPrompt";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 import i18n from "../../i18n";
 import { getAuth } from "firebase/auth";
@@ -58,6 +62,48 @@ interface Recipe {
 const AI_KITCHEN_SUGGESTIONS_KEY = "aiKitchenSuggestions";
 const AI_KITCHEN_SUGGESTION_HISTORY_KEY = "aiKitchenSuggestionHistory";
 const AI_KITCHEN_RECIPE_CACHE_KEY = "aiKitchenRecipeCache";
+
+function arraysEqual(a: string[], b: string[]) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function normalizePreferenceKeys(values: unknown, validKeys: string[], prefix: "dietary" | "avoid") {
+  const valid = new Set(validKeys);
+  const normalized: string[] = [];
+
+  if (!Array.isArray(values)) return normalized;
+
+  values.forEach((raw) => {
+    if (typeof raw !== "string") return;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+
+    const withoutPrefix = trimmed.startsWith(`${prefix}.`)
+      ? trimmed.slice(prefix.length + 1)
+      : trimmed;
+    const lower = withoutPrefix.toLowerCase();
+    if (lower === "none" || lower === `${prefix}.none`) return;
+
+    let candidate: string | null = null;
+    if (validKeys.length === 0 || valid.has(withoutPrefix)) {
+      candidate = withoutPrefix;
+    } else if (valid.has(trimmed)) {
+      candidate = trimmed;
+    }
+
+    if (candidate && !normalized.includes(candidate)) {
+      normalized.push(candidate);
+    }
+  });
+
+  return normalized;
+}
 
 function hexToRgba(color: string, alpha: number) {
   if (!color.startsWith("#")) return color;
@@ -122,13 +168,28 @@ const cuisineOptions = [
 export default function Index() {
   const { t } = useTranslation();
   const language = i18n.language || "en";
-  const allDietaryOptions = t("dietary", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
-  const allAvoidOptions = t("avoid", { returnObjects: true }) as Record<string, { label: string; icon: string }>;
+  const allDietaryOptions = useMemo<Record<string, { label: string; icon: string }>>(() => {
+    const raw = t("dietary", { returnObjects: true }) as any;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }, [t, language]);
+  const allAvoidOptions = useMemo<Record<string, { label: string; icon: string }>>(() => {
+    const raw = t("avoid", { returnObjects: true }) as any;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }, [t, language]);
+  const dietaryOptionKeys = useMemo(
+    () => Object.keys(allDietaryOptions).filter((key) => key !== "dietary.none" && key.toLowerCase() !== "none"),
+    [allDietaryOptions]
+  );
+  const avoidOptionKeys = useMemo(
+    () => Object.keys(allAvoidOptions).filter((key) => key !== "avoid.none" && key.toLowerCase() !== "none"),
+    [allAvoidOptions]
+  );
   const router = useRouter();
   const { bg, text, subText, card, border, primary, secondary, cta, isDark, headerBg, headerText } = useThemeColors();
   const inlineAccentColor = isDark ? secondary : primary;
   const progressTrackColor = isDark ? hexToRgba(text, 0.12) : "#e0e4ea";
-  const chipBg = isDark ? card : "#F6EBD3";
+  const chipBg = "#FFFFFF";
+  const chipText = "#2B2118";
   const inputBg = isDark ? card : "#fff";
   const auth = getAuth();
 
@@ -188,23 +249,12 @@ export default function Index() {
         parsedAvoid = [];
       }
 
-      // Drop legacy prefixes like "dietary.vegan" -> "vegan", and ignore "none"/"dietary.none"
-      parsedDietary = parsedDietary
-        .map((d) => (typeof d === "string" ? d : ""))
-        .filter(Boolean)
-        .map((d) => (d.startsWith("dietary.") ? d.substring("dietary.".length) : d))
-        .filter((d) => d !== "dietary.none" && d.toLowerCase() !== "none");
+      parsedDietary = normalizePreferenceKeys(parsedDietary, dietaryOptionKeys, "dietary");
+      parsedAvoid = normalizePreferenceKeys(parsedAvoid, avoidOptionKeys, "avoid");
 
-      // Drop legacy prefixes like "avoid.gluten" -> "gluten", and ignore "none"/"avoid.none"
-      parsedAvoid = parsedAvoid
-        .map((a) => (typeof a === "string" ? a : ""))
-        .filter(Boolean)
-        .map((a) => (a.startsWith("avoid.") ? a.substring("avoid.".length) : a))
-        .filter((a) => a !== "avoid.none" && a.toLowerCase() !== "none");
-
-      setDietary(parsedDietary);
-      setAvoid(parsedAvoid);
-      setAvoidOther(storedAvoidOther ?? "");
+      setDietary((current) => (arraysEqual(current, parsedDietary) ? current : parsedDietary));
+      setAvoid((current) => (arraysEqual(current, parsedAvoid) ? current : parsedAvoid));
+      setAvoidOther((current) => (current === (storedAvoidOther ?? "") ? current : storedAvoidOther ?? ""));
 
       // Measurement system: accept both Profile-style ("US"/"Metric") and onboarding-style ("imperial"/"metric")
       let ms: "Metric" | "US" = "Metric";
@@ -222,7 +272,7 @@ export default function Index() {
     } catch (err) {
       console.error("Error loading profile prefs for AI Kitchen:", err);
     }
-  }, []);
+  }, [avoidOptionKeys, dietaryOptionKeys]);
 
   // Initial load on mount
   useEffect(() => {
@@ -443,21 +493,23 @@ export default function Index() {
   // --- Helpers for chips ---
   // Toggle logic for dietary and avoid options (Profile is source of truth; this is per-request only)
   const toggleDietary = (optionKey: string) => {
-    setDietary((prev) =>
-      prev.includes(optionKey)
-        ? prev.filter((d) => d !== optionKey)
-        : [...prev, optionKey]
-    );
+    setDietary((prev) => {
+      const normalized = normalizePreferenceKeys(prev, dietaryOptionKeys, "dietary");
+      return normalized.includes(optionKey)
+        ? normalized.filter((d) => d !== optionKey)
+        : [...normalized, optionKey];
+    });
   };
 
   const toggleAvoid = (optionKey: string) => {
     setAvoid((prev) => {
+      const normalized = normalizePreferenceKeys(prev, avoidOptionKeys, "avoid");
       let next: string[];
-      if (prev.includes(optionKey)) {
-        next = prev.filter((a) => a !== optionKey);
+      if (normalized.includes(optionKey)) {
+        next = normalized.filter((a) => a !== optionKey);
         if (optionKey === "other") setAvoidOther("");
       } else {
-        next = [...prev, optionKey];
+        next = [...normalized, optionKey];
       }
       return next;
     });
@@ -652,6 +704,15 @@ export default function Index() {
     if (cachedRecipe) {
       const tempRecipeKey = `aiKitchenRecipe:${cachedRecipe.id}:${Date.now()}`;
       await AsyncStorage.setItem(tempRecipeKey, JSON.stringify(cachedRecipe));
+      recordEconomyEvent({
+        backendUrl,
+        appEnv,
+        auth,
+        eventKey: "ai_kitchen_full_recipe_generated",
+        metadata: { recipeId: cachedRecipe.id, source: "ai-kitchen-cache" },
+      }).catch((eventErr) => {
+        console.warn("[AIKitchen] full recipe mission progress failed", eventErr);
+      });
       router.push({
         pathname: "/recipe/[id]",
         params: {
@@ -755,6 +816,16 @@ export default function Index() {
       await AsyncStorage.setItem(AI_KITCHEN_RECIPE_CACHE_KEY, JSON.stringify(nextRecipeCache));
       const tempRecipeKey = `aiKitchenRecipe:${safeRecipe.id}:${Date.now()}`;
       await AsyncStorage.setItem(tempRecipeKey, JSON.stringify(safeRecipe));
+      recordEconomyEvent({
+        backendUrl,
+        appEnv,
+        auth,
+        eventKey: "ai_kitchen_full_recipe_generated",
+        metadata: { recipeId: safeRecipe.id, source: "ai-kitchen" },
+      }).catch((eventErr) => {
+        console.warn("[AIKitchen] full recipe mission progress failed", eventErr);
+      });
+      maybeShowEggsUnlockedPrompt(data, t as any, () => router.push("/economy/store" as any));
       router.push({
         pathname: "/recipe/[id]",
         params: {
@@ -819,6 +890,33 @@ export default function Index() {
   const maxStep = 3;
   const nextStep = () => setStep((s) => Math.min(maxStep, s + 1));
   const prevStep = () => setStep((s) => Math.max(1, s - 1));
+  const goToWizardStep = useCallback((direction: "next" | "previous") => {
+    setStep((current) => {
+      if (direction === "next") return Math.min(maxStep, current + 1);
+      return Math.max(1, current - 1);
+    });
+  }, []);
+  const wizardSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) => {
+          const horizontalDistance = Math.abs(gestureState.dx);
+          const verticalDistance = Math.abs(gestureState.dy);
+          return horizontalDistance > 24 && horizontalDistance > verticalDistance * 1.4;
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const horizontalDistance = Math.abs(gestureState.dx);
+          const verticalDistance = Math.abs(gestureState.dy);
+          if (horizontalDistance < 70 || horizontalDistance < verticalDistance * 1.4) return;
+          if (gestureState.dx < 0) {
+            goToWizardStep("next");
+          } else {
+            goToWizardStep("previous");
+          }
+        },
+      }),
+    [goToWizardStep]
+  );
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: bg }} edges={['left', 'right', 'bottom']}>
@@ -829,6 +927,7 @@ export default function Index() {
           headerStyle: { backgroundColor: headerBg },
           headerTintColor: headerText,
           headerTitleAlign: "center",
+          headerRight: () => <EconomyHeaderAlertButton />,
         }}
       />
       {/* Progress bar and chef icon always visible during wizard steps (1-3) */}
@@ -1084,6 +1183,7 @@ export default function Index() {
         ) : (
           <>
             <Animated.View
+              {...wizardSwipeResponder.panHandlers}
               style={{
                 flex: 1,
                 opacity: contentAnim,
@@ -1133,7 +1233,7 @@ export default function Index() {
                         ]}
                         onPress={() => setMealType(m.labelKey)}
                       >
-                        <Text style={{ color: mealType === m.labelKey ? "#fff" : text, fontSize: 15 }}>
+                        <Text style={{ color: mealType === m.labelKey ? "#fff" : chipText, fontSize: 15 }}>
                           {m.icon} {t(m.labelKey)}
                         </Text>
                       </TouchableOpacity>
@@ -1280,7 +1380,7 @@ export default function Index() {
                         ]}
                         onPress={() => setTime(tOpt.key as any)}
                       >
-                        <Text style={{ color: time === tOpt.key ? "#fff" : text, fontSize: 15 }}>
+                        <Text style={{ color: time === tOpt.key ? "#fff" : chipText, fontSize: 15 }}>
                           {tOpt.label}
                         </Text>
                       </TouchableOpacity>
@@ -1347,7 +1447,7 @@ export default function Index() {
                           ]}
                           onPress={() => toggleDietary(key)}
                         >
-                          <Text style={{ color: dietary.includes(key) ? "#fff" : text, fontSize: 15 }}>
+                          <Text style={{ color: dietary.includes(key) ? "#fff" : chipText, fontSize: 15 }}>
                             {option.icon} {option.label}
                           </Text>
                         </TouchableOpacity>
@@ -1391,7 +1491,7 @@ export default function Index() {
                             ]}
                             onPress={() => toggleAvoid(key)}
                           >
-                            <Text style={{ color: avoid.includes(key) ? "#fff" : text, fontSize: 15 }}>
+                            <Text style={{ color: avoid.includes(key) ? "#fff" : chipText, fontSize: 15 }}>
                               {option.icon} {option.label}
                             </Text>
                           </TouchableOpacity>

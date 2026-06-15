@@ -1,5 +1,5 @@
 import React from "react";
-import { TouchableOpacity, Text, StyleSheet, View, ViewStyle } from "react-native";
+import { TouchableOpacity, Text, StyleSheet, View, ViewStyle, StyleProp } from "react-native";
 import { useThemeColors } from "../context/ThemeContext";
 
 interface AppButtonProps {
@@ -7,9 +7,10 @@ interface AppButtonProps {
   onPress: () => void;
   variant?: "primary" | "secondary" | "cta" | "danger";
   fullWidth?: boolean;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
   disabled?: boolean;
   leftIcon?: React.ReactNode;
+  textColor?: string;
 }
 
 export default function AppButton({
@@ -20,6 +21,7 @@ export default function AppButton({
   style,
   disabled = false,
   leftIcon,
+  textColor: textColorOverride,
 }: AppButtonProps) {
   const { primary, secondary, cta, onSecondary, onCta, danger } = useThemeColors();
 
@@ -32,7 +34,7 @@ export default function AppButton({
       ? cta
       : danger;
 
-  const textColor = variant === "secondary" ? onSecondary : onCta;
+  const textColor = textColorOverride ?? (variant === "secondary" ? onSecondary : onCta);
 
   return (
     <TouchableOpacity

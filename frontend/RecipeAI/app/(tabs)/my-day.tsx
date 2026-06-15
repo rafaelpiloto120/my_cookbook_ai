@@ -22,6 +22,7 @@ import { Canvas, Path as SkiaPath, Skia } from "@shopify/react-native-skia";
 
 import AppCard from "../../components/AppCard";
 import HealthGoalsEditorModal from "../../components/HealthGoalsEditorModal";
+import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 import MyDayAddMealFlow from "../../components/MyDayAddMealFlow";
 import MyDayMealEditorModal from "../../components/MyDayMealEditorModal";
 import { useAuth } from "../../context/AuthContext";
@@ -46,6 +47,7 @@ import {
   latestWeightLog,
   loadWeightLogs,
   MyDayWeightLog,
+  resolveWeightChartRangeWithMinimumPoints,
 } from "../../lib/myDayWeight";
 import {
   getDayKey,
@@ -64,8 +66,8 @@ import {
 } from "../../lib/myDayRecipes";
 import { getApiBaseUrl } from "../../lib/config/api";
 import {
-  claimEconomyReward,
   fetchEconomySnapshot,
+  recordEconomyEvent,
 } from "../../lib/economy/client";
 import { useSyncEngine } from "../../lib/sync/SyncEngine";
 import { refreshLocalReminderSchedule } from "../../lib/notifications/localNotifications";
@@ -533,7 +535,7 @@ function areReviewIngredientsEqual(current: ReviewIngredient[], base: ReviewIngr
 }
 
 export default function MyDayScreen() {
-  const params = useLocalSearchParams<{ openHealthGoals?: string; openAddMeal?: string; notificationNonce?: string }>();
+  const params = useLocalSearchParams<{ openHealthGoals?: string; openAddMeal?: string; openLogWeight?: string; notificationNonce?: string }>();
   const { user } = useAuth();
   const { t, i18n } = useTranslation();
   const { bg, text, subText, border, card, primary, secondary, cta, isDark, modalBackdrop, headerBg, headerText } = useThemeColors();
@@ -884,16 +886,10 @@ export default function MyDayScreen() {
 
   const weightUnit = healthMeasurement === "US" ? "lb" : "kg";
   const latestWeight = latestWeightLog(weightLogs);
-  const weekWeightLogs = useMemo(() => {
-    const now = new Date();
-    const startDate = new Date(now);
-    startDate.setDate(now.getDate() - 6);
-    startDate.setHours(0, 0, 0, 0);
-    const startDayKey = getWeightDayKey(startDate);
-    const todayKey = getWeightDayKey(now);
-    return weightLogs.filter((log) => log.dayKey >= startDayKey && log.dayKey <= todayKey);
-  }, [weightLogs]);
-  const weightGraphLogs = weekWeightLogs.length > 0 ? weekWeightLogs : weightLogs;
+  const weightGraphLogs = useMemo(
+    () => resolveWeightChartRangeWithMinimumPoints(weightLogs, "week").logs,
+    [weightLogs]
+  );
   const displayedGoalWeight =
     profile?.targetWeightKg != null
       ? formatWeightFromKg(profile.targetWeightKg, healthMeasurement)
@@ -1073,13 +1069,13 @@ export default function MyDayScreen() {
     ...Array.from({ length: weightDaysInMonth }).map((_, index) => index + 1),
   ];
 
-  const openWeightLogger = () => {
+  const openWeightLogger = useCallback(() => {
     setWeightInput("");
     setSelectedWeightDay("");
     const now = new Date();
     setWeightCalendarMonth(new Date(now.getFullYear(), now.getMonth(), 1));
     setWeightModalVisible(true);
-  };
+  }, []);
 
   useEffect(() => {
     if (params.openAddMeal !== "1") return;
@@ -1088,6 +1084,14 @@ export default function MyDayScreen() {
     handledNotificationActionRef.current = nonce;
     setAddMealFlowVisible(true);
   }, [params.openAddMeal, params.notificationNonce]);
+
+  useEffect(() => {
+    if (params.openLogWeight !== "1") return;
+    const nonce = params.notificationNonce || "openLogWeight";
+    if (handledNotificationActionRef.current === nonce) return;
+    handledNotificationActionRef.current = nonce;
+    openWeightLogger();
+  }, [openWeightLogger, params.openLogWeight, params.notificationNonce]);
 
   const openHealthGoals = async () => {
     const [nextProfile, measurementSystem] = await Promise.all([
@@ -1452,15 +1456,15 @@ export default function MyDayScreen() {
     }
     try {
       if (API_BASE_URL) {
-        await claimEconomyReward({
+        await recordEconomyEvent({
           backendUrl: API_BASE_URL,
           appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local",
           auth,
-          rewardKey: "profile_health_goals_v1",
+          eventKey: "profile_health_goals_completed",
         });
       }
     } catch (rewardErr) {
-      console.warn("[MyDay] health goals reward claim failed", rewardErr);
+      console.warn("[MyDay] health goals reward progress failed", rewardErr);
     }
     setProfile(nextProfile);
     setHealthDraft(nextProfile);
@@ -1488,6 +1492,19 @@ export default function MyDayScreen() {
           Number.isFinite(createdWeightLog.valueKg) ? Number(createdWeightLog.valueKg) : null,
       });
     }
+    try {
+      if (API_BASE_URL) {
+        await recordEconomyEvent({
+          backendUrl: API_BASE_URL,
+          appEnv: process.env.EXPO_PUBLIC_APP_ENV ?? "local",
+          auth,
+          eventKey: "weight_logged",
+          metadata: { dateKey: createdWeightLog.dayKey },
+        });
+      }
+    } catch (err) {
+      console.warn("[MyDay] weight mission progress failed", err);
+    }
     refreshLocalReminderSchedule().catch((err) => {
       console.warn("[MyDay] weight notification schedule refresh failed", err);
     });
@@ -1506,6 +1523,7 @@ export default function MyDayScreen() {
           headerTintColor: headerText,
           headerTitleAlign: "center",
           headerLeft: () => null,
+          headerRight: () => <EconomyHeaderAlertButton />,
         }}
       />
 
@@ -1634,8 +1652,8 @@ export default function MyDayScreen() {
           </View>
 
           {meals.length === 0 ? (
-            <View style={[styles.emptyState, { backgroundColor: emptyStateBg }]}>
-              <Text style={[styles.emptyTitle, { color: text }]}>
+            <View style={[styles.emptyState, { backgroundColor: "transparent" }]}>
+              <Text style={[styles.emptyTitle, { color: subText }]}>
                 {t("my_day.empty_title", { defaultValue: "Nothing logged yet" })}
               </Text>
               <Text style={[styles.emptyBody, { color: subText }]}>
@@ -2457,6 +2475,22 @@ export default function MyDayScreen() {
                 />
               </TouchableOpacity>
             </View>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={styles.calendarTodayButton}
+              onPress={() => {
+                const todayKey = getWeightDayKey(new Date());
+                const today = new Date();
+                setSelectedWeightDay(todayKey);
+                setWeightCalendarMonth(new Date(today.getFullYear(), today.getMonth(), 1));
+                setWeightCalendarVisible(false);
+              }}
+            >
+              <MaterialIcons name="today" size={14} color={inlineAccentColor} />
+              <Text style={[styles.calendarTodayText, { color: inlineAccentColor }]}>
+                {t("my_day.today_label", { defaultValue: "Today" })}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.calendarWeekRow}>
               {["S", "M", "T", "W", "T", "F", "S"].map((label, index) => (
                 <Text key={`${label}-${index}`} style={[styles.calendarWeekday, { color: subText }]}>
@@ -3722,5 +3756,19 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 10,
     marginBottom: 6,
+  },
+  calendarTodayButton: {
+    alignSelf: "flex-end",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  calendarTodayText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

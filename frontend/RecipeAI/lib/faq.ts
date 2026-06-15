@@ -181,6 +181,15 @@ export function getFaqItems(t: Translator): FaqItem[] {
       }),
     },
     {
+      id: "faq.password_help",
+      category: "settings",
+      question: question(t, "faq.password_help", "How do I reset or change my password?"),
+      answer: t("faq.password_help_answer", {
+        defaultValue:
+          "If you forgot your password, use Forgot password on the sign-in screen and we will send a reset link to your email. If you are signed in, go to Profile → Edit photo → Change Password. For security, password changes ask you to confirm your current password first. Google sign-in accounts can set a password through a secure email link.",
+      }),
+    },
+    {
       id: "faq.dark_mode",
       category: "settings",
       question: question(t, "faq.dark_mode", "How do I enable dark mode?"),
@@ -194,7 +203,7 @@ export function getFaqItems(t: Translator): FaqItem[] {
       question: question(t, "faq.notifications", "How do notifications work?"),
       answer: t("faq.notifications_answer", {
         defaultValue:
-          "Notifications are optional and disabled by default. You can enable meal reminders, weight reminders, and occasional offers or updates separately in Profile. To prevent spam, meal reminders must be at least 1 hour apart, and we skip meal reminders when your logged meals already cover them.",
+          "Notifications are optional and disabled by default. You can enable meal reminders, weight reminders, and occasional offers or updates separately in Profile. To prevent spam, meal reminders must be at least 1 hour apart.",
       }),
     },
     {

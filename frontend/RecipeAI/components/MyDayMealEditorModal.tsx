@@ -339,21 +339,21 @@ export default function MyDayMealEditorModal({
                 <View style={styles.modeWrap}>
                   <TouchableOpacity
                     activeOpacity={0.85}
-                    style={[styles.modeButton, { backgroundColor: nutritionMode === "auto" ? cta : "transparent", borderColor: border }]}
+                    style={[styles.modeButton, { backgroundColor: nutritionMode === "auto" ? cta : "#FFFFFF", borderColor: border }]}
                     onPress={() => onChangeNutritionMode("auto")}
                   >
-                    <MaterialIcons name="auto-awesome" size={14} color={nutritionMode === "auto" ? "#fff" : text} />
-                    <Text style={[styles.modeButtonText, { color: nutritionMode === "auto" ? "#fff" : text }]}>
+                    <MaterialIcons name="auto-awesome" size={14} color={nutritionMode === "auto" ? "#fff" : "#2B2118"} />
+                    <Text style={[styles.modeButtonText, { color: nutritionMode === "auto" ? "#fff" : "#2B2118" }]}>
                       {autoLabel}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     activeOpacity={0.85}
-                    style={[styles.modeButton, { backgroundColor: nutritionMode === "manual" ? cta : "transparent", borderColor: border }]}
+                    style={[styles.modeButton, { backgroundColor: nutritionMode === "manual" ? cta : "#FFFFFF", borderColor: border }]}
                     onPress={() => onChangeNutritionMode("manual")}
                   >
-                    <MaterialIcons name="edit-note" size={15} color={nutritionMode === "manual" ? "#fff" : text} />
-                    <Text style={[styles.modeButtonText, { color: nutritionMode === "manual" ? "#fff" : text }]}>
+                    <MaterialIcons name="edit-note" size={15} color={nutritionMode === "manual" ? "#fff" : "#2B2118"} />
+                    <Text style={[styles.modeButtonText, { color: nutritionMode === "manual" ? "#fff" : "#2B2118" }]}>
                       {manualLabel}
                     </Text>
                   </TouchableOpacity>

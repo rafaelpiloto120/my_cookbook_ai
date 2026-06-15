@@ -29,6 +29,11 @@ export function getEconomyActivityLabel(
       defaultValue: "Starting Eggs",
     });
   }
+  if (entry.reason === "free_actions_complete_bonus") {
+    return t("economy.history_free_actions_complete_bonus", {
+      defaultValue: "Free AI actions completed",
+    });
+  }
   if (entry.reason === "reward_profile_health_goals") {
     return t("economy.history_profile_health", {
       defaultValue: "Completed profile and Health & Goals",
@@ -72,6 +77,36 @@ export function getEconomyActivityLabel(
   if (entry.reason === "reward_first_instagram_reel_import") {
     return t("economy.history_first_instagram_reel", {
       defaultValue: "First Instagram Reel recipe imported",
+    });
+  }
+  if (entry.reason === "mission_meals_3_days") {
+    return t("economy.history_mission_meals_3_days", {
+      defaultValue: "7-day mission: meals logged",
+    });
+  }
+  if (entry.reason === "mission_weight_once") {
+    return t("economy.history_mission_weight_once", {
+      defaultValue: "7-day mission: weight logged",
+    });
+  }
+  if (entry.reason === "mission_add_recipe") {
+    return t("economy.history_mission_add_recipe", {
+      defaultValue: "7-day mission: recipe added",
+    });
+  }
+  if (entry.reason === "mission_ai_kitchen_full_recipe" || entry.reason === "mission_ai_kitchen_suggestions") {
+    return t("economy.history_mission_ai_kitchen", {
+      defaultValue: "7-day mission: AI Kitchen recipe generated",
+    });
+  }
+  if (entry.reason === "mission_complete_3_actions") {
+    return t("economy.history_mission_complete_3", {
+      defaultValue: "7-day mission: 3 actions completed",
+    });
+  }
+  if (entry.reason === "mission_complete_all_actions") {
+    return t("economy.history_mission_complete_all", {
+      defaultValue: "7-day mission completed",
     });
   }
   if (entry.reason === "purchase_verified" || entry.reason === "cookie_purchase") {
