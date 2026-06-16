@@ -22,6 +22,7 @@ import {
 
 import { auth } from "../../firebaseConfig";
 import { useThemeColors } from "../../context/ThemeContext";
+import { trackActivityEventBestEffort } from "../../lib/activity/client";
 
 const INVISIBLE_REGEX = /[\u200B-\u200D\uFEFF\u202E\u202D\u202A\u202B\u202C]/g;
 const CONTROL_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
@@ -184,6 +185,13 @@ export default function ChangePasswordScreen() {
       const credential = EmailAuthProvider.credential(email, currentPassword);
       await reauthenticateWithCredential(user, credential);
       await updatePassword(user, newPassword);
+      trackActivityEventBestEffort({
+        auth,
+        type: "auth",
+        action: "password_changed",
+        source: "change_password",
+        objectId: user.uid,
+      });
       Alert.alert(
         t("auth.change_password_success_title", { defaultValue: "Password updated" }),
         t("auth.change_password_success_body", {

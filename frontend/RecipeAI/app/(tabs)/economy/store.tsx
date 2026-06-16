@@ -14,6 +14,7 @@ import EggIcon from "../../../components/EggIcon";
 import { claimEconomyReward, fetchEconomyHistory, type EconomyLedgerEntry } from "../../../lib/economy/client";
 import { emitClaimableRewardsChanged } from "../../../lib/economy/claimableRewardsEvents";
 import { formatEconomyUnits } from "../../../lib/economy/format";
+import { trackActivityEventBestEffort } from "../../../lib/activity/client";
 import {
   initConnection,
   endConnection,
@@ -256,6 +257,32 @@ export default function EconomyStoreScreen() {
 
   // ✅ auth.currentUser isn't reactive; track uid in state so balance refreshes on login/logout.
   const auth = getAuth();
+
+  const trackPurchaseActivity = useCallback(
+    (
+      action: "purchase_started" | "purchase_granted" | "purchase_failed",
+      productId: string | null,
+      status: "started" | "succeeded" | "failed",
+      metadata: Record<string, unknown> = {}
+    ) => {
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "purchase",
+        action,
+        source: "google_play",
+        status,
+        objectId: productId,
+        metadata: {
+          platform: Platform.OS,
+          productId,
+          ...metadata,
+        },
+      });
+    },
+    [appEnv, auth, backendUrl]
+  );
   const [economyUid, setEconomyUid] = useState<string | null>(auth.currentUser?.uid ?? null);
 
   const [loading, setLoading] = useState(true);
@@ -575,7 +602,12 @@ export default function EconomyStoreScreen() {
             purchaseInFlightRef.current = true;
 
             const result = await verifyPurchaseWithBackend(purchase);
+            const productId = (purchase as any)?.productId || (purchase as any)?.sku || null;
             if (!result.ok) {
+              trackPurchaseActivity("purchase_failed", productId, "failed", {
+                reason: "backend_verification_failed",
+                message: result.message ?? null,
+              });
               // Do NOT finishTransaction here, otherwise we could lose the ability to re-verify.
               Alert.alert(
                 t("economy.purchase_pending_title"),
@@ -586,11 +618,18 @@ export default function EconomyStoreScreen() {
 
             // Backend verified + granted. Now acknowledge/finish the consumable.
             await finishTransaction({ purchase, isConsumable: true });
+            trackPurchaseActivity("purchase_granted", productId, "succeeded", {
+              balance: result.balance ?? null,
+            });
 
             // Refresh balance UI.
             await loadBalance();
           } catch (e: any) {
             console.warn("[IAP] purchaseUpdatedListener error", e);
+            trackPurchaseActivity("purchase_failed", null, "failed", {
+              reason: "purchase_update_error",
+              message: e?.message ? String(e.message) : null,
+            });
             Alert.alert(t("economy.purchase_error_title"), t("economy.purchase_error_body"));
           } finally {
             purchaseInFlightRef.current = false;
@@ -599,6 +638,11 @@ export default function EconomyStoreScreen() {
 
         errorSub = purchaseErrorListener((err) => {
           console.warn("[IAP] purchaseError", err);
+          trackPurchaseActivity("purchase_failed", null, "failed", {
+            reason: "purchase_error_listener",
+            message: (err as any)?.message ? String((err as any).message) : null,
+            code: (err as any)?.code ? String((err as any).code) : null,
+          });
         });
       } catch (e) {
         console.warn("[IAP] initConnection failed", e);
@@ -619,7 +663,7 @@ export default function EconomyStoreScreen() {
         endConnection();
       } catch {}
     };
-  }, [verifyPurchaseWithBackend, loadBalance]);
+  }, [verifyPurchaseWithBackend, loadBalance, trackPurchaseActivity]);
 
   // --- IAP Android: Refresh Play product cache when offers change ---
   useEffect(() => {
@@ -1112,6 +1156,7 @@ export default function EconomyStoreScreen() {
     }
 
     try {
+      trackPurchaseActivity("purchase_started", sku, "started");
       // Launch Google Play purchase flow.
       // react-native-iap v14.6+ (OpenIAP) expects a structured request.
       // Using the wrong shape produces: "Missing purchase request configuration".
@@ -1156,6 +1201,11 @@ export default function EconomyStoreScreen() {
           ? String(e.message || (e as any).debugMessage)
           : "Couldn't start the purchase. Please try again.";
       const code = e && typeof e === "object" && (e as any).code ? String((e as any).code) : "";
+      trackPurchaseActivity("purchase_failed", sku, "failed", {
+        reason: "request_purchase_failed",
+        message: msg,
+        code: code || null,
+      });
       const lowerMsg = msg.toLowerCase();
       const isMissingConfig =
         lowerMsg.includes("missing purchase request configuration") ||

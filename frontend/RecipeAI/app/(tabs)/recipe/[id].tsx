@@ -34,8 +34,10 @@ import {
 import AppCard from "../../../components/AppCard";
 import InsufficientCookiesModal from "../../../components/InsufficientCookiesModal";
 import EggIcon from "../../../components/EggIcon";
+import { formatRecipeTagLabel } from "../../../components/RecipeTagRow";
 import { formatEconomyUnits } from "../../../lib/economy/format";
 import { maybeShowEggsUnlockedPrompt } from "../../../lib/economy/unlockPrompt";
+import { trackActivityEventBestEffort } from "../../../lib/activity/client";
 import { MaterialIcons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { syncEngine } from "../../../lib/sync/SyncEngine";
@@ -153,6 +155,32 @@ export default function RecipeDetail() {
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   const inlineAccentColor = isDark ? secondary : cta;
   const chipBg = isDark ? card : secondary;
+
+  const trackRecipeActivity = useCallback(
+    (
+      action: "recipe_edited" | "recipe_deleted",
+      recipeForEvent: Recipe,
+      source: string
+    ) => {
+      const uid = auth.currentUser?.uid;
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "recipe",
+        action,
+        source,
+        objectId: recipeForEvent.id,
+        objectPath: uid ? `users/${uid}/recipes/${recipeForEvent.id}` : null,
+        metadata: {
+          title: recipeForEvent.title,
+          ingredientCount: Array.isArray(recipeForEvent.ingredients) ? recipeForEvent.ingredients.length : null,
+          stepCount: Array.isArray(recipeForEvent.steps) ? recipeForEvent.steps.length : null,
+        },
+      });
+    },
+    [appEnv, auth, backendUrl]
+  );
 
   const [insufficientModal, setInsufficientModal] = useState<{
     visible: boolean;
@@ -703,6 +731,7 @@ export default function RecipeDetail() {
       console.warn("[RecipeDetail] analytics logging failed", e);
     }
 
+    trackRecipeActivity("recipe_deleted", recipeToDelete, "recipe_detail");
     setDeleteConfirmVisible(false);
     router.replace("/(tabs)/history");
   };
@@ -942,6 +971,7 @@ const saveRecipe = async () => {
       }
     }
 
+    trackRecipeActivity("recipe_edited", withUpdatedAt, "recipe_detail");
     Alert.alert(t("common.done"), t("recipes.save_success"));
     setIsSaved(true);
   } catch (error) {
@@ -1492,13 +1522,13 @@ return (
           </AppCard>
 
           {/* Tags */}
-          {currentRecipe.tags.length > 0 && (
+          {currentRecipe.tags.map(formatRecipeTagLabel).filter(Boolean).length > 0 && (
             <>
               <Text style={[styles.sectionTitle, { color: text }]}>
                 {t("recipes.tags")}
               </Text>
               <AppCard style={{ flexDirection: "row", flexWrap: "wrap" }}>
-                {currentRecipe.tags.map((tag, i) => (
+                {currentRecipe.tags.map(formatRecipeTagLabel).filter(Boolean).map((tag, i) => (
                   <Text key={i} style={[styles.tag, { backgroundColor: chipBg, color: text, borderColor: border }]}>
                     {tag}
                   </Text>

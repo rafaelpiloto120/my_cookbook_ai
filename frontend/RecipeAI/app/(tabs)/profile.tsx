@@ -38,6 +38,7 @@ import {
   recordEconomyEvent,
   writeCachedEconomySnapshot,
 } from "../../lib/economy/client";
+import { trackActivityEventBestEffort } from "../../lib/activity/client";
 import { formatEconomyUnits } from "../../lib/economy/format";
 import { useAuth } from "../../context/AuthContext";
 import { useSyncEngine as useSyncEngineHook } from "../../lib/sync/SyncEngine";
@@ -63,6 +64,7 @@ import {
   deriveSuggestedPlan,
   formatHeightFromCm,
   formatWeightFromKg,
+  hasMyDaySetup,
   loadMyDayProfile,
   MeasurementSystem as MyDayMeasurementSystem,
   MyDayGender,
@@ -1382,6 +1384,31 @@ export default function Profile() {
       const saved = await saveLocalNotificationPreferences(nextPartial);
       setNotificationPrefs(saved);
       await refreshLocalReminderSchedule();
+      const wasAnyReminderEnabled = current.mealReminderEnabled || current.weightReminderEnabled;
+      const isAnyReminderEnabled = saved.mealReminderEnabled || saved.weightReminderEnabled;
+      const action = !wasAnyReminderEnabled && isAnyReminderEnabled
+        ? "reminder_created"
+        : wasAnyReminderEnabled && !isAnyReminderEnabled
+          ? "reminder_deleted"
+          : "reminder_updated";
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "reminder",
+        action,
+        source: "profile",
+        metadata: {
+          mealReminderEnabled: saved.mealReminderEnabled,
+          mealReminderSlots: saved.mealReminderSlots
+            .filter((slot) => slot.enabled)
+            .map((slot) => ({ id: slot.id, time: slot.time })),
+          weightReminderEnabled: saved.weightReminderEnabled,
+          weightReminderTime: saved.weightReminderTime,
+          weightReminderFrequency: saved.weightReminderFrequency,
+          offersUpdatesEnabled: saved.offersUpdatesEnabled,
+        },
+      });
     } catch (err) {
       setNotificationPrefs(current);
       throw err;
@@ -1833,6 +1860,19 @@ export default function Profile() {
       if (typeof (syncEngine as any)?.markMyDayProfileDirty === "function") {
         await (syncEngine as any).markMyDayProfileDirty(nextProfile);
       }
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "profile",
+        action: hasMyDaySetup(myDayProfile) ? "health_goals_updated" : "health_goals_created",
+        source: "profile",
+        objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/myDayProfile/default` : null,
+        metadata: {
+          goalType: nextProfile.goalType,
+          planMode: shouldKeepManualPlan ? "manual" : "auto",
+        },
+      });
       if (Number.isFinite(currentWeight) && currentWeight > 0) {
         const createdWeightLog = await addWeightLog(currentWeight, new Date(), measurement as MyDayMeasurementSystem);
         if (typeof (syncEngine as any)?.markMyDayWeightDirty === "function") {

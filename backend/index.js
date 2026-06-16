@@ -1964,6 +1964,18 @@ async function consumePremiumAction({ req, amount, reason, allowFreePremiumActio
           },
           { merge: true }
         );
+        tx.set(
+          db.collection(USER_SUMMARIES_COLLECTION).doc(uid),
+          {
+            uid,
+            cookies: nextCookies,
+            freePremiumActionsRemaining: nextFree,
+            economyUpdatedAt: now,
+            updatedAt: now,
+            _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
 
         if (shouldUnlockEggs) {
           addEconomyLedgerEntryTx(tx, db, uid, {
@@ -2019,6 +2031,18 @@ async function consumePremiumAction({ req, amount, reason, allowFreePremiumActio
             source: "cookies",
             at: now,
           },
+        },
+        { merge: true }
+      );
+      tx.set(
+        db.collection(USER_SUMMARIES_COLLECTION).doc(uid),
+        {
+          uid,
+          cookies: next,
+          freePremiumActionsRemaining: currentFree,
+          economyUpdatedAt: now,
+          updatedAt: now,
+          _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
@@ -3691,6 +3715,7 @@ function buildUserSummaryUpdateFromActivity(event = {}) {
   if (event.env) update.lastSeenEnv = event.env;
   if (event.backendEnv) update.lastBackendEnv = event.backendEnv;
   if (event.deviceId) update.lastDeviceId = event.deviceId;
+  if (event.env) update.seenEnvList = admin.firestore.FieldValue.arrayUnion(event.env);
 
   const appVersion =
     typeof metadata.appVersion === "string" && metadata.appVersion.trim()
@@ -3892,6 +3917,184 @@ function trackActivityEvent({
   }
 }
 
+function sanitizeAiGeneratedString(value, maxLength = 4000) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, maxLength);
+}
+
+function sanitizeAiGeneratedStringArray(value, maxItems = 80, maxLength = 1200) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => sanitizeAiGeneratedString(entry, maxLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function sanitizeAiGeneratedNumber(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
+function sanitizeAiGeneratedSuggestion(suggestion = {}) {
+  if (!suggestion || typeof suggestion !== "object") return null;
+  const title = sanitizeAiGeneratedString(suggestion.title, 300);
+  if (!title) return null;
+  return {
+    id: sanitizeAiGeneratedString(suggestion.id, 160),
+    title,
+    cookingTime: sanitizeAiGeneratedNumber(suggestion.cookingTime),
+    difficulty: sanitizeAiGeneratedString(suggestion.difficulty, 80),
+    calories: sanitizeAiGeneratedNumber(suggestion.calories),
+    description: sanitizeAiGeneratedString(suggestion.description, 1200),
+  };
+}
+
+function sanitizeAiGeneratedRecipe(recipe = {}) {
+  if (!recipe || typeof recipe !== "object") return null;
+  const title = sanitizeAiGeneratedString(recipe.title || recipe.name, 300);
+  if (!title) return null;
+  return {
+    id: sanitizeAiGeneratedString(recipe.id, 160),
+    title,
+    description: sanitizeAiGeneratedString(recipe.description, 2000),
+    cookingTime: sanitizeAiGeneratedNumber(recipe.cookingTime),
+    difficulty: sanitizeAiGeneratedString(recipe.difficulty, 80),
+    servings: sanitizeAiGeneratedNumber(recipe.servings),
+    ingredients: sanitizeAiGeneratedStringArray(recipe.ingredients, 120, 1200),
+    steps: sanitizeAiGeneratedStringArray(recipe.steps, 120, 1600),
+    tags: sanitizeAiGeneratedStringArray(recipe.tags, 20, 120),
+    nutritionInfo:
+      recipe.nutritionInfo && typeof recipe.nutritionInfo === "object"
+        ? JSON.parse(JSON.stringify(recipe.nutritionInfo))
+        : null,
+    image: sanitizeAiGeneratedString(recipe.image, 1200),
+    createdAt: sanitizeAiGeneratedString(recipe.createdAt, 120),
+  };
+}
+
+function indexAiGeneratedContent({
+  req = null,
+  uid = null,
+  deviceId = null,
+  kind,
+  source = "ai_kitchen",
+  objectId = null,
+  recipe = null,
+  suggestions = null,
+  metadata = null,
+  createdAt = Date.now(),
+} = {}) {
+  try {
+    if (!_adminInitialized || !kind) return;
+    const headerCtx = req ? getEventContext(req) : { userId: null, deviceId: null };
+    const effectiveUid = sanitizeActivityValue(uid || headerCtx.userId);
+    const effectiveDeviceId = sanitizeActivityValue(deviceId || headerCtx.deviceId);
+    const effectiveMetadata =
+      metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? metadata
+        : {};
+    const sanitizedRecipe = sanitizeAiGeneratedRecipe(recipe);
+    const sanitizedSuggestions = Array.isArray(suggestions)
+      ? suggestions.map(sanitizeAiGeneratedSuggestion).filter(Boolean).slice(0, 10)
+      : [];
+
+    if (kind === "full_recipe" && !sanitizedRecipe) return;
+    if (kind === "suggestions" && sanitizedSuggestions.length === 0) return;
+
+    const eventTime =
+      typeof createdAt === "number" && Number.isFinite(createdAt)
+        ? createdAt
+        : Date.now();
+    const payload = {
+      uid: effectiveUid,
+      deviceId: effectiveDeviceId,
+      env: getRequestAppEnv(req, effectiveMetadata),
+      backendEnv: ANALYTICS_ENV,
+      kind: sanitizeActivityValue(kind),
+      source: sanitizeActivityValue(source),
+      objectId: sanitizeActivityValue(objectId || sanitizedRecipe?.id),
+      title:
+        kind === "full_recipe"
+          ? sanitizedRecipe?.title || null
+          : sanitizedSuggestions.map((item) => item.title).filter(Boolean).join(" | ").slice(0, 600),
+      recipe: sanitizedRecipe,
+      suggestions: sanitizedSuggestions,
+      metadata: {
+        language: sanitizeAiGeneratedString(effectiveMetadata.language, 120),
+        measurementSystem: sanitizeAiGeneratedString(effectiveMetadata.measurementSystem, 80),
+        mealType: sanitizeAiGeneratedString(effectiveMetadata.mealType, 180),
+        servings: sanitizeAiGeneratedNumber(effectiveMetadata.servings),
+        cookingTime: sanitizeAiGeneratedNumber(effectiveMetadata.cookingTime),
+        difficulty: sanitizeAiGeneratedString(effectiveMetadata.difficulty, 80),
+        suggestionId: sanitizeAiGeneratedString(effectiveMetadata.suggestionId, 160),
+        suggestionTitle: sanitizeAiGeneratedString(effectiveMetadata.suggestionTitle, 300),
+        count: sanitizeAiGeneratedNumber(effectiveMetadata.count),
+      },
+      createdAt: eventTime,
+      createdAtIso: new Date(eventTime).toISOString(),
+      _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const db = getAnalyticsDb();
+    db.collection(AI_GENERATED_CONTENT_COLLECTION).add(payload).catch((err) => {
+      console.warn("⚠️ Failed to index AI generated content:", {
+        kind: payload.kind,
+        uid: payload.uid,
+        message: err?.message,
+        code: err?.code,
+      });
+    });
+  } catch (err) {
+    console.warn("⚠️ AI generated content index skipped:", err?.message || err);
+  }
+}
+
+app.post("/activity-events", express.json({ limit: "32kb" }), async (req, res) => {
+  if (!_adminInitialized) {
+    return res.status(500).json({ ok: false, error: "Admin SDK not initialized" });
+  }
+
+  let decoded = null;
+  try {
+    decoded = await getVerifiedIdTokenCached(req);
+  } catch {
+    decoded = null;
+  }
+
+  if (!decoded?.uid) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const type = sanitizeActivityValue(body.type);
+  const action = sanitizeActivityValue(body.action);
+  if (!type || !action) {
+    return res.status(400).json({ ok: false, error: "Missing activity type/action" });
+  }
+
+  const metadata =
+    body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+      ? body.metadata
+      : {};
+
+  trackActivityEvent({
+    req,
+    uid: decoded.uid,
+    deviceId: getEventContext(req).deviceId,
+    type,
+    action,
+    source: body.source,
+    status: body.status || "succeeded",
+    objectId: body.objectId,
+    objectPath: body.objectPath,
+    metadata,
+  });
+
+  return res.json({ ok: true });
+});
+
 function isAdminDecodedToken(decoded) {
   if (!decoded || !decoded.uid) return false;
   if (decoded.admin === true) return true;
@@ -3954,11 +4157,122 @@ function parseAdminOffset(raw) {
   return Math.floor(value);
 }
 
+function normalizeAdminEnvFilter(raw) {
+  if (typeof raw !== "string") return "";
+  const value = raw.trim().toLowerCase();
+  if (!value || value === "all") return "";
+  return value;
+}
+
+function parseAdminNonNegativeInteger(raw) {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
+}
+
 function docWithId(doc) {
   return {
     id: doc.id,
     ...(doc.data() || {}),
   };
+}
+
+function sortByCreatedAtDesc(rows = []) {
+  return [...rows].sort((a, b) => {
+    const av = typeof a?.createdAt === "number" && Number.isFinite(a.createdAt) ? a.createdAt : 0;
+    const bv = typeof b?.createdAt === "number" && Number.isFinite(b.createdAt) ? b.createdAt : 0;
+    return bv - av;
+  });
+}
+
+function sortByLastSeenAtDesc(rows = []) {
+  return [...rows].sort((a, b) => {
+    const av = typeof a?.lastSeenAt === "number" && Number.isFinite(a.lastSeenAt) ? a.lastSeenAt : 0;
+    const bv = typeof b?.lastSeenAt === "number" && Number.isFinite(b.lastSeenAt) ? b.lastSeenAt : 0;
+    return bv - av;
+  });
+}
+
+function userMatchesEnv(user = {}, env = "") {
+  if (!env) return true;
+  const candidates = [
+    user.lastSeenEnv,
+    user.firstSeenEnv,
+    user.primaryEnv,
+    user.lastBackendEnv,
+  ]
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim().toLowerCase());
+  if (Array.isArray(user.seenEnvList)) {
+    for (const value of user.seenEnvList) {
+      if (typeof value === "string") candidates.push(value.trim().toLowerCase());
+    }
+  }
+  if (env === "unknown") return candidates.length === 0;
+  return candidates.includes(env);
+}
+
+function activityMatchesEnv(event = {}, env = "") {
+  if (!env) return true;
+  if (env === "unknown") return !event.env;
+  return typeof event.env === "string" && event.env.trim().toLowerCase() === env;
+}
+
+function getAdminRoleFromDecoded(decoded = {}) {
+  if (decoded.role === "owner" || decoded.owner === true) return "owner";
+  if (decoded.role === "admin" || decoded.admin === true) return "admin";
+  if (Array.isArray(decoded.roles) && decoded.roles.includes("owner")) return "owner";
+  if (Array.isArray(decoded.roles) && decoded.roles.includes("admin")) return "admin";
+  return "admin";
+}
+
+function buildAdminAuditLogPayload({
+  adminAuth,
+  action,
+  targetUid = null,
+  targetPath = null,
+  before = null,
+  after = null,
+  reason = null,
+  metadata = null,
+  requestId = null,
+} = {}) {
+  const now = Date.now();
+  return {
+    adminUid: adminAuth?.uid || null,
+    adminEmail: adminAuth?.email || null,
+    adminRole: getAdminRoleFromDecoded(adminAuth?.decoded || {}),
+    action: typeof action === "string" && action.trim() ? action.trim() : "unknown",
+    targetUid: typeof targetUid === "string" && targetUid.trim() ? targetUid.trim() : null,
+    targetPath: typeof targetPath === "string" && targetPath.trim() ? targetPath.trim() : null,
+    before: before && typeof before === "object" ? before : before ?? null,
+    after: after && typeof after === "object" ? after : after ?? null,
+    reason: typeof reason === "string" && reason.trim() ? reason.trim() : null,
+    metadata: metadata && typeof metadata === "object" ? metadata : {},
+    requestId: typeof requestId === "string" && requestId.trim() ? requestId.trim() : null,
+    createdAt: now,
+    _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+
+function writeAdminAuditLog({ db, tx = null, ...payloadInput } = {}) {
+  if (!_adminInitialized || !db) return null;
+  const payload = buildAdminAuditLogPayload(payloadInput);
+  const ref = db.collection(ADMIN_AUDIT_LOGS_COLLECTION).doc();
+  if (tx) {
+    tx.set(ref, payload, { merge: true });
+    return { id: ref.id, payload };
+  }
+  ref.set(payload, { merge: true }).catch((err) => {
+    console.warn("⚠️ Failed to write admin audit log:", {
+      action: payload.action,
+      targetUid: payload.targetUid,
+      message: err?.message,
+      code: err?.code,
+    });
+  });
+  return { id: ref.id, payload };
 }
 
 async function getCollectionCount(collectionRef) {
@@ -3981,14 +4295,12 @@ function applyActivityFilters(query, params = {}) {
   const source = typeof params.source === "string" && params.source.trim() ? params.source.trim() : null;
   const status = typeof params.status === "string" && params.status.trim() ? params.status.trim() : null;
   const uid = typeof params.uid === "string" && params.uid.trim() ? params.uid.trim() : null;
-  const env = typeof params.env === "string" && params.env.trim() ? params.env.trim() : null;
 
   if (type) next = next.where("type", "==", type);
   if (action) next = next.where("action", "==", action);
   if (source) next = next.where("source", "==", source);
   if (status) next = next.where("status", "==", status);
   if (uid) next = next.where("uid", "==", uid);
-  if (env) next = next.where("env", "==", env);
 
   return next;
 }
@@ -4075,70 +4387,57 @@ app.get("/admin/dashboard", async (req, res) => {
     const db = getAnalyticsDb();
     const summaries = db.collection(USER_SUMMARIES_COLLECTION);
     const activities = db.collection(ACTIVITY_EVENTS_COLLECTION);
+    const envFilter = normalizeAdminEnvFilter(req.query?.env);
     const now = Date.now();
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
     const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
 
-    const [
-      totalUsers,
-      anonymousUsers,
-      registeredUsers,
-      active7d,
-      active30d,
-      aiSuggestions,
-      aiFullRecipes,
-      premiumActions,
-      urlImports,
-      fileImports,
-      instagramImports,
-      recentUsersSnap,
-      recentActivitySnap,
-    ] = await Promise.all([
-      getCollectionCount(summaries),
-      getCollectionCount(summaries.where("isAnonymous", "==", true)),
-      getCollectionCount(summaries.where("isAnonymous", "==", false)),
-      getCollectionCount(summaries.where("lastRealActionAt", ">=", sevenDaysAgo)),
-      getCollectionCount(summaries.where("lastRealActionAt", ">=", thirtyDaysAgo)),
-      getCollectionCount(
-        activities.where("action", "==", "ai_suggestions_generated").where("status", "==", "succeeded")
-      ),
-      getCollectionCount(
-        activities.where("action", "==", "ai_recipe_generated").where("status", "==", "succeeded")
-      ),
-      getCollectionCount(
-        activities.where("action", "==", "premium_action_spent").where("status", "==", "succeeded")
-      ),
-      getCollectionCount(
-        activities.where("action", "==", "recipe_url_import").where("status", "==", "succeeded")
-      ),
-      getCollectionCount(
-        activities.where("action", "==", "recipes_file_import").where("status", "==", "succeeded")
-      ),
-      getCollectionCount(
-        activities.where("action", "==", "instagram_reel_import").where("status", "==", "succeeded")
-      ),
-      summaries.orderBy("lastSeenAt", "desc").limit(10).get(),
-      activities.orderBy("createdAt", "desc").limit(20).get(),
+    const [summariesSnap, recentActivitySnap] = await Promise.all([
+      summaries.limit(5000).get(),
+      activities.orderBy("createdAt", "desc").limit(5000).get(),
     ]);
+
+    const allUsers = summariesSnap.docs.map(docWithId);
+    const users = allUsers.filter((user) => userMatchesEnv(user, envFilter));
+    const recentActivity = recentActivitySnap.docs
+      .map(docWithId)
+      .filter((event) => activityMatchesEnv(event, envFilter));
+    const successfulActivity = recentActivity.filter((event) => event.status === "succeeded");
+    const countSuccessfulAction = (action) =>
+      successfulActivity.filter((event) => event.action === action).length;
+
+    const totalUsers = users.length;
+    const anonymousUsers = users.filter((user) => user.isAnonymous === true).length;
+    const registeredUsers = users.filter((user) => user.isAnonymous === false).length;
+    const active7d = users.filter(
+      (user) => typeof user.lastRealActionAt === "number" && user.lastRealActionAt >= sevenDaysAgo
+    ).length;
+    const active30d = users.filter(
+      (user) => typeof user.lastRealActionAt === "number" && user.lastRealActionAt >= thirtyDaysAgo
+    ).length;
 
     console.log("[admin/dashboard] success", { uid: adminAuth.uid });
     return res.json({
       ok: true,
+      env: envFilter || "all",
+      rawTotals: {
+        users: allUsers.length,
+      },
       totals: {
         users: totalUsers,
         anonymousUsers,
         registeredUsers,
         active7d,
         active30d,
-        aiSuggestions,
-        aiFullRecipes,
-        premiumActions,
-        urlImports,
-        fileImports,
-        instagramImports,
+        aiSuggestions: countSuccessfulAction("ai_suggestions_generated"),
+        aiFullRecipes: countSuccessfulAction("ai_recipe_generated"),
+        premiumActions: countSuccessfulAction("premium_action_spent"),
+        urlImports: countSuccessfulAction("recipe_url_import"),
+        fileImports: countSuccessfulAction("recipes_file_import"),
+        instagramImports: countSuccessfulAction("instagram_reel_import"),
       },
-      recentUsers: recentUsersSnap.docs.map(docWithId),
-      recentActivity: recentActivitySnap.docs.map(docWithId),
+      recentUsers: sortByLastSeenAtDesc(users).slice(0, 10),
+      recentActivity: recentActivity.slice(0, 20),
     });
   } catch (err) {
     console.error("❌ /admin/dashboard error:", err?.message || err);
@@ -4153,6 +4452,7 @@ app.get("/admin/capabilities", async (req, res) => {
   try {
     const db = getAnalyticsDb();
     const limit = parseAdminLimit(req.query?.limit, 1000, 5000);
+    const envFilter = normalizeAdminEnvFilter(req.query?.env);
     const [activitySnap, summariesSnap] = await Promise.all([
       db.collection(ACTIVITY_EVENTS_COLLECTION).orderBy("createdAt", "desc").limit(limit).get(),
       db.collection(USER_SUMMARIES_COLLECTION).limit(5000).get(),
@@ -4168,6 +4468,7 @@ app.get("/admin/capabilities", async (req, res) => {
 
     activitySnap.forEach((doc) => {
       const event = doc.data() || {};
+      if (!activityMatchesEnv(event, envFilter)) return;
       incrementObjectCounter(byType, event.type);
       incrementObjectCounter(byAction, event.action);
       incrementObjectCounter(bySource, event.source);
@@ -4191,6 +4492,7 @@ app.get("/admin/capabilities", async (req, res) => {
 
     summariesSnap.forEach((doc) => {
       const data = doc.data() || {};
+      if (!userMatchesEnv(data, envFilter)) return;
       for (const key of Object.keys(summaryTotals)) {
         const value = data[key];
         if (typeof value === "number" && Number.isFinite(value)) {
@@ -4201,6 +4503,7 @@ app.get("/admin/capabilities", async (req, res) => {
 
     return res.json({
       ok: true,
+      env: envFilter || "all",
       window: {
         activityLimit: limit,
         activityEventsRead: activitySnap.size,
@@ -4232,6 +4535,7 @@ app.get("/admin/users", async (req, res) => {
     const limit = parseAdminLimit(req.query?.limit, 50, 200);
     const offset = parseAdminOffset(req.query?.offset);
     const q = typeof req.query?.q === "string" ? req.query.q.trim().toLowerCase() : "";
+    const envFilter = normalizeAdminEnvFilter(req.query?.env);
     const isAnonymous =
       req.query?.isAnonymous === "true"
         ? true
@@ -4239,11 +4543,16 @@ app.get("/admin/users", async (req, res) => {
           ? false
           : null;
 
-    let query = db.collection(USER_SUMMARIES_COLLECTION).orderBy("lastSeenAt", "desc");
-    if (isAnonymous !== null) query = query.where("isAnonymous", "==", isAnonymous);
-
-    const snap = await query.limit(Math.min(1000, limit + offset + (q ? 500 : 0))).get();
+    const snap = await db.collection(USER_SUMMARIES_COLLECTION).limit(5000).get();
     let users = snap.docs.map(docWithId);
+
+    if (isAnonymous !== null) {
+      users = users.filter((user) => user.isAnonymous === isAnonymous);
+    }
+
+    if (envFilter) {
+      users = users.filter((user) => userMatchesEnv(user, envFilter));
+    }
 
     if (q) {
       users = users.filter((user) => {
@@ -4260,10 +4569,11 @@ app.get("/admin/users", async (req, res) => {
       });
     }
 
+    users = sortByLastSeenAtDesc(users);
     const totalMatched = users.length;
     users = users.slice(offset, offset + limit);
 
-    return res.json({ ok: true, users, totalMatched, limit, offset });
+    return res.json({ ok: true, users, totalMatched, limit, offset, env: envFilter || "all" });
   } catch (err) {
     console.error("❌ /admin/users error:", err?.message || err);
     return res.status(500).json({ ok: false, error: "Failed to load admin users" });
@@ -4284,8 +4594,7 @@ app.get("/admin/users/:uid", async (req, res) => {
       db.doc(`users/${uid}/economy/default`).get(),
       db.collection(ACTIVITY_EVENTS_COLLECTION)
         .where("uid", "==", uid)
-        .orderBy("createdAt", "desc")
-        .limit(20)
+        .limit(100)
         .get(),
       getEconomyLedgerCol(db, uid).orderBy("createdAt", "desc").limit(20).get(),
     ]);
@@ -4295,12 +4604,148 @@ app.get("/admin/users/:uid", async (req, res) => {
       uid,
       summary: summarySnap.exists ? { id: summarySnap.id, ...(summarySnap.data() || {}) } : null,
       economy: economySnap.exists ? economySnap.data() || {} : null,
-      recentActivity: recentActivitySnap.docs.map(docWithId),
+      recentActivity: sortByCreatedAtDesc(recentActivitySnap.docs.map(docWithId)).slice(0, 20),
       recentLedger: ledgerSnap.docs.map(docWithId),
     });
   } catch (err) {
     console.error("❌ /admin/users/:uid error:", err?.message || err);
     return res.status(500).json({ ok: false, error: "Failed to load admin user detail" });
+  }
+});
+
+app.patch("/admin/users/:uid/economy", express.json({ limit: "16kb" }), async (req, res) => {
+  const adminAuth = await requireAdmin(req, res);
+  if (!adminAuth) return;
+
+  try {
+    const uid = String(req.params.uid || "").trim();
+    if (!uid) return res.status(400).json({ ok: false, error: "Missing uid" });
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (reason.length < 3) {
+      return res.status(400).json({ ok: false, error: "A reason is required" });
+    }
+
+    const nextCookies = parseAdminNonNegativeInteger(body.cookies);
+    const nextFreeActions = parseAdminNonNegativeInteger(body.freePremiumActionsRemaining);
+    if (nextCookies === null || nextFreeActions === null) {
+      return res.status(400).json({ ok: false, error: "Economy values must be non-negative numbers" });
+    }
+    if (nextCookies === undefined && nextFreeActions === undefined) {
+      return res.status(400).json({ ok: false, error: "No editable economy fields provided" });
+    }
+
+    const db = getAnalyticsDb();
+    const economyRef = getEconomyDocRef(db, uid);
+    const summaryRef = db.collection(USER_SUMMARIES_COLLECTION).doc(uid);
+    const ledgerRef = getEconomyLedgerCol(db, uid).doc();
+    const now = Date.now();
+
+    const result = await db.runTransaction(async (tx) => {
+      const economySnap = await tx.get(economyRef);
+      const before = economySnap.exists ? economySnap.data() || {} : {};
+      const previousCookies =
+        typeof before.cookies === "number" && Number.isFinite(before.cookies)
+          ? Math.floor(before.cookies)
+          : 0;
+      const previousFreeActions =
+        typeof before.freePremiumActionsRemaining === "number" &&
+        Number.isFinite(before.freePremiumActionsRemaining)
+          ? Math.floor(before.freePremiumActionsRemaining)
+          : null;
+
+      const after = {
+        ...before,
+        ...(nextCookies !== undefined ? { cookies: nextCookies } : {}),
+        ...(nextFreeActions !== undefined ? { freePremiumActionsRemaining: nextFreeActions } : {}),
+        updatedAt: now,
+        updatedBy: "admin",
+        updatedByAdminUid: adminAuth.uid,
+        updatedByAdminEmail: adminAuth.email,
+        lastAdminReason: reason,
+        _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      tx.set(economyRef, after, { merge: true });
+      tx.set(summaryRef, {
+        uid,
+        ...(nextCookies !== undefined ? { cookies: nextCookies } : {}),
+        ...(nextFreeActions !== undefined ? { freePremiumActionsRemaining: nextFreeActions } : {}),
+        economyUpdatedAt: now,
+        updatedAt: now,
+        _serverUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      tx.set(ledgerRef, {
+        kind: "admin_adjustment",
+        reason: "admin_economy_edit",
+        source: "admin_panel",
+        delta: nextCookies !== undefined ? nextCookies - previousCookies : 0,
+        balanceAfter: nextCookies !== undefined ? nextCookies : previousCookies,
+        freePremiumActionsAfter:
+          nextFreeActions !== undefined ? nextFreeActions : previousFreeActions,
+        actionKey: "admin_economy_edit",
+        createdAt: now,
+        _serverCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        metadata: {
+          adminUid: adminAuth.uid,
+          adminEmail: adminAuth.email,
+          reason,
+          before: {
+            cookies: previousCookies,
+            freePremiumActionsRemaining: previousFreeActions,
+          },
+          after: {
+            cookies: nextCookies !== undefined ? nextCookies : previousCookies,
+            freePremiumActionsRemaining:
+              nextFreeActions !== undefined ? nextFreeActions : previousFreeActions,
+          },
+        },
+      }, { merge: true });
+
+      writeAdminAuditLog({
+        db,
+        tx,
+        adminAuth,
+        action: "user_economy_updated",
+        targetUid: uid,
+        targetPath: `users/${uid}/economy/default`,
+        before: {
+          cookies: previousCookies,
+          freePremiumActionsRemaining: previousFreeActions,
+        },
+        after: {
+          cookies: nextCookies !== undefined ? nextCookies : previousCookies,
+          freePremiumActionsRemaining:
+            nextFreeActions !== undefined ? nextFreeActions : previousFreeActions,
+        },
+        reason,
+        metadata: {
+          ledgerId: ledgerRef.id,
+        },
+        requestId: getEventContext(req).requestId,
+      });
+
+      return {
+        economy: {
+          ...before,
+          ...(nextCookies !== undefined ? { cookies: nextCookies } : {}),
+          ...(nextFreeActions !== undefined ? { freePremiumActionsRemaining: nextFreeActions } : {}),
+          updatedAt: now,
+          updatedBy: "admin",
+          updatedByAdminUid: adminAuth.uid,
+          updatedByAdminEmail: adminAuth.email,
+          lastAdminReason: reason,
+        },
+        ledgerId: ledgerRef.id,
+      };
+    });
+
+    return res.json({ ok: true, uid, economy: result.economy, ledgerId: result.ledgerId });
+  } catch (err) {
+    console.error("❌ /admin/users/:uid/economy error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to update user economy" });
   }
 });
 
@@ -4317,8 +4762,13 @@ app.get("/admin/users/:uid/activity", async (req, res) => {
       db.collection(ACTIVITY_EVENTS_COLLECTION).where("uid", "==", uid),
       req.query || {}
     );
-    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
-    return res.json({ ok: true, uid, events: snap.docs.map(docWithId), limit });
+    const snap = await query.limit(Math.min(1000, limit * 5)).get();
+    return res.json({
+      ok: true,
+      uid,
+      events: sortByCreatedAtDesc(snap.docs.map(docWithId)).slice(0, limit),
+      limit,
+    });
   } catch (err) {
     console.error("❌ /admin/users/:uid/activity error:", err?.message || err);
     return res.status(500).json({ ok: false, error: "Failed to load admin user activity" });
@@ -4391,12 +4841,72 @@ app.get("/admin/activity-events", async (req, res) => {
   try {
     const db = getAnalyticsDb();
     const limit = parseAdminLimit(req.query?.limit, 50, 200);
+    const envFilter = normalizeAdminEnvFilter(req.query?.env);
     const query = applyActivityFilters(db.collection(ACTIVITY_EVENTS_COLLECTION), req.query || {});
-    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
-    return res.json({ ok: true, events: snap.docs.map(docWithId), limit });
+    const snap = await query.orderBy("createdAt", "desc").limit(Math.min(1000, limit * 5)).get();
+    const events = snap.docs
+      .map(docWithId)
+      .filter((event) => activityMatchesEnv(event, envFilter))
+      .slice(0, limit);
+    return res.json({ ok: true, events, limit, env: envFilter || "all" });
   } catch (err) {
     console.error("❌ /admin/activity-events error:", err?.message || err);
     return res.status(500).json({ ok: false, error: "Failed to load admin activity events" });
+  }
+});
+
+app.get("/admin/ai-recipes", async (req, res) => {
+  const adminAuth = await requireAdmin(req, res);
+  if (!adminAuth) return;
+
+  try {
+    const db = getAnalyticsDb();
+    const limit = parseAdminLimit(req.query?.limit, 50, 200);
+    const envFilter = normalizeAdminEnvFilter(req.query?.env);
+    const kind =
+      req.query?.kind === "full_recipe" || req.query?.kind === "suggestions"
+        ? req.query.kind
+        : "";
+    const uid = typeof req.query?.uid === "string" ? req.query.uid.trim() : "";
+    const q = typeof req.query?.q === "string" ? req.query.q.trim().toLowerCase() : "";
+    const snap = await db
+      .collection(AI_GENERATED_CONTENT_COLLECTION)
+      .orderBy("createdAt", "desc")
+      .limit(Math.min(1000, limit * 5))
+      .get();
+
+    const items = snap.docs
+      .map(docWithId)
+      .filter((item) => {
+        if (envFilter && !activityMatchesEnv(item, envFilter)) return false;
+        if (kind && item.kind !== kind) return false;
+        if (uid && item.uid !== uid) return false;
+        if (q) {
+          const haystack = [
+            item.title,
+            item.recipe?.title,
+            ...(Array.isArray(item.recipe?.tags) ? item.recipe.tags : []),
+            ...(Array.isArray(item.suggestions) ? item.suggestions.map((suggestion) => suggestion.title) : []),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          if (!haystack.includes(q)) return false;
+        }
+        return true;
+      })
+      .slice(0, limit);
+
+    return res.json({
+      ok: true,
+      items,
+      limit,
+      env: envFilter || "all",
+      kind: kind || "all",
+    });
+  } catch (err) {
+    console.error("❌ /admin/ai-recipes error:", err?.message || err);
+    return res.status(500).json({ ok: false, error: "Failed to load admin AI recipes" });
   }
 });
 
@@ -4407,7 +4917,7 @@ app.get("/admin/audit-logs", async (req, res) => {
   try {
     const db = getAnalyticsDb();
     const limit = parseAdminLimit(req.query?.limit, 50, 200);
-    const snap = await db.collection("adminAuditLogs").orderBy("createdAt", "desc").limit(limit).get();
+    const snap = await db.collection(ADMIN_AUDIT_LOGS_COLLECTION).orderBy("createdAt", "desc").limit(limit).get();
     return res.json({ ok: true, logs: snap.docs.map(docWithId), limit });
   } catch (err) {
     console.error("❌ /admin/audit-logs error:", err?.message || err);
@@ -6914,6 +7424,10 @@ const ACTIVITY_EVENTS_COLLECTION =
   process.env.FIREBASE_ACTIVITY_EVENTS_COLLECTION || "activityEvents";
 const USER_SUMMARIES_COLLECTION =
   process.env.FIREBASE_USER_SUMMARIES_COLLECTION || "userSummaries";
+const ADMIN_AUDIT_LOGS_COLLECTION =
+  process.env.FIREBASE_ADMIN_AUDIT_LOGS_COLLECTION || "adminAuditLogs";
+const AI_GENERATED_CONTENT_COLLECTION =
+  process.env.FIREBASE_AI_GENERATED_CONTENT_COLLECTION || "aiGeneratedContent";
 const FIREBASE_WEB_API_KEY =
   process.env.FIREBASE_WEB_API_KEY || "AIzaSyDuPZ3__DSl0K1XPU6XivUHqVt1A5e-zr4";
 const FIRESTORE_DB_ID =
@@ -8194,6 +8708,112 @@ function normalizeTags(tags, mealType) {
   return out.slice(0, 5);
 }
 
+const AI_KITCHEN_MEAL_TAG_LABELS = {
+  "English": {
+    breakfast: "Breakfast",
+    lunch: "Lunch",
+    dinner: "Dinner",
+    snack: "Snack",
+  },
+  "Portuguese (Portugal)": {
+    breakfast: "Pequeno-almoço",
+    lunch: "Almoço",
+    dinner: "Jantar",
+    snack: "Lanche",
+  },
+  "Portuguese (Brazil)": {
+    breakfast: "Café da Manhã",
+    lunch: "Almoço",
+    dinner: "Jantar",
+    snack: "Lanche",
+  },
+  "Spanish": {
+    breakfast: "Desayuno",
+    lunch: "Almuerzo",
+    dinner: "Cena",
+    snack: "Merienda",
+  },
+  "French": {
+    breakfast: "Petit-déjeuner",
+    lunch: "Déjeuner",
+    dinner: "Dîner",
+    snack: "En-cas",
+  },
+  "German": {
+    breakfast: "Frühstück",
+    lunch: "Mittagessen",
+    dinner: "Abendessen",
+    snack: "Snack",
+  },
+};
+
+function normalizeAiKitchenMealTag(raw, language) {
+  if (typeof raw !== "string") return null;
+  const normalizedLang = normalizeLanguage(language);
+  const text = raw.trim();
+  if (!text) return null;
+  const key = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9._-]/g, "");
+  const suffix = key.includes(".") ? key.split(".").pop() : key;
+  const canonical =
+    suffix === "breakfast" || suffix === "desayuno" ? "breakfast" :
+    suffix === "lunch" || suffix === "almuerzo" || suffix === "almoco" ? "lunch" :
+    suffix === "dinner" || suffix === "cena" || suffix === "jantar" ? "dinner" :
+    suffix === "snack" || suffix === "merienda" || suffix === "lanche" ? "snack" :
+    null;
+  const justHungry =
+    suffix === "just_hungry" ||
+    suffix === "justhungry" ||
+    suffix === "solohambre" ||
+    suffix === "sotengofome" ||
+    suffix === "soestoucomfome" ||
+    suffix === "jaisimplementfaim" ||
+    suffix === "ichhabeeinfachhunger";
+  if (justHungry) return null;
+  if (!canonical) return null;
+  return AI_KITCHEN_MEAL_TAG_LABELS[normalizedLang]?.[canonical] || AI_KITCHEN_MEAL_TAG_LABELS.English[canonical];
+}
+
+function toTitleCaseTag(raw) {
+  if (typeof raw !== "string") return "";
+  const cleaned = raw
+    .trim()
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  return cleaned.replace(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu, (word) => {
+    if (word.length <= 3 && word === word.toUpperCase()) return word;
+    return word.charAt(0).toLocaleUpperCase() + word.slice(1).toLocaleLowerCase();
+  });
+}
+
+function normalizeAiKitchenTagForDisplay(raw, language, preservedLabels = []) {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (preservedLabels.some((label) => label && trimmed.toLowerCase() === label.toLowerCase())) {
+    return preservedLabels.find((label) => label && trimmed.toLowerCase() === label.toLowerCase()) || trimmed;
+  }
+
+  const mealTag = normalizeAiKitchenMealTag(trimmed, language);
+  if (mealTag) return mealTag;
+
+  // Avoid exposing internal translation keys such as "meal.just_hungry" or
+  // "comida.solohambre" as recipe tags.
+  if (/^[a-z][a-z0-9_-]*\.[a-z0-9_.-]+$/i.test(trimmed)) return "";
+
+  const withoutPunctuation = trimmed
+    .replace(/[^\p{L}\p{N}\s'’+-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!withoutPunctuation || withoutPunctuation.length > 40) return "";
+  return toTitleCaseTag(withoutPunctuation);
+}
+
 // Auto-number steps and strip prior numbering
 function normalizeSteps(steps) {
   if (!Array.isArray(steps)) return ["No steps provided"];
@@ -8618,6 +9238,20 @@ Each of the 3 suggestions must be clearly different from the others in concept, 
         mealType,
       },
     });
+    indexAiGeneratedContent({
+      req,
+      uid: ctx.userId,
+      deviceId: ctx.deviceId,
+      kind: "suggestions",
+      source: "ai_kitchen",
+      suggestions,
+      metadata: {
+        count: suggestions.length,
+        language,
+        measurementSystem: measurementSystemNormalized,
+        mealType,
+      },
+    });
 
     res.json({ suggestions });
   } catch (error) {
@@ -8888,8 +9522,8 @@ IMPORTANT: All text in every field must be written entirely in the target langua
       mealType !== "Im just hungry" &&
       mealType !== "I\u2019m just hungry"
     ) {
-      const mt = mealType.trim();
-      if (!tags.some(t => t.toLowerCase() === mt.toLowerCase())) {
+      const mt = normalizeAiKitchenMealTag(mealType, language) || normalizeAiKitchenTagForDisplay(mealType, language, [aiGeneratedLabel]);
+      if (mt && !tags.some(t => t.toLowerCase() === mt.toLowerCase())) {
         tags.push(mt);
       }
     }
@@ -8898,7 +9532,7 @@ IMPORTANT: All text in every field must be written entirely in the target langua
     if (Array.isArray(dietary)) {
       for (const d of dietary) {
         if (tags.length >= 5) break;
-        const label = (d || "").toString().trim();
+        const label = normalizeAiKitchenTagForDisplay((d || "").toString(), language, [aiGeneratedLabel]);
         if (!label) continue;
         if (!tags.some(t => t.toLowerCase() === label.toLowerCase())) {
           tags.push(label);
@@ -8921,16 +9555,14 @@ IMPORTANT: All text in every field must be written entirely in the target langua
       let candidate = rawTag.trim();
       if (!candidate) continue;
 
-      // Remove punctuation but keep letters (including accents) and digits
-      candidate = candidate.replace(/[^A-Za-z\u00c0-\u017f0-9\s]/g, "");
-      const firstWord = candidate.split(/\s+/)[0];
-      if (!firstWord) continue;
+      candidate = normalizeAiKitchenTagForDisplay(candidate, language, [aiGeneratedLabel]);
+      if (!candidate) continue;
 
-      const lower = firstWord.toLowerCase();
+      const lower = candidate.toLowerCase();
       if (forbiddenTagSet.has(lower)) continue;
       if (tags.some(t => t.toLowerCase() === lower)) continue;
 
-      tags.push(firstWord);
+      tags.push(candidate);
     }
 
     // 5) Final cleanup and language enforcement for tags
@@ -8947,6 +9579,17 @@ IMPORTANT: All text in every field must be written entirely in the target langua
     if (!Array.isArray(finalTags) || !finalTags.length) {
       finalTags = tags.slice(0, 5);
     }
+    finalTags = Array.from(
+      new Set(
+        finalTags
+          .map((tag) => normalizeAiKitchenTagForDisplay(tag, language, [aiGeneratedLabel]))
+          .filter(Boolean)
+      )
+    );
+    if (!finalTags.some((tag) => tag.toLowerCase() === aiGeneratedLabel.toLowerCase())) {
+      finalTags.unshift(aiGeneratedLabel);
+    }
+    finalTags = finalTags.slice(0, 5);
     safe.tags = finalTags;
     timing.mark("post-process-complete", {
       ingredientCount: safe.ingredients.length,
@@ -8989,6 +9632,25 @@ IMPORTANT: All text in every field must be written entirely in the target langua
         premiumActionSource: economySpend?.source || null,
         chargedCookies:
           typeof economySpend?.charged === "number" ? economySpend.charged : 0,
+      },
+    });
+    indexAiGeneratedContent({
+      req,
+      uid: ctx.userId,
+      deviceId: ctx.deviceId,
+      kind: "full_recipe",
+      source: "ai_kitchen",
+      objectId: safe.id || suggestionId || suggestion?.id || null,
+      recipe: safe,
+      metadata: {
+        language,
+        measurementSystem: measurementSystemNormalized,
+        mealType,
+        servings: safe.servings,
+        cookingTime: safe.cookingTime,
+        difficulty: safe.difficulty,
+        suggestionId: suggestionId || suggestion?.id || null,
+        suggestionTitle: suggestion?.title || null,
       },
     });
 

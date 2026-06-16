@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { Auth } from "firebase/auth";
 import { getDeviceId } from "../../utils/deviceId";
+import { trackActivityEventBestEffort } from "../activity/client";
 import { emitClaimableRewardsChanged } from "./claimableRewardsEvents";
 
 export type EconomySnapshot = {
@@ -107,6 +108,20 @@ export async function claimEconomyReward({
         : "failed_to_claim_reward";
     throw new Error(message);
   }
+  trackActivityEventBestEffort({
+    auth,
+    backendUrl,
+    appEnv,
+    type: "economy",
+    action: "reward_claimed",
+    source: "reward",
+    objectId: rewardKey,
+    metadata: {
+      rewardKey,
+      cookiesGranted: typeof data?.cookiesGranted === "number" ? data.cookiesGranted : null,
+      balance: typeof data?.balance === "number" ? data.balance : null,
+    },
+  });
   emitClaimableRewardsChanged();
   return data;
 }

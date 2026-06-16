@@ -7,6 +7,28 @@ const state = {
   token: null,
   tokenExpiresAt: 0,
   user: null,
+  currentUserDetailUid: null,
+  dashboardEnv: "",
+  capabilitiesEnv: "",
+  activityFilters: {
+    type: "",
+    action: "",
+    source: "",
+    status: "",
+    uid: "",
+    env: "",
+  },
+  usersFilters: {
+    q: "",
+    isAnonymous: "",
+    env: "",
+  },
+  aiRecipesFilters: {
+    q: "",
+    kind: "",
+    uid: "",
+    env: "",
+  },
 };
 
 const elements = {
@@ -27,6 +49,7 @@ const elements = {
   capabilitiesView: document.querySelector("#capabilitiesView"),
   usersView: document.querySelector("#usersView"),
   userDetailView: document.querySelector("#userDetailView"),
+  aiRecipesView: document.querySelector("#aiRecipesView"),
   activityView: document.querySelector("#activityView"),
   auditView: document.querySelector("#auditView"),
 };
@@ -93,6 +116,7 @@ function setView(view) {
     elements.capabilitiesView,
     elements.usersView,
     elements.userDetailView,
+    elements.aiRecipesView,
     elements.activityView,
     elements.auditView,
   ];
@@ -114,6 +138,10 @@ function setView(view) {
     elements.userDetailView.hidden = false;
     elements.viewTitle.textContent = "User detail";
     elements.viewSubtitle.textContent = "";
+  } else if (view === "aiRecipes") {
+    elements.aiRecipesView.hidden = false;
+    elements.viewTitle.textContent = "AI Recipes";
+    elements.viewSubtitle.textContent = "Generated recipes and suggestion batches";
   } else if (view === "activity") {
     elements.activityView.hidden = false;
     elements.viewTitle.textContent = "Activity";
@@ -204,14 +232,37 @@ function clearSession() {
   localStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
-async function api(path) {
+async function api(path, options = {}) {
   const token = await getToken(false);
   debugLogin("api request", { path });
-  const response = await fetch(path, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    ...(options.headers || {}),
+  };
+  let body = options.body;
+  if (body && typeof body === "object" && !(body instanceof FormData)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    body = JSON.stringify(body);
+  }
+  let response;
+  try {
+    response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      debugLogin("api timed out", { path });
+      throw new Error(`Request timed out: ${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data?.ok === false) {
     debugLogin("api failed", { path, status: response.status, error: data?.error || null });
@@ -227,6 +278,19 @@ function renderMetric(label, value) {
       <div class="metric-label">${escapeHtml(label)}</div>
       <div class="metric-value">${escapeHtml(formatNumber(value))}</div>
     </div>
+  `;
+}
+
+function renderEnvSelect(name, selected = "") {
+  return `
+    <select name="${escapeHtml(name)}">
+      <option value="" ${selected === "" ? "selected" : ""}>All</option>
+      <option value="production" ${selected === "production" ? "selected" : ""}>Production</option>
+      <option value="local" ${selected === "local" ? "selected" : ""}>Local</option>
+      <option value="development" ${selected === "development" ? "selected" : ""}>Development</option>
+      <option value="qa" ${selected === "qa" ? "selected" : ""}>QA</option>
+      <option value="unknown" ${selected === "unknown" ? "selected" : ""}>Unknown</option>
+    </select>
   `;
 }
 
@@ -263,14 +327,24 @@ function renderActivityTable(events = []) {
   `;
 }
 
-async function loadDashboard() {
+async function loadDashboard(params = {}) {
   setView("dashboard");
+  const env = params.env ?? state.dashboardEnv ?? "";
+  state.dashboardEnv = env;
   elements.dashboardView.innerHTML = `<div class="muted">Loading…</div>`;
-  const data = await api("/admin/dashboard");
+  const query = new URLSearchParams();
+  if (env) query.set("env", env);
+  const data = await api(`/admin/dashboard${query.toString() ? `?${query.toString()}` : ""}`);
   const totals = data.totals || {};
+  const rawTotals = data.rawTotals || {};
   elements.dashboardView.innerHTML = `
+    <form id="dashboardFilterForm" class="toolbar compact-toolbar">
+      <label>Environment${renderEnvSelect("env", env)}</label>
+      <button class="secondary-button" type="submit">Apply</button>
+      <div class="muted toolbar-note">Raw users: ${escapeHtml(formatNumber(rawTotals.users))}</div>
+    </form>
     <div class="metric-grid">
-      ${renderMetric("Users", totals.users)}
+      ${renderMetric(env ? `${env} users` : "Users", totals.users)}
       ${renderMetric("Anonymous", totals.anonymousUsers)}
       ${renderMetric("Registered", totals.registeredUsers)}
       ${renderMetric("Active 7d", totals.active7d)}
@@ -324,13 +398,23 @@ function renderBreakdownTable(title, rows = {}) {
   `;
 }
 
-async function loadCapabilities() {
+async function loadCapabilities(params = {}) {
   setView("capabilities");
+  const env = params.env ?? state.capabilitiesEnv ?? "";
+  state.capabilitiesEnv = env;
   elements.capabilitiesView.innerHTML = `<div class="muted">Loading…</div>`;
-  const data = await api("/admin/capabilities?limit=2500");
+  const query = new URLSearchParams();
+  query.set("limit", "2500");
+  if (env) query.set("env", env);
+  const data = await api(`/admin/capabilities?${query.toString()}`);
   const totals = data.summaryTotals || {};
   const breakdown = data.activityBreakdown || {};
   elements.capabilitiesView.innerHTML = `
+    <form id="capabilitiesFilterForm" class="toolbar compact-toolbar">
+      <label>Environment${renderEnvSelect("env", env)}</label>
+      <button class="secondary-button" type="submit">Apply</button>
+      <div class="muted toolbar-note">Window: ${escapeHtml(formatNumber(data.window?.activityEventsRead))} activity events</div>
+    </form>
     <div class="metric-grid">
       ${renderMetric("Recipes", totals.recipeCount)}
       ${renderMetric("Meals", totals.mealCount)}
@@ -374,6 +458,7 @@ function renderUsersTable(users = [], includeActions = true) {
             <th>Meals</th>
             <th>Eggs</th>
             <th>Free actions</th>
+            <th>Env</th>
             <th>Last action</th>
           </tr>
         </thead>
@@ -389,9 +474,10 @@ function renderUsersTable(users = [], includeActions = true) {
               <td>${escapeHtml(formatNumber(user.mealCount))}</td>
               <td>${escapeHtml(text(user.cookies))}</td>
               <td>${escapeHtml(text(user.freePremiumActionsRemaining))}</td>
+              <td>${escapeHtml(text(user.lastSeenEnv))}</td>
               <td>${escapeHtml(formatDate(user.lastRealActionAt))}</td>
             </tr>
-          `).join("") || `<tr><td colspan="8" class="muted">No rows</td></tr>`}
+          `).join("") || `<tr><td colspan="9" class="muted">No rows</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -402,6 +488,8 @@ async function loadUsers(params = {}) {
   setView("users");
   const search = params.q ?? "";
   const isAnonymous = params.isAnonymous ?? "";
+  const env = params.env ?? "";
+  state.usersFilters = { q: search, isAnonymous, env };
   elements.usersView.innerHTML = `
     <form id="usersFilterForm" class="toolbar">
       <label>Search<input name="q" value="${escapeHtml(search)}" /></label>
@@ -412,6 +500,7 @@ async function loadUsers(params = {}) {
           <option value="true" ${isAnonymous === "true" ? "selected" : ""}>Anonymous</option>
         </select>
       </label>
+      <label>Environment${renderEnvSelect("env", env)}</label>
       <button class="secondary-button" type="submit">Apply</button>
     </form>
     <div class="muted">Loading…</div>
@@ -420,6 +509,7 @@ async function loadUsers(params = {}) {
   const query = new URLSearchParams();
   if (search) query.set("q", search);
   if (isAnonymous) query.set("isAnonymous", isAnonymous);
+  if (env) query.set("env", env);
   query.set("limit", "100");
   const data = await api(`/admin/users?${query.toString()}`);
 
@@ -433,6 +523,7 @@ async function loadUsers(params = {}) {
           <option value="true" ${isAnonymous === "true" ? "selected" : ""}>Anonymous</option>
         </select>
       </label>
+      <label>Environment${renderEnvSelect("env", env)}</label>
       <button class="secondary-button" type="submit">Apply</button>
     </form>
     ${renderUsersTable(data.users || [])}
@@ -452,15 +543,25 @@ function renderDetailList(entries) {
 
 async function loadUserDetail(uid) {
   setView("userDetail");
+  state.currentUserDetailUid = uid;
   elements.userDetailView.innerHTML = `<div class="muted">Loading…</div>`;
-  const encodedUid = encodeURIComponent(uid);
-  const [data, recipesData, mealsData] = await Promise.all([
-    api(`/admin/users/${encodedUid}`),
-    api(`/admin/users/${encodedUid}/recipes?limit=50`),
-    api(`/admin/users/${encodedUid}/meals?limit=50`),
-  ]);
+  try {
+    const encodedUid = encodeURIComponent(uid);
+    const data = await api(`/admin/users/${encodedUid}`);
+    const [recipesResult, mealsResult] = await Promise.allSettled([
+      api(`/admin/users/${encodedUid}/recipes?limit=50`),
+      api(`/admin/users/${encodedUid}/meals?limit=50`),
+    ]);
+    const recipesData = recipesResult.status === "fulfilled" ? recipesResult.value : { recipes: [] };
+    const mealsData = mealsResult.status === "fulfilled" ? mealsResult.value : { meals: [] };
+    const detailWarnings = [
+      recipesResult.status === "rejected" ? `Recipes failed: ${recipesResult.reason?.message || recipesResult.reason}` : null,
+      mealsResult.status === "rejected" ? `Meals failed: ${mealsResult.reason?.message || mealsResult.reason}` : null,
+    ].filter(Boolean);
   const summary = data.summary || {};
   const economy = data.economy || {};
+  const economyCookies = economy.cookies ?? summary.cookies ?? "";
+  const economyFreeActions = economy.freePremiumActionsRemaining ?? summary.freePremiumActionsRemaining ?? "";
   elements.viewSubtitle.textContent = summary.email || uid;
   elements.userDetailView.innerHTML = `
     <div class="split-grid">
@@ -481,14 +582,31 @@ async function loadUserDetail(uid) {
       <section class="panel">
         <h2>Economy</h2>
         ${renderDetailList([
-          ["Eggs", text(summary.cookies ?? economy.cookies)],
-          ["Free actions", text(summary.freePremiumActionsRemaining ?? economy.freePremiumActionsRemaining)],
+          ["Eggs", text(economyCookies)],
+          ["Free actions", text(economyFreeActions)],
           ["Economy updated", formatDate(summary.economyUpdatedAt ?? economy.updatedAt)],
         ])}
+        <form id="economyEditForm" class="economy-form" data-uid="${escapeHtml(uid)}">
+          <label>
+            Eggs
+            <input name="cookies" type="number" min="0" step="1" value="${escapeHtml(economyCookies)}" />
+          </label>
+          <label>
+            Free actions
+            <input name="freePremiumActionsRemaining" type="number" min="0" step="1" value="${escapeHtml(economyFreeActions)}" />
+          </label>
+          <label class="economy-reason">
+            Reason
+            <input name="reason" maxlength="240" placeholder="Support reason" required />
+          </label>
+          <button class="primary-button" type="submit">Save economy</button>
+          <div id="economyEditStatus" class="form-status" role="status"></div>
+        </form>
       </section>
     </div>
     <section class="panel">
       <h2>Recent activity</h2>
+      ${detailWarnings.length ? `<div class="error-text">${escapeHtml(detailWarnings.join(" · "))}</div>` : ""}
       ${renderActivityTable(data.recentActivity || [])}
     </section>
     <section class="panel">
@@ -504,6 +622,9 @@ async function loadUserDetail(uid) {
       ${renderMealsTable(mealsData.meals || [])}
     </section>
   `;
+  } catch (err) {
+    renderError(err);
+  }
 }
 
 function renderLedgerTable(entries = []) {
@@ -601,31 +722,136 @@ function renderMealsTable(meals = []) {
   `;
 }
 
-async function loadActivity() {
+function renderAiRecipeFilterForm(filters = {}) {
+  return `
+    <form id="aiRecipesFilterForm" class="toolbar">
+      <label>Search<input name="q" value="${escapeHtml(filters.q || "")}" /></label>
+      <label>Kind
+        <select name="kind">
+          <option value="" ${!filters.kind ? "selected" : ""}>All</option>
+          <option value="full_recipe" ${filters.kind === "full_recipe" ? "selected" : ""}>Full recipes</option>
+          <option value="suggestions" ${filters.kind === "suggestions" ? "selected" : ""}>Suggestions</option>
+        </select>
+      </label>
+      <label>User<input name="uid" value="${escapeHtml(filters.uid || "")}" /></label>
+      <label>Environment${renderEnvSelect("env", filters.env || "")}</label>
+      <button class="secondary-button" type="submit">Apply</button>
+    </form>
+  `;
+}
+
+function renderAiGeneratedContentTable(items = []) {
+  return `
+    <div class="table-wrap">
+      <table class="ai-recipes-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Kind</th>
+            <th>Env</th>
+            <th>User</th>
+            <th>Title</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => {
+            const recipe = item.recipe || {};
+            const suggestions = Array.isArray(item.suggestions) ? item.suggestions : [];
+            const tags = Array.isArray(recipe.tags) ? recipe.tags.join(", ") : "";
+            const title = item.title || recipe.title || suggestions.map((suggestion) => suggestion.title).join(" | ");
+            const detailRows = [
+              recipe.cookingTime ? `${recipe.cookingTime} min` : null,
+              recipe.difficulty || null,
+              recipe.servings ? `${recipe.servings} servings` : null,
+              tags || null,
+            ].filter(Boolean);
+            return `
+              <tr>
+                <td>${escapeHtml(formatDate(item.createdAt))}</td>
+                <td>${escapeHtml(text(item.kind))}</td>
+                <td>${escapeHtml(text(item.env))}</td>
+                <td>${escapeHtml(text(item.uid))}</td>
+                <td class="wide-cell">${escapeHtml(text(title))}</td>
+                <td class="wide-cell">
+                  <div>${escapeHtml(detailRows.join(" · ") || text(item.source))}</div>
+                  <details>
+                    <summary>JSON</summary>
+                    <pre class="json-block compact-json">${jsonPreview({
+                      recipe: item.recipe,
+                      suggestions: item.suggestions,
+                      metadata: item.metadata,
+                      objectId: item.objectId,
+                    })}</pre>
+                  </details>
+                </td>
+              </tr>
+            `;
+          }).join("") || `<tr><td colspan="6" class="muted">No rows</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadAiRecipes(params = {}) {
+  setView("aiRecipes");
+  const filters = {
+    ...state.aiRecipesFilters,
+    ...params,
+  };
+  state.aiRecipesFilters = filters;
+  elements.aiRecipesView.innerHTML = `${renderAiRecipeFilterForm(filters)}<div class="muted">Loading…</div>`;
+  const query = new URLSearchParams();
+  for (const key of ["q", "kind", "uid", "env"]) {
+    const value = String(filters[key] || "").trim();
+    if (value) query.set(key, value);
+  }
+  query.set("limit", "100");
+  const data = await api(`/admin/ai-recipes?${query.toString()}`);
+  elements.aiRecipesView.innerHTML = `
+    ${renderAiRecipeFilterForm(filters)}
+    ${renderAiGeneratedContentTable(data.items || [])}
+  `;
+}
+
+function renderActivityFilterForm(filters = {}) {
+  return `
+    <form id="activityFilterForm" class="toolbar">
+      <label>Type<input name="type" value="${escapeHtml(filters.type || "")}" /></label>
+      <label>Action<input name="action" value="${escapeHtml(filters.action || "")}" /></label>
+      <label>Source<input name="source" value="${escapeHtml(filters.source || "")}" /></label>
+      <label>Status
+        <select name="status">
+          <option value="" ${!filters.status ? "selected" : ""}>All</option>
+          <option value="succeeded" ${filters.status === "succeeded" ? "selected" : ""}>Succeeded</option>
+          <option value="failed" ${filters.status === "failed" ? "selected" : ""}>Failed</option>
+          <option value="started" ${filters.status === "started" ? "selected" : ""}>Started</option>
+        </select>
+      </label>
+      <label>User<input name="uid" value="${escapeHtml(filters.uid || "")}" /></label>
+      <label>Environment${renderEnvSelect("env", filters.env || "")}</label>
+      <button class="secondary-button" type="submit">Apply</button>
+    </form>
+  `;
+}
+
+async function loadActivity(params = {}) {
   setView("activity");
-  elements.activityView.innerHTML = `
-    <form id="activityFilterForm" class="toolbar">
-      <label>Type<input name="type" /></label>
-      <label>Action<input name="action" /></label>
-      <label>Source<input name="source" /></label>
-      <label>Status<input name="status" /></label>
-      <label>User<input name="uid" /></label>
-      <button class="secondary-button" type="submit">Apply</button>
-    </form>
-    <div class="muted">Loading…</div>
-  `;
-  const data = await api("/admin/activity-events?limit=100");
-  elements.activityView.innerHTML = `
-    <form id="activityFilterForm" class="toolbar">
-      <label>Type<input name="type" /></label>
-      <label>Action<input name="action" /></label>
-      <label>Source<input name="source" /></label>
-      <label>Status<input name="status" /></label>
-      <label>User<input name="uid" /></label>
-      <button class="secondary-button" type="submit">Apply</button>
-    </form>
-    ${renderActivityTable(data.events || [])}
-  `;
+  const filters = {
+    ...state.activityFilters,
+    ...params,
+  };
+  state.activityFilters = filters;
+  elements.activityView.innerHTML = `${renderActivityFilterForm(filters)}<div class="muted">Loading…</div>`;
+  const query = new URLSearchParams();
+  for (const key of ["type", "action", "source", "status", "uid", "env"]) {
+    const value = String(filters[key] || "").trim();
+    if (value) query.set(key, value);
+  }
+  query.set("limit", "100");
+  const data = await api(`/admin/activity-events?${query.toString()}`);
+  elements.activityView.innerHTML = `${renderActivityFilterForm(filters)}${renderActivityTable(data.events || [])}`;
 }
 
 async function loadAuditLogs() {
@@ -667,10 +893,14 @@ async function loadAuditLogs() {
 
 async function refreshCurrentView() {
   try {
-    if (state.currentView === "dashboard") await loadDashboard();
-    else if (state.currentView === "capabilities") await loadCapabilities();
-    else if (state.currentView === "users") await loadUsers();
-    else if (state.currentView === "activity") await loadActivity();
+    if (state.currentView === "dashboard") await loadDashboard({ env: state.dashboardEnv });
+    else if (state.currentView === "capabilities") await loadCapabilities({ env: state.capabilitiesEnv });
+    else if (state.currentView === "users") await loadUsers(state.usersFilters);
+    else if (state.currentView === "userDetail" && state.currentUserDetailUid) {
+      await loadUserDetail(state.currentUserDetailUid);
+    }
+    else if (state.currentView === "aiRecipes") await loadAiRecipes(state.aiRecipesFilters);
+    else if (state.currentView === "activity") await loadActivity(state.activityFilters);
     else if (state.currentView === "audit") await loadAuditLogs();
   } catch (err) {
     renderError(err);
@@ -683,6 +913,8 @@ function renderError(err) {
       ? elements.usersView
       : state.currentView === "capabilities"
         ? elements.capabilitiesView
+      : state.currentView === "aiRecipes"
+        ? elements.aiRecipesView
       : state.currentView === "activity"
         ? elements.activityView
         : state.currentView === "audit"
@@ -747,47 +979,108 @@ elements.refreshButton.addEventListener("click", () => {
 for (const button of elements.navButtons) {
   button.addEventListener("click", () => {
     const view = button.dataset.view;
-    if (view === "dashboard") void loadDashboard();
-    else if (view === "capabilities") void loadCapabilities();
-    else if (view === "users") void loadUsers();
-    else if (view === "activity") void loadActivity();
+    if (view === "dashboard") void loadDashboard({ env: state.dashboardEnv });
+    else if (view === "capabilities") void loadCapabilities({ env: state.capabilitiesEnv });
+    else if (view === "users") void loadUsers(state.usersFilters);
+    else if (view === "aiRecipes") void loadAiRecipes(state.aiRecipesFilters);
+    else if (view === "activity") void loadActivity(state.activityFilters);
     else if (view === "audit") void loadAuditLogs();
   });
 }
 
 document.addEventListener("submit", (event) => {
+  if (event.target?.id === "dashboardFilterForm") {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    void loadDashboard({
+      env: String(form.get("env") || "").trim(),
+    });
+  }
+
+  if (event.target?.id === "capabilitiesFilterForm") {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    void loadCapabilities({
+      env: String(form.get("env") || "").trim(),
+    });
+  }
+
   if (event.target?.id === "usersFilterForm") {
     event.preventDefault();
     const form = new FormData(event.target);
     void loadUsers({
       q: String(form.get("q") || "").trim(),
       isAnonymous: String(form.get("isAnonymous") || "").trim(),
+      env: String(form.get("env") || "").trim(),
     });
   }
 
   if (event.target?.id === "activityFilterForm") {
     event.preventDefault();
     const form = new FormData(event.target);
-    const query = new URLSearchParams();
-    for (const key of ["type", "action", "source", "status", "uid"]) {
-      const value = String(form.get(key) || "").trim();
-      if (value) query.set(key, value);
+    void loadActivity({
+      type: String(form.get("type") || "").trim(),
+      action: String(form.get("action") || "").trim(),
+      source: String(form.get("source") || "").trim(),
+      status: String(form.get("status") || "").trim(),
+      uid: String(form.get("uid") || "").trim(),
+      env: String(form.get("env") || "").trim(),
+    });
+  }
+
+  if (event.target?.id === "aiRecipesFilterForm") {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    void loadAiRecipes({
+      q: String(form.get("q") || "").trim(),
+      kind: String(form.get("kind") || "").trim(),
+      uid: String(form.get("uid") || "").trim(),
+      env: String(form.get("env") || "").trim(),
+    });
+  }
+
+  if (event.target?.id === "economyEditForm") {
+    event.preventDefault();
+    const form = event.target;
+    const uid = form.dataset.uid;
+    const status = form.querySelector("#economyEditStatus");
+    const submitButton = form.querySelector("button[type='submit']");
+    const formData = new FormData(form);
+    const payload = {
+      cookies: String(formData.get("cookies") || "").trim(),
+      freePremiumActionsRemaining: String(formData.get("freePremiumActionsRemaining") || "").trim(),
+      reason: String(formData.get("reason") || "").trim(),
+    };
+
+    if (!payload.reason) {
+      if (status) status.textContent = "Reason is required.";
+      return;
     }
-    query.set("limit", "100");
-    setView("activity");
-    elements.activityView.innerHTML = `<div class="muted">Loading…</div>`;
-    api(`/admin/activity-events?${query.toString()}`)
-      .then((data) => {
-        elements.activityView.innerHTML = `${renderActivityTable(data.events || [])}`;
+
+    if (submitButton) submitButton.disabled = true;
+    if (status) status.textContent = "Saving...";
+
+    api(`/admin/users/${encodeURIComponent(uid)}/economy`, {
+      method: "PATCH",
+      body: payload,
+    })
+      .then(() => {
+        if (status) status.textContent = "Saved.";
+        return loadUserDetail(uid);
       })
-      .catch(renderError);
+      .catch((err) => {
+        if (status) status.textContent = err?.message || "Save failed.";
+      })
+      .finally(() => {
+        if (submitButton) submitButton.disabled = false;
+      });
   }
 });
 
 document.addEventListener("click", (event) => {
   const uid = event.target?.dataset?.userUid;
   if (uid) {
-    void loadUserDetail(uid);
+    loadUserDetail(uid).catch(renderError);
   }
 });
 

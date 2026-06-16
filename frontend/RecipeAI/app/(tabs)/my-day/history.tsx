@@ -9,6 +9,8 @@ import AppCard from "../../../components/AppCard";
 import MyDayAddMealFlow from "../../../components/MyDayAddMealFlow";
 import MyDayMealEditorModal from "../../../components/MyDayMealEditorModal";
 import { useThemeColors } from "../../../context/ThemeContext";
+import { auth } from "../../../firebaseConfig";
+import { trackActivityEventBestEffort } from "../../../lib/activity/client";
 import {
   loadMyDayMeals,
   getDayKey,
@@ -38,6 +40,24 @@ function hexToRgba(color: string, alpha: number) {
 
   if ([r, g, b].some((value) => Number.isNaN(value))) return color;
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function trackMealHistoryActivity(
+  action: "meal_edited" | "meal_deleted",
+  mealId: string,
+  source: string | null,
+  metadata: Record<string, unknown> = {}
+) {
+  const uid = auth.currentUser?.uid;
+  trackActivityEventBestEffort({
+    auth,
+    type: "meal",
+    action,
+    source: source ?? "manual",
+    objectId: mealId,
+    objectPath: uid ? `users/${uid}/myDayMeals/${mealId}` : null,
+    metadata,
+  });
 }
 
 type DaySummary = {
@@ -468,6 +488,7 @@ export default function MyDayHistoryScreen() {
           style: "destructive",
           onPress: async () => {
             await removeMeal(mealId);
+            trackMealHistoryActivity("meal_deleted", mealId, null);
             await refreshHistory();
           },
         },
@@ -681,6 +702,9 @@ export default function MyDayHistoryScreen() {
               }
             : undefined,
         ingredients: isRecipeMeal ? [] : safeIngredients,
+      });
+      trackMealHistoryActivity("meal_edited", editingMealId, editingMealSource, {
+        nutritionMode: mealEditNutritionMode,
       });
       closeMealEditor();
       await refreshHistory();

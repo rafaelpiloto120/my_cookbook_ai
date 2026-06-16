@@ -69,6 +69,7 @@ import {
   fetchEconomySnapshot,
   recordEconomyEvent,
 } from "../../lib/economy/client";
+import { trackActivityEventBestEffort } from "../../lib/activity/client";
 import { useSyncEngine } from "../../lib/sync/SyncEngine";
 import { refreshLocalReminderSchedule } from "../../lib/notifications/localNotifications";
 
@@ -610,6 +611,36 @@ export default function MyDayScreen() {
     return i18n.language || "en";
   }, [i18n.language]);
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
+
+  const trackMyDayActivity = useCallback(
+    (input: {
+      type: string;
+      action: string;
+      source?: string | null;
+      objectId?: string | null;
+      objectCollection?: "myDayMeals" | "myDayWeights" | "myDayProfile";
+      metadata?: Record<string, unknown>;
+    }) => {
+      const uid = auth.currentUser?.uid;
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl: API_BASE_URL,
+        appEnv,
+        type: input.type,
+        action: input.action,
+        source: input.source ?? "manual",
+        objectId: input.objectId ?? null,
+        objectPath:
+          uid && input.objectCollection && input.objectId
+            ? `users/${uid}/${input.objectCollection}/${input.objectId}`
+            : uid && input.objectCollection === "myDayProfile"
+              ? `users/${uid}/myDayProfile/default`
+              : null,
+        metadata: input.metadata ?? {},
+      });
+    },
+    [appEnv]
+  );
 
   const todayLabel = useMemo(
     () =>
@@ -1233,6 +1264,12 @@ export default function MyDayScreen() {
             if (typeof (syncEngine as any)?.markMyDayMealDeleted === "function") {
               await (syncEngine as any).markMyDayMealDeleted(mealId);
             }
+            trackMyDayActivity({
+              type: "meal",
+              action: "meal_deleted",
+              objectId: mealId,
+              objectCollection: "myDayMeals",
+            });
             await refreshDay();
           },
         },
@@ -1360,6 +1397,16 @@ export default function MyDayScreen() {
           ...updatedMeal,
         });
       }
+      trackMyDayActivity({
+        type: "meal",
+        action: "meal_edited",
+        source: editingMealSource ?? "manual",
+        objectId: editingMealId,
+        objectCollection: "myDayMeals",
+        metadata: {
+          nutritionMode: mealEditNutritionMode,
+        },
+      });
       await refreshDay();
       setEditMealVisible(false);
       setEditingMealId(null);
@@ -1441,6 +1488,16 @@ export default function MyDayScreen() {
     if (typeof (syncEngine as any)?.markMyDayProfileDirty === "function") {
       await (syncEngine as any).markMyDayProfileDirty(nextProfile);
     }
+    trackMyDayActivity({
+      type: "profile",
+      action: hasMyDaySetup(profile) ? "health_goals_updated" : "health_goals_created",
+      source: "my_day",
+      objectCollection: "myDayProfile",
+      metadata: {
+        goalType: nextProfile.goalType,
+        planMode: healthPlanMode,
+      },
+    });
     if (Number.isFinite(currentWeight) && currentWeight > 0) {
       const createdWeightLog = await addWeightLog(currentWeight, new Date(), healthMeasurement);
       if (typeof (syncEngine as any)?.markMyDayWeightDirty === "function") {

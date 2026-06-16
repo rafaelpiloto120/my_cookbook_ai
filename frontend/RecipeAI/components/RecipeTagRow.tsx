@@ -16,15 +16,53 @@ const ROW_HEIGHT = 26;
 const TAG_GAP = 6;
 const MIN_TRUNCATED_TAG_WIDTH = 34;
 
+const PRESERVED_TAGS = [
+  "AI Generated",
+  "Gerado por IA",
+  "Generado por IA",
+  "Généré par IA",
+  "KI-generiert",
+  "Generato da IA",
+];
+
+export function formatRecipeTagLabel(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const preserved = PRESERVED_TAGS.find((tag) => tag.toLowerCase() === trimmed.toLowerCase());
+  if (preserved) return preserved;
+  if (/^[a-z][a-z0-9_-]*\.[a-z0-9_.-]+$/i.test(trimmed)) return "";
+
+  const cleaned = trimmed
+    .replace(/[_]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s'’+-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+
+  return cleaned.replace(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu, (word) => {
+    if (word.length <= 3 && word === word.toUpperCase()) return word;
+    return word.charAt(0).toLocaleUpperCase() + word.slice(1).toLocaleLowerCase();
+  });
+}
+
 export default function RecipeTagRow({ tags }: Props) {
   const { secondary, onSecondary } = useThemeColors();
   const [containerWidth, setContainerWidth] = useState(0);
   const [tagWidths, setTagWidths] = useState<Record<string, number>>({});
 
-  const uniqueTags = useMemo(
-    () => tags.map((tag) => String(tag || "").trim()).filter(Boolean),
-    [tags]
-  );
+  const uniqueTags = useMemo(() => {
+    const seen = new Set<string>();
+    return tags
+      .map(formatRecipeTagLabel)
+      .filter(Boolean)
+      .filter((tag) => {
+        const key = tag.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [tags]);
 
   const onContainerLayout = (event: LayoutChangeEvent) => {
     const width = Math.floor(event.nativeEvent.layout.width);

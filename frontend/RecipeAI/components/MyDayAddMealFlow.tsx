@@ -58,6 +58,7 @@ import { useSyncEngine } from "../lib/sync/SyncEngine";
 import { formatEconomyUnits } from "../lib/economy/format";
 import { maybeShowEggsUnlockedPrompt } from "../lib/economy/unlockPrompt";
 import { refreshLocalReminderSchedule } from "../lib/notifications/localNotifications";
+import { trackActivityEventBestEffort } from "../lib/activity/client";
 import { getDeviceId } from "../utils/deviceId";
 
 type Mode = "photo" | "text" | "recipe";
@@ -131,6 +132,29 @@ function nutrientValueForDisplay(value: number, measurement: MeasurementSystem) 
   if (!Number.isFinite(value)) return "0";
   if (measurement !== "US") return `${Math.round(value)}`;
   return formatDisplayQuantity(value / GRAMS_PER_OUNCE);
+}
+
+function trackMealLoggedActivity(
+  meal: { id: string; dayKey?: string; ingredients?: unknown[]; recipeId?: string },
+  source: "text" | "photo" | "recipe",
+  metadata: Record<string, unknown> = {}
+) {
+  const uid = auth.currentUser?.uid;
+  trackActivityEventBestEffort({
+    auth,
+    backendUrl: API_BASE_URL,
+    type: "meal",
+    action: "meal_logged",
+    source,
+    objectId: meal.id,
+    objectPath: uid ? `users/${uid}/myDayMeals/${meal.id}` : null,
+    metadata: {
+      dayKey: meal.dayKey ?? null,
+      ingredientCount: Array.isArray(meal.ingredients) ? meal.ingredients.length : null,
+      recipeId: meal.recipeId ?? null,
+      ...metadata,
+    },
+  });
 }
 
 function unitForDisplay(unit: string, measurement: MeasurementSystem) {
@@ -1055,6 +1079,9 @@ export default function MyDayAddMealFlow({
           return;
         }
         await (syncEngine as any)?.markMyDayMealDirty?.(syncedMeal);
+        trackMealLoggedActivity(syncedMeal, "text", {
+          nutritionMode,
+        });
       } else if (reviewMode === "photo") {
         const saved = await addPhotoMeal(
           {
@@ -1076,6 +1103,9 @@ export default function MyDayAddMealFlow({
           return;
         }
         await (syncEngine as any)?.markMyDayMealDirty?.(saved);
+        trackMealLoggedActivity(saved, "photo", {
+          nutritionMode,
+        });
       } else if (selectedRecipe) {
         const perServingNutrition = {
           caloriesPerServing: Math.round(parseNumber(nutritionMode === "manual" ? reviewBase?.calories : reviewDraft.calories, 0)),
@@ -1128,6 +1158,10 @@ export default function MyDayAddMealFlow({
           }
         }
         await (syncEngine as any)?.markMyDayMealDirty?.(savedMeal);
+        trackMealLoggedActivity(savedMeal, "recipe", {
+          nutritionMode,
+          recipeId: selectedRecipe.id ?? savedMeal.recipeId ?? null,
+        });
       }
       await recordMealMissionProgress();
       await finishSaved();

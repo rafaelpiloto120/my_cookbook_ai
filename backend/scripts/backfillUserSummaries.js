@@ -6,6 +6,8 @@ const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "recipeai-frontend";
 const FIRESTORE_DB_ID = process.env.FIREBASE_DATABASE_ID || "(default)";
 const USER_SUMMARIES_COLLECTION =
   process.env.FIREBASE_USER_SUMMARIES_COLLECTION || "userSummaries";
+const ACTIVITY_EVENTS_COLLECTION =
+  process.env.FIREBASE_ACTIVITY_EVENTS_COLLECTION || "activityEvents";
 const PAGE_SIZE = 1000;
 
 function parseArgs(argv) {
@@ -146,15 +148,91 @@ async function countCollection(collectionRef) {
   };
 }
 
+function normalizeEnv(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
+async function getActivityEnvSummary(db, uid) {
+  try {
+    const snap = await db
+      .collection(ACTIVITY_EVENTS_COLLECTION)
+      .where("uid", "==", uid)
+      .limit(1000)
+      .get();
+
+    const envsByLastSeen = new Map();
+    let firstSeenEnv = null;
+    let firstSeenEnvAt = null;
+    let lastSeenEnv = null;
+    let lastSeenEnvAt = null;
+    let latestActivityAt = null;
+
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+      const env = normalizeEnv(data.env);
+      const createdAt = millisFromValue(data.createdAt) || millisFromValue(data._serverCreatedAt);
+      if (!env) return;
+
+      const previousLast = envsByLastSeen.get(env);
+      envsByLastSeen.set(
+        env,
+        maxTimestamp(previousLast, createdAt) || previousLast || createdAt || 0
+      );
+
+      latestActivityAt = maxTimestamp(latestActivityAt, createdAt);
+
+      if (createdAt !== null && (firstSeenEnvAt === null || createdAt < firstSeenEnvAt)) {
+        firstSeenEnv = env;
+        firstSeenEnvAt = createdAt;
+      }
+      if (createdAt !== null && (lastSeenEnvAt === null || createdAt > lastSeenEnvAt)) {
+        lastSeenEnv = env;
+        lastSeenEnvAt = createdAt;
+      }
+    });
+
+    const seenEnvList = Array.from(envsByLastSeen.entries())
+      .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+      .map(([env]) => env);
+
+    return {
+      seenEnvList,
+      firstSeenEnv,
+      firstSeenEnvAt,
+      lastSeenEnv,
+      lastSeenEnvAt,
+      latestActivityAt,
+      activityEventCount: snap.size,
+    };
+  } catch (err) {
+    console.warn("[backfillUserSummaries] activity env inference skipped", {
+      uid,
+      message: err?.message || String(err),
+    });
+    return {
+      seenEnvList: [],
+      firstSeenEnv: null,
+      firstSeenEnvAt: null,
+      lastSeenEnv: null,
+      lastSeenEnvAt: null,
+      latestActivityAt: null,
+      activityEventCount: 0,
+    };
+  }
+}
+
 async function buildSummaryForUser(db, user) {
   const base = userSummaryFromAuth(user);
   const uid = user.uid;
 
-  const [economySnap, recipes, myDayMeals, myDayWeights] = await Promise.all([
+  const [economySnap, recipes, myDayMeals, myDayWeights, activityEnv] = await Promise.all([
     db.doc(`users/${uid}/economy/default`).get(),
     countCollection(db.collection(`users/${uid}/recipes`)),
     countCollection(db.collection(`users/${uid}/myDayMeals`)),
     countCollection(db.collection(`users/${uid}/myDayWeights`)),
+    getActivityEnvSummary(db, uid),
   ]);
 
   const economy = economySnap.exists ? economySnap.data() || {} : {};
@@ -174,10 +252,11 @@ async function buildSummaryForUser(db, user) {
   const lastRealActionAt = maxTimestamp(
     recipes.latestAt,
     myDayMeals.latestAt,
-    myDayWeights.latestAt
+    myDayWeights.latestAt,
+    activityEnv.latestActivityAt
   );
 
-  return {
+  const summary = {
     ...base,
     recipeCount: recipes.count,
     mealCount: myDayMeals.count,
@@ -190,6 +269,19 @@ async function buildSummaryForUser(db, user) {
     backfilledAt: Date.now(),
     _serverBackfilledAt: admin.firestore.FieldValue.serverTimestamp(),
   };
+
+  if (activityEnv.seenEnvList.length > 0) {
+    summary.seenEnvList = activityEnv.seenEnvList;
+    summary.lastSeenEnv = activityEnv.lastSeenEnv;
+    summary.lastSeenEnvAt = activityEnv.lastSeenEnvAt;
+    summary.firstSeenEnv = activityEnv.firstSeenEnv;
+    summary.firstSeenEnvAt = activityEnv.firstSeenEnvAt;
+    summary.primaryEnv = activityEnv.seenEnvList.includes("production")
+      ? "production"
+      : activityEnv.seenEnvList[0];
+  }
+
+  return summary;
 }
 
 async function listTargetUsers(uid) {
@@ -244,6 +336,8 @@ async function main() {
           cookies: summary.cookies,
           freePremiumActionsRemaining: summary.freePremiumActionsRemaining,
           lastRealActionAt: summary.lastRealActionAt,
+          seenEnvList: summary.seenEnvList || [],
+          lastSeenEnv: summary.lastSeenEnv || null,
         });
       } else {
         await db.collection(USER_SUMMARIES_COLLECTION).doc(user.uid).set(summary, { merge: true });

@@ -14,6 +14,7 @@ import {
   User,
 } from "firebase/auth";
 import { auth } from "../firebaseConfig";
+import { trackActivityEventBestEffort } from "../lib/activity/client";
 import { LAST_MAIN_TAB_KEY } from "../lib/navigation/lastMainTab";
 import { syncEngine } from "../lib/sync/SyncEngine";
 
@@ -353,6 +354,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           email: signInResult.user.email,
           isAnonymous: signInResult.user.isAnonymous,
         });
+        trackActivityEventBestEffort({
+          auth,
+          type: "auth",
+          action: "login",
+          source: "email_password",
+          objectId: signInResult.user.uid,
+          metadata: {
+            isAnonymous: signInResult.user.isAnonymous,
+          },
+        });
         await finishManagedAuthTransition(signInResult.user, "Loading your account...");
         return signInResult.user;
       } catch (error) {
@@ -365,6 +376,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       uid: result.user.uid,
       email: result.user.email,
       isAnonymous: result.user.isAnonymous,
+    });
+    trackActivityEventBestEffort({
+      auth,
+      type: "auth",
+      action: "login",
+      source: "email_password",
+      objectId: result.user.uid,
+      metadata: {
+        isAnonymous: result.user.isAnonymous,
+      },
     });
     setUser(result.user);
     return result.user;
@@ -383,6 +404,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           email: result.user.email,
           isAnonymous: result.user.isAnonymous,
         });
+        trackActivityEventBestEffort({
+          auth,
+          type: "auth",
+          action: "login",
+          source: "google",
+          objectId: result.user.uid,
+          metadata: {
+            isAnonymous: result.user.isAnonymous,
+            linked: true,
+          },
+        });
         setUser(result.user);
         return result.user;
       } catch (error: any) {
@@ -392,6 +424,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         ) {
           console.log("[AuthContext] Google provider already linked/in use; signing in with Google");
           const result = await signInWithCredential(auth, googleCredential);
+          trackActivityEventBestEffort({
+            auth,
+            type: "auth",
+            action: "login",
+            source: "google",
+            objectId: result.user.uid,
+            metadata: {
+              isAnonymous: result.user.isAnonymous,
+            },
+          });
           setUser(result.user);
           return result.user;
         }
@@ -410,6 +452,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           uid: result.user.uid,
           email: result.user.email,
           isAnonymous: result.user.isAnonymous,
+        });
+        trackActivityEventBestEffort({
+          auth,
+          type: "auth",
+          action: "login",
+          source: "google",
+          objectId: result.user.uid,
+          metadata: {
+            isAnonymous: result.user.isAnonymous,
+            linked: true,
+          },
         });
         setUser(result.user);
         return result.user;
@@ -433,6 +486,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
               email: signInResult.user.email,
               isAnonymous: signInResult.user.isAnonymous,
             });
+            trackActivityEventBestEffort({
+              auth,
+              type: "auth",
+              action: "login",
+              source: "google",
+              objectId: signInResult.user.uid,
+              metadata: {
+                isAnonymous: signInResult.user.isAnonymous,
+              },
+            });
             await finishManagedAuthTransition(signInResult.user, "Loading your account...");
             return signInResult.user;
           } catch (fallbackErr) {
@@ -452,12 +515,32 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       email: result.user.email,
       isAnonymous: result.user.isAnonymous,
     });
+    trackActivityEventBestEffort({
+      auth,
+      type: "auth",
+      action: "login",
+      source: "google",
+      objectId: result.user.uid,
+      metadata: {
+        isAnonymous: result.user.isAnonymous,
+      },
+    });
     setUser(result.user);
     return result.user;
   };
 
   const logout = async () => {
     console.log("[AuthContext] logout initiated");
+    const logoutUid = auth.currentUser?.uid ?? user?.uid ?? null;
+    if (logoutUid) {
+      trackActivityEventBestEffort({
+        auth,
+        type: "auth",
+        action: "logout",
+        source: "profile",
+        objectId: logoutUid,
+      });
+    }
     logoutAnonBootstrapRef.current = true;
     setLoading(true);
     setLoadingMessage("Setting up a fresh session...");

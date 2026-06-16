@@ -67,6 +67,7 @@ import {
   resolveRecipeNutritionEstimate,
   SavedRecipe,
 } from "../lib/myDayRecipes";
+import { trackActivityEventBestEffort } from "../lib/activity/client";
 
 const defaultImage = require("../assets/default_recipe.png");
 const RECIPE_TAG_MAX_LENGTH = 32;
@@ -1321,6 +1322,25 @@ export default function AddRecipe() {
       } catch (e) {
         console.warn("[AddRecipe] analytics logging failed", e);
       }
+
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "recipe",
+        action: editingRecipe ? "recipe_edited" : "recipe_created",
+        source: "manual",
+        objectId: newRecipe.id,
+        objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/recipes/${newRecipe.id}` : null,
+        metadata: {
+          title: newRecipe.title,
+          ingredientCount: newRecipe.ingredients.length,
+          stepCount: newRecipe.steps.length,
+          tagCount: newRecipe.tags.length,
+          cookbookCount: newRecipe.cookbooks.length,
+          hasImage: !!finalImageUri,
+        },
+      });
 
       try {
         if (backendUrl) {

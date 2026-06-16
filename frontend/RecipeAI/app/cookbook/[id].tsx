@@ -49,6 +49,7 @@ import {
 } from "../../lib/economy/client";
 import { normalizeRecipeDifficulty } from "../../lib/recipes/difficulty";
 import { getApiBaseUrl } from "../../lib/config/api";
+import { trackActivityEventBestEffort } from "../../lib/activity/client";
 
 
 const difficultyMap = (t: any) => ({
@@ -576,6 +577,20 @@ export default function CookbookDetail() {
 
       setCookbookName(newName.trim());
       setCookbookImage(finalCookbookImage);
+      trackActivityEventBestEffort({
+        auth,
+        backendUrl,
+        appEnv,
+        type: "cookbook",
+        action: "cookbook_edited",
+        source: "cookbook_detail",
+        objectId: String(id),
+        objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/cookbooks/${id}` : null,
+        metadata: {
+          name: newName.trim(),
+          hasImage: !!finalCookbookImage,
+        },
+      });
       setEditVisible(false);
     } catch (err) {
       console.error("Error updating cookbook name:", err);

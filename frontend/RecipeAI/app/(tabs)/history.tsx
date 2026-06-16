@@ -54,6 +54,7 @@ import InsufficientCookiesModal from "../../components/InsufficientCookiesModal"
 import EconomyHeaderAlertButton from "../../components/EconomyHeaderAlertButton";
 import { formatEconomyUnits } from "../../lib/economy/format";
 import { maybeShowEggsUnlockedPrompt } from "../../lib/economy/unlockPrompt";
+import { trackActivityEventBestEffort } from "../../lib/activity/client";
 
 const defaultImage = require("../../assets/default_recipe.png");
 
@@ -253,6 +254,36 @@ export default function History() {
   const backendUrl = getResolvedApiBaseUrl()!;
   const appEnv = process.env.EXPO_PUBLIC_APP_ENV ?? "local";
   const firebaseAuth = getAuth();
+
+  const trackHistoryActivity = useCallback(
+    (
+      input: {
+        type: string;
+        action: string;
+        source?: string | null;
+        objectId?: string | null;
+        objectCollection?: "recipes" | "cookbooks";
+        metadata?: Record<string, unknown>;
+      }
+    ) => {
+      const uid = firebaseAuth.currentUser?.uid;
+      trackActivityEventBestEffort({
+        auth: firebaseAuth,
+        backendUrl,
+        appEnv,
+        type: input.type,
+        action: input.action,
+        source: input.source ?? "manual",
+        objectId: input.objectId ?? null,
+        objectPath:
+          uid && input.objectCollection && input.objectId
+            ? `users/${uid}/${input.objectCollection}/${input.objectId}`
+            : null,
+        metadata: input.metadata ?? {},
+      });
+    },
+    [appEnv, backendUrl, firebaseAuth]
+  );
 
   const getErrorMessageFromResponse = (data: any): string | null => {
     if (!data) return null;
@@ -797,6 +828,15 @@ export default function History() {
       cookbookId: newBook.id,
       cookbookName: newBook.name,
     });
+    trackHistoryActivity({
+      type: "cookbook",
+      action: "cookbook_created",
+      objectId: newBook.id,
+      objectCollection: "cookbooks",
+      metadata: {
+        name: newBook.name,
+      },
+    });
 
     try {
       if (backendUrl) {
@@ -917,6 +957,17 @@ export default function History() {
         // how many recipes remain after deletion
         remainingRecipes: updated.length,
       });
+      trackHistoryActivity({
+        type: "recipe",
+        action: "recipe_deleted",
+        source: "history",
+        objectId: deleteTarget.id,
+        objectCollection: "recipes",
+        metadata: {
+          title: targetRecipe?.title ?? null,
+          remainingRecipes: updated.length,
+        },
+      });
     } else {
       // capture the cookbook before removing it, so we can log useful metadata
       const targetCookbook =
@@ -933,6 +984,17 @@ export default function History() {
         cookbookId: deleteTarget.id,
         cookbookName: targetCookbook?.name ?? null,
         remainingCookbooks: updated.length,
+      });
+      trackHistoryActivity({
+        type: "cookbook",
+        action: "cookbook_deleted",
+        source: "history",
+        objectId: deleteTarget.id,
+        objectCollection: "cookbooks",
+        metadata: {
+          name: targetCookbook?.name ?? null,
+          remainingCookbooks: updated.length,
+        },
       });
     }
 

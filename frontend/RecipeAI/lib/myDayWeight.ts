@@ -1,6 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { nanoid } from "nanoid/non-secure";
 
+import { auth } from "../firebaseConfig";
+import { trackActivityEventBestEffort } from "./activity/client";
 import { MeasurementSystem, normalizeMeasurementSystem } from "./myDay";
 
 export type MyDayWeightLog = {
@@ -130,6 +132,18 @@ export async function addWeightLog(
   const withoutSameDay = logs.filter((log) => log.dayKey !== dayKey);
   const next = [...withoutSameDay, nextLog].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
   await saveWeightLogs(next);
+  trackActivityEventBestEffort({
+    auth,
+    type: "weight",
+    action: "weight_logged",
+    source: "manual",
+    objectId: nextLog.id,
+    objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/myDayWeights/${nextLog.id}` : null,
+    metadata: {
+      dayKey: nextLog.dayKey,
+      measurement,
+    },
+  });
   return nextLog;
 }
 
@@ -160,6 +174,18 @@ export async function updateWeightLog(
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 
   await saveWeightLogs(next);
+  trackActivityEventBestEffort({
+    auth,
+    type: "weight",
+    action: "weight_edited",
+    source: "manual",
+    objectId: updatedLog.id,
+    objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/myDayWeights/${updatedLog.id}` : null,
+    metadata: {
+      dayKey: updatedLog.dayKey,
+      measurement,
+    },
+  });
   return updatedLog;
 }
 
@@ -167,6 +193,17 @@ export async function deleteWeightLog(id: string): Promise<void> {
   const logs = await loadWeightLogs();
   const next = logs.filter((log) => log.id !== id);
   await saveWeightLogs(next);
+  trackActivityEventBestEffort({
+    auth,
+    type: "weight",
+    action: "weight_deleted",
+    source: "manual",
+    objectId: id,
+    objectPath: auth.currentUser?.uid ? `users/${auth.currentUser.uid}/myDayWeights/${id}` : null,
+    metadata: {
+      dayKey: logs.find((log) => log.id === id)?.dayKey ?? null,
+    },
+  });
 
   try {
     const raw = await AsyncStorage.getItem(MY_DAY_WEIGHT_SYNC_KEY);

@@ -242,9 +242,17 @@ select {
 
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 360px) repeat(4, minmax(130px, 180px)) auto;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
   align-items: end;
+}
+
+.compact-toolbar {
+  grid-template-columns: minmax(180px, 240px) auto minmax(180px, 1fr);
+}
+
+.toolbar-note {
+  align-self: center;
 }
 
 .table-wrap {
@@ -279,6 +287,26 @@ th {
 
 td {
   color: var(--text);
+}
+
+.wide-cell {
+  max-width: 520px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ai-recipes-table {
+  min-width: 1040px;
+}
+
+details {
+  margin-top: 6px;
+}
+
+summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 750;
 }
 
 tr:last-child td {
@@ -355,6 +383,25 @@ tr:last-child td {
   overflow-wrap: anywhere;
 }
 
+.economy-form {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.economy-reason,
+.form-status {
+  grid-column: 1 / -1;
+}
+
+.form-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .json-block {
   margin: 0;
   max-height: 360px;
@@ -365,6 +412,12 @@ tr:last-child td {
   padding: 12px;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.compact-json {
+  margin-top: 8px;
+  max-height: 260px;
+  max-width: min(760px, 70vw);
 }
 
 @media (max-width: 1080px) {
